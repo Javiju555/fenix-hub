@@ -1,0 +1,14 @@
+{
+  "name": "fenix-hub",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "dev:vite": "bun --cwd frontend run dev",
+    "build:vite": "bun --cwd frontend run build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

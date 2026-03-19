@@ -5,20 +5,24 @@
   "identifier": "dev.fenix.hub",
   "build": {
     "frontendDist": "../frontend/dist",
-    "devUrl": "http://localhost:1421"
+    "devUrl": "http://localhost:1421",
+    "beforeDevCommand": "cd frontend && bun run dev --host --port 1421",
+    "beforeBuildCommand": "cd frontend && bun run build"
   },
   "app": {
     "windows": [
       {
         "label": "hub",
         "title": "FenixHub",
-        "width": 480,
-        "height": 600,
-        "resizable": false,
+        "width": 820,
+        "height": 185,
+        "resizable": true,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
-        "visible": false
+        "visible": true,
+        "center": true,
+        "skipTaskbar": true
       }
     ],
     "security": {

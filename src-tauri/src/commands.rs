@@ -43,7 +43,8 @@ pub async fn get_identity(state: State<'_, HubState>) -> Result<IdentityInfo, St
 
 #[derive(Deserialize)]
 pub struct SetupIdentityArgs {
-    pub passphrase: String,
+    /// None means "keep existing key, only update device_name"
+    pub passphrase: Option<String>,
     pub device_name: String,
 }
 
@@ -53,8 +54,16 @@ pub async fn setup_identity(
     app: AppHandle,
     state: State<'_, HubState>,
 ) -> Result<IdentityInfo, String> {
-    let identity = GroupIdentity::from_passphrase(&args.passphrase, &args.device_name)
-        .map_err(|e| e.to_string())?;
+    let identity = if let Some(ref pass) = args.passphrase {
+        GroupIdentity::from_passphrase(pass, &args.device_name)
+            .map_err(|e| e.to_string())?
+    } else {
+        // No new passphrase — keep existing group key, just rename device
+        let existing = state.identity.read().await.clone()
+            .ok_or("No existing identity to update")?;
+        GroupIdentity::from_key_hex(&existing.key_hex(), &args.device_name)
+            .map_err(|e| e.to_string())?
+    };
     let identity = Arc::new(identity);
 
     // Persist derived key to disk (passphrase never saved)
@@ -218,6 +227,17 @@ pub async fn stop_server(state: State<'_, HubState>) -> Result<(), String> {
     *state.server_port.write().await = None;
 
     tracing::info!("Hub server stopped, all announcements removed");
+    Ok(())
+}
+
+/// Copy a local item directly to the system clipboard (click-to-copy).
+#[tauri::command]
+pub async fn write_local_to_clipboard(id: String, state: State<'_, HubState>) -> Result<(), String> {
+    let content = state.local_content.read().await;
+    let item = content.get(&id).ok_or("Content not found")?;
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(&item.preview).map_err(|e| e.to_string())?;
+    tracing::info!("Copied local item {} to clipboard", id);
     Ok(())
 }
 

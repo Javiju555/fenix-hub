@@ -56,6 +56,7 @@ pub fn run() {
             commands::stop_server,
             commands::pull_peer_content,
             commands::get_peers,
+            commands::write_local_to_clipboard,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FenixHub");
