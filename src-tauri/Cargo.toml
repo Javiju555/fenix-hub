@@ -17,9 +17,15 @@ tauri-plugin-shell = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+mdns-sd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+
+# Cross-platform clipboard (Wayland/X11/Windows)
+arboard = "3"
+# Config/data directory resolution (~/.config, %APPDATA%, etc.)
+dirs = "6"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -13,10 +13,10 @@ use fenix_hub_core::protocol::Announcement;
 /// Events emitted by the daemon to the Tauri frontend (via Tauri event system).
 #[derive(Debug, Clone)]
 pub enum DaemonEvent {
-    /// A peer announced new content available for broadcast pull
-    PeerContentAvailable(Announcement),
+    /// A peer announced new content available for broadcast pull (includes their IP for HTTP pull)
+    PeerContentAvailable { announcement: Announcement, peer_ip: std::net::IpAddr },
     /// A peer sent a direct notification targeting this device
-    DirectNotifyReceived(Announcement),
+    DirectNotifyReceived { announcement: Announcement, peer_ip: std::net::IpAddr },
     /// A peer's content disappeared (they closed their hub)
     PeerContentGone { content_id: String, device_name: String },
     /// A new device in our group came online

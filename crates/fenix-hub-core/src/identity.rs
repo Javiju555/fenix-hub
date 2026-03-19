@@ -7,10 +7,9 @@
 /// The group key is used as an HMAC-SHA256 key to sign all mDNS announcements and HTTP
 /// requests. Strangers on the same LAN with a different passphrase cannot interact.
 
-use argon2::{Argon2, password_hash::SaltString};
+use argon2::Argon2;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use rand::rngs::OsRng;
 use anyhow::Result;
 
 const ARGON2_SALT: &[u8] = b"fenixhub-v1-salt"; // fixed salt — key is deterministic per passphrase
@@ -29,34 +28,40 @@ pub struct GroupIdentity {
 impl GroupIdentity {
     /// Derive a group identity from a passphrase.
     /// This is deterministic: same passphrase always produces same group_key.
-    /// Uses Argon2id with a fixed salt — the passphrase is the only variable.
     pub fn from_passphrase(passphrase: &str, device_name: &str) -> Result<Self> {
         let argon2 = Argon2::default();
         let mut group_key = [0u8; 32];
-
         argon2
-            .hash_password_into(
-                passphrase.as_bytes(),
-                ARGON2_SALT,
-                &mut group_key,
-            )
+            .hash_password_into(passphrase.as_bytes(), ARGON2_SALT, &mut group_key)
             .map_err(|e| anyhow::anyhow!("Key derivation failed: {}", e))?;
-
-        Ok(Self {
-            group_key,
-            device_name: device_name.to_string(),
-        })
+        Ok(Self { group_key, device_name: device_name.to_string() })
     }
 
-    /// Returns the group key as a hex string (used in mDNS TXT records as group identifier).
-    /// This is safe to advertise — it allows peers to recognize the group without
-    /// being able to derive the passphrase (one-way).
+    /// Restore identity from a previously persisted key (hex-encoded).
+    /// Used on startup to avoid re-deriving from passphrase.
+    pub fn from_key_hex(key_hex: &str, device_name: &str) -> Result<Self> {
+        let bytes = hex::decode(key_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid key hex: {}", e))?;
+        if bytes.len() != 32 {
+            anyhow::bail!("Key must be 32 bytes, got {}", bytes.len());
+        }
+        let mut group_key = [0u8; 32];
+        group_key.copy_from_slice(&bytes);
+        Ok(Self { group_key, device_name: device_name.to_string() })
+    }
+
+    /// Returns the full group key as hex (for persistence — stored locally, never sent).
+    pub fn key_hex(&self) -> String {
+        hex::encode(self.group_key)
+    }
+
+    /// Returns the first 16 bytes of group_key as hex (public group identifier).
+    /// Safe to advertise in mDNS — peers use it to filter foreign groups.
     pub fn group_id(&self) -> String {
-        hex::encode(&self.group_key[..16]) // first 16 bytes as public group ID
+        hex::encode(&self.group_key[..16])
     }
 
-    /// Signs a message (e.g. announcement JSON) with HMAC-SHA256 using the full group key.
-    /// Receivers verify this signature to ensure the sender knows the same passphrase.
+    /// Signs a message with HMAC-SHA256 using the full group key.
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
         let mut mac = HmacSha256::new_from_slice(&self.group_key)
             .expect("HMAC key size is always valid");
