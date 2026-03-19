@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "crates/fenix-hub-core",
+    "crates/fenix-hub-daemon",
+    "src-tauri",
+]
+resolver = "2"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server (ephemeral content server)
+axum = "0.8"
+
+# HTTP client (pull content from peers)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# mDNS discovery & announcement
+mdns-sd = "0.13"
+
+# Key derivation (passphrase → group_key)
+argon2 = "0.5"
+
+# HMAC authentication
+hmac = "0.12"
+sha2 = "0.10"
+
+# Crypto utilities
+rand = "0.8"
+hex = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"

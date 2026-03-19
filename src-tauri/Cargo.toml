@@ -1,0 +1,25 @@
+[package]
+name = "fenix-hub-app"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fenix_hub_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+fenix-hub-core = { path = "../crates/fenix-hub-core" }
+fenix-hub-daemon = { path = "../crates/fenix-hub-daemon" }
+
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

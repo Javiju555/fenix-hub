@@ -1,0 +1,315 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: rgba(3, 8, 22, 0.96);
+  --surface: rgba(255, 255, 255, 0.04);
+  --surface-hover: rgba(255, 255, 255, 0.08);
+  --border: rgba(255, 255, 255, 0.08);
+  --accent: #5e8cf4;
+  --accent-dim: rgba(94, 140, 244, 0.15);
+  --text: #e8eaf0;
+  --text-dim: rgba(232, 234, 240, 0.45);
+  --danger: rgba(244, 94, 94, 0.8);
+  --radius: 10px;
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+}
+
+body {
+  background: var(--bg);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Setup screen ───────────────────────────────────────────────────────────── */
+
+.hub-setup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 48px 32px;
+  gap: 16px;
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.setup-logo {
+  font-size: 48px;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.hub-setup h1 {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+
+.setup-subtitle {
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
+}
+
+.hub-setup form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.hub-setup label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hub-setup label span {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.hub-setup label small {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+/* ── Inputs & buttons ───────────────────────────────────────────────────────── */
+
+input, textarea {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  width: 100%;
+  outline: none;
+  resize: none;
+  transition: border-color 0.15s;
+}
+
+input:focus, textarea:focus {
+  border-color: var(--accent);
+}
+
+input::placeholder, textarea::placeholder {
+  color: var(--text-dim);
+}
+
+button {
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  color: #fff;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+}
+
+button:hover {
+  opacity: 0.85;
+}
+
+/* ── Hub panel ──────────────────────────────────────────────────────────────── */
+
+.hub {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.hub.drag-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}
+
+.hub-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.hub-title {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--accent);
+}
+
+.hub-device {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.hub-add {
+  padding: 12px 16px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.hub-add textarea {
+  flex: 1;
+}
+
+.hub-section {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  min-height: 0;
+}
+
+.hub-section + .hub-section {
+  border-top: 1px solid var(--border);
+}
+
+.hub-section h2 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.count {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-radius: 10px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Content cards ──────────────────────────────────────────────────────────── */
+
+.content-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.content-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  transition: background 0.15s;
+}
+
+.content-card:hover {
+  background: var(--surface-hover);
+}
+
+.content-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.content-preview {
+  flex: 1;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.content-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.content-device {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.content-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.btn-broadcast {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid rgba(94, 140, 244, 0.25);
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.btn-remove {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  padding: 5px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.btn-remove:hover {
+  background: rgba(244, 94, 94, 0.15);
+  color: var(--danger);
+  border-color: rgba(244, 94, 94, 0.3);
+  opacity: 1;
+}
+
+.btn-pull {
+  background: var(--accent);
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
+  padding: 16px 0;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+}

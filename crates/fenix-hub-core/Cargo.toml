@@ -1,0 +1,21 @@
+[package]
+name = "fenix-hub-core"
+version = "0.1.0"
+edition = "2021"
+description = "FenixHub cross-platform core: identity, protocol, content transfer"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+reqwest = { workspace = true }
+mdns-sd = { workspace = true }
+argon2 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
