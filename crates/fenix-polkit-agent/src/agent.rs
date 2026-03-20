@@ -39,13 +39,14 @@ impl AuthAgent {
 
         if self
             .tx
-            .send_blocking(AuthRequest {
+            .send(AuthRequest {
                 message,
                 user_name: user_name.clone(),
                 cookie: cookie.clone(),
                 user_uid,
                 response_tx: resp_tx,
             })
+            .await
             .is_err()
         {
             return;
