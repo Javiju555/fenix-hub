@@ -1,19 +1,20 @@
+use serde::{Deserialize, Serialize};
 /// Tauri IPC commands — callable from the frontend via invoke().
-
 use std::net::IpAddr;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
-use serde::{Deserialize, Serialize};
 
-use fenix_hub_core::content::ContentItem;
+use base64::Engine;
+use fenix_hub_core::content::{ContentData, ContentItem};
 use fenix_hub_core::identity::GroupIdentity;
 use fenix_hub_core::protocol::Announcement;
 use fenix_hub_core::server::{start_content_server, ContentStore};
 use fenix_hub_daemon::mdns::{announce_content, unannounce_content};
 
-use crate::state::HubState;
-use crate::persist;
 use crate::discovery;
+use crate::persist;
+use crate::state::HubState;
+use crate::temp_store;
 
 // ── Identity ──────────────────────────────────────────────────────────────────
 
@@ -55,11 +56,14 @@ pub async fn setup_identity(
     state: State<'_, HubState>,
 ) -> Result<IdentityInfo, String> {
     let identity = if let Some(ref pass) = args.passphrase {
-        GroupIdentity::from_passphrase(pass, &args.device_name)
-            .map_err(|e| e.to_string())?
+        GroupIdentity::from_passphrase(pass, &args.device_name).map_err(|e| e.to_string())?
     } else {
         // No new passphrase — keep existing group key, just rename device
-        let existing = state.identity.read().await.clone()
+        let existing = state
+            .identity
+            .read()
+            .await
+            .clone()
             .ok_or("No existing identity to update")?;
         GroupIdentity::from_key_hex(&existing.key_hex(), &args.device_name)
             .map_err(|e| e.to_string())?
@@ -95,6 +99,9 @@ pub struct ContentItemDto {
     pub preview: String,
     pub size_bytes: u64,
     pub created_at: u64,
+    pub file_name: Option<String>,
+    pub mime_type: Option<String>,
+    pub transfer_path: Option<String>,
 }
 
 impl From<&ContentItem> for ContentItemDto {
@@ -105,6 +112,9 @@ impl From<&ContentItem> for ContentItemDto {
             preview: item.preview.clone(),
             size_bytes: item.size_bytes,
             created_at: item.created_at,
+            file_name: item.file_name.clone(),
+            mime_type: item.mime_type.clone(),
+            transfer_path: transfer_path(item),
         }
     }
 }
@@ -124,7 +134,48 @@ pub async fn add_text_content(
 ) -> Result<ContentItemDto, String> {
     let item = ContentItem::from_text(text);
     let dto = ContentItemDto::from(&item);
-    state.local_content.write().await.insert(item.id.clone(), item);
+    state
+        .local_content
+        .write()
+        .await
+        .insert(item.id.clone(), item);
+    Ok(dto)
+}
+
+#[derive(Deserialize)]
+pub struct AddBinaryContentArgs {
+    pub file_name: String,
+    pub mime_type: Option<String>,
+    pub bytes_base64: String,
+    pub preview: Option<String>,
+}
+
+#[tauri::command]
+pub async fn add_binary_content(
+    args: AddBinaryContentArgs,
+    state: State<'_, HubState>,
+) -> Result<ContentItemDto, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(args.bytes_base64)
+        .map_err(|e| e.to_string())?;
+    let content_type = match args.mime_type.as_deref() {
+        Some(mime) if mime.starts_with("image/") => fenix_hub_core::content::ContentType::Image,
+        _ => fenix_hub_core::content::ContentType::File,
+    };
+    let item = create_temp_binary_item(
+        bytes,
+        content_type,
+        Some(args.file_name),
+        args.mime_type,
+        args.preview,
+    )
+    .map_err(|e| e.to_string())?;
+    let dto = ContentItemDto::from(&item);
+    state
+        .local_content
+        .write()
+        .await
+        .insert(item.id.clone(), item);
     Ok(dto)
 }
 
@@ -137,7 +188,10 @@ pub async fn remove_content(id: String, state: State<'_, HubState>) -> Result<()
             .map_err(|e| tracing::warn!("Failed to unannounce {}: {}", id, e))
             .ok();
     }
-    state.local_content.write().await.remove(&id);
+    let removed = state.local_content.write().await.remove(&id);
+    if let Some(item) = removed {
+        cleanup_item_storage(&item);
+    }
     Ok(())
 }
 
@@ -151,11 +205,13 @@ pub struct PublishArgs {
 
 /// Start ephemeral HTTP server (if needed) + announce via mDNS.
 #[tauri::command]
-pub async fn publish_content(
-    args: PublishArgs,
-    state: State<'_, HubState>,
-) -> Result<(), String> {
-    let identity = state.identity.read().await.clone().ok_or("Identity not configured")?;
+pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> Result<(), String> {
+    let identity = state
+        .identity
+        .read()
+        .await
+        .clone()
+        .ok_or("Identity not configured")?;
     let content_store: ContentStore = state.local_content.clone();
 
     // Start ephemeral HTTP server if not already running
@@ -178,7 +234,7 @@ pub async fn publish_content(
     let item = content.get(&args.content_id).ok_or("Content not found")?;
 
     let send_mode = match args.target_device {
-        None => fenix_hub_core::protocol::SendMode::Broadcast,
+        None => fenix_hub_core::protocol::SendMode::Broadcast {},
         Some(ref target) => fenix_hub_core::protocol::SendMode::Direct {
             target_device: target.clone(),
         },
@@ -191,6 +247,8 @@ pub async fn publish_content(
         preview: item.preview.clone(),
         content_type: item.content_type.clone(),
         size_bytes: item.size_bytes,
+        file_name: item.file_name.clone(),
+        mime_type: item.mime_type.clone(),
         send_mode,
         created_at: item.created_at,
         port,
@@ -199,10 +257,13 @@ pub async fn publish_content(
     // Get local IP for mDNS announcement
     let local_ip = local_ipv4().ok_or("Cannot determine local IP")?;
 
-    let instance_name = announce_content(&state.mdns, &announcement, local_ip)
-        .map_err(|e| e.to_string())?;
+    let instance_name =
+        announce_content(&state.mdns, &announcement, local_ip).map_err(|e| e.to_string())?;
 
-    state.active_announcements.write().await
+    state
+        .active_announcements
+        .write()
+        .await
         .insert(args.content_id.clone(), instance_name);
 
     tracing::info!("Published {} on port {} via mDNS", args.content_id, port);
@@ -213,9 +274,8 @@ pub async fn publish_content(
 #[tauri::command]
 pub async fn stop_server(state: State<'_, HubState>) -> Result<(), String> {
     // Unannounce all active announcements
-    let announcements: Vec<(String, String)> = state.active_announcements.write().await
-        .drain()
-        .collect();
+    let announcements: Vec<(String, String)> =
+        state.active_announcements.write().await.drain().collect();
     for (_, instance_name) in announcements {
         unannounce_content(&state.mdns, &instance_name).ok();
     }
@@ -232,13 +292,64 @@ pub async fn stop_server(state: State<'_, HubState>) -> Result<(), String> {
 
 /// Copy a local item directly to the system clipboard (click-to-copy).
 #[tauri::command]
-pub async fn write_local_to_clipboard(id: String, state: State<'_, HubState>) -> Result<(), String> {
+pub async fn write_local_to_clipboard(
+    id: String,
+    state: State<'_, HubState>,
+) -> Result<(), String> {
     let content = state.local_content.read().await;
     let item = content.get(&id).ok_or("Content not found")?;
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    clipboard.set_text(&item.preview).map_err(|e| e.to_string())?;
+    write_item_to_clipboard(item).map_err(|e| e.to_string())?;
     tracing::info!("Copied local item {} to clipboard", id);
     Ok(())
+}
+
+#[derive(Serialize)]
+pub struct DragPayloadDto {
+    pub text: Option<String>,
+    pub uri_list: Option<String>,
+}
+
+#[tauri::command]
+pub async fn prepare_local_drag(
+    id: String,
+    state: State<'_, HubState>,
+) -> Result<DragPayloadDto, String> {
+    let content = state.local_content.read().await;
+    let item = content.get(&id).ok_or("Content not found")?;
+    write_item_to_clipboard(item).map_err(|e| e.to_string())?;
+
+    let payload = match &item.data {
+        ContentData::Text(text) => DragPayloadDto {
+            text: Some(text.clone()),
+            uri_list: None,
+        },
+        ContentData::FilePath(path) => {
+            let value = format!("file://{}", path.to_string_lossy());
+            DragPayloadDto {
+                text: Some(path.to_string_lossy().to_string()),
+                uri_list: Some(value),
+            }
+        }
+        ContentData::Bytes(bytes) => {
+            let path = temp_store::write_item_bytes(
+                &item.id,
+                item.file_name.as_deref().unwrap_or("fenixhub-item.bin"),
+                bytes,
+            )
+            .map_err(|e| e.to_string())?;
+            let value = format!("file://{}", path.to_string_lossy());
+            DragPayloadDto {
+                text: Some(path.to_string_lossy().to_string()),
+                uri_list: Some(value),
+            }
+        }
+        ContentData::Empty => DragPayloadDto {
+            text: None,
+            uri_list: None,
+        },
+    };
+
+    Ok(payload)
 }
 
 // ── Peer content ──────────────────────────────────────────────────────────────
@@ -261,24 +372,57 @@ pub async fn pull_peer_content(
     let peer_ip = *peer_ip;
     drop(peers);
 
-    let identity = state.identity.read().await.clone().ok_or("Identity not configured")?;
-
-    let data = fenix_hub_core::client::pull_content(peer_ip, announcement.port, &content_id, &identity)
+    let identity = state
+        .identity
+        .read()
         .await
-        .map_err(|e| e.to_string())?;
+        .clone()
+        .ok_or("Identity not configured")?;
 
-    // Write to system clipboard
-    write_to_clipboard(&announcement, data).map_err(|e| e.to_string())?;
+    let pulled =
+        fenix_hub_core::client::pull_content(peer_ip, announcement.port, &content_id, &identity)
+            .await
+            .map_err(|e| e.to_string())?;
 
-    tracing::info!("Pulled {} from {} ({})", content_id, announcement.device_name, peer_ip);
+    let item = match announcement.content_type {
+        fenix_hub_core::content::ContentType::Text => {
+            let text = String::from_utf8(pulled.bytes).map_err(|e| e.to_string())?;
+            ContentItem::from_text(text)
+        }
+        fenix_hub_core::content::ContentType::Image => create_temp_binary_item(
+            pulled.bytes,
+            fenix_hub_core::content::ContentType::Image,
+            pulled.file_name.or_else(|| announcement.file_name.clone()),
+            pulled.mime_type.or_else(|| announcement.mime_type.clone()),
+            Some(announcement.preview.clone()),
+        )
+        .map_err(|e| e.to_string())?,
+        fenix_hub_core::content::ContentType::File => create_temp_binary_item(
+            pulled.bytes,
+            fenix_hub_core::content::ContentType::File,
+            pulled.file_name.or_else(|| announcement.file_name.clone()),
+            pulled.mime_type.or_else(|| announcement.mime_type.clone()),
+            Some(announcement.preview.clone()),
+        )
+        .map_err(|e| e.to_string())?,
+    };
 
-    Ok(ContentItemDto {
-        id: content_id,
-        content_type: format!("{:?}", announcement.content_type).to_lowercase(),
-        preview: announcement.preview.clone(),
-        size_bytes: announcement.size_bytes,
-        created_at: announcement.created_at,
-    })
+    write_item_to_clipboard(&item).map_err(|e| e.to_string())?;
+    let dto = ContentItemDto::from(&item);
+    state
+        .local_content
+        .write()
+        .await
+        .insert(item.id.clone(), item);
+
+    tracing::info!(
+        "Pulled {} from {} ({})",
+        content_id,
+        announcement.device_name,
+        peer_ip
+    );
+
+    Ok(dto)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -293,30 +437,80 @@ fn local_ipv4() -> Option<std::net::Ipv4Addr> {
     }
 }
 
-fn write_to_clipboard(announcement: &Announcement, data: Vec<u8>) -> anyhow::Result<()> {
-    use fenix_hub_core::content::ContentType;
+fn write_item_to_clipboard(item: &ContentItem) -> anyhow::Result<()> {
     let mut clipboard = arboard::Clipboard::new()?;
-    match announcement.content_type {
-        ContentType::Text => {
-            let text = String::from_utf8(data)?;
+    match &item.data {
+        ContentData::Text(text) => {
             clipboard.set_text(text)?;
         }
-        ContentType::Image => {
-            // arboard supports RGBA images; for now store as text path or skip
-            // Full image clipboard support requires decoding PNG → RGBA pixels
-            // TODO: decode image bytes → arboard::ImageData
-            tracing::info!("Image clipboard: {} bytes (full decode pending)", data.len());
+        ContentData::FilePath(path) => {
+            clipboard.set_text(path.to_string_lossy().to_string())?;
         }
-        ContentType::File => {
-            // Files: write to ~/Downloads and put path in clipboard
-            let filename = announcement.preview.split(' ').next().unwrap_or("fenixhub_file");
-            let dest = dirs::download_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(filename);
-            std::fs::write(&dest, &data)?;
-            clipboard.set_text(dest.to_string_lossy().to_string())?;
-            tracing::info!("File saved to {:?}", dest);
+        ContentData::Bytes(bytes) => {
+            let path = temp_store::write_item_bytes(
+                &item.id,
+                item.file_name.as_deref().unwrap_or("fenixhub-item.bin"),
+                bytes,
+            )?;
+            clipboard.set_text(path.to_string_lossy().to_string())?;
         }
+        ContentData::Empty => {}
     }
     Ok(())
+}
+
+fn create_temp_binary_item(
+    bytes: Vec<u8>,
+    content_type: fenix_hub_core::content::ContentType,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    preview: Option<String>,
+) -> anyhow::Result<ContentItem> {
+    let temp_id = uuid::Uuid::new_v4().to_string();
+    let default_name =
+        default_file_name(content_type.clone(), mime_type.as_deref(), temp_id.as_str());
+    let final_name = file_name.unwrap_or(default_name);
+    let path = temp_store::write_item_bytes(&temp_id, &final_name, &bytes)?;
+    ContentItem::from_temp_file(path, content_type, Some(final_name), mime_type, preview)
+}
+
+fn default_file_name(
+    content_type: fenix_hub_core::content::ContentType,
+    mime_type: Option<&str>,
+    seed: &str,
+) -> String {
+    let extension = mime_type
+        .and_then(extension_from_mime)
+        .unwrap_or_else(|| match content_type {
+            fenix_hub_core::content::ContentType::Image => "png",
+            fenix_hub_core::content::ContentType::File => "bin",
+            fenix_hub_core::content::ContentType::Text => "txt",
+        });
+    format!("fenixhub-{}.{}", seed, extension)
+}
+
+fn extension_from_mime(mime_type: &str) -> Option<&'static str> {
+    match mime_type {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        "application/pdf" => Some("pdf"),
+        "text/plain" | "text/plain; charset=utf-8" => Some("txt"),
+        "application/zip" => Some("zip"),
+        _ => None,
+    }
+}
+
+fn cleanup_item_storage(item: &ContentItem) {
+    if let ContentData::FilePath(path) = &item.data {
+        temp_store::remove_item_path(path).ok();
+    }
+}
+
+fn transfer_path(item: &ContentItem) -> Option<String> {
+    match &item.data {
+        ContentData::FilePath(path) => Some(path.to_string_lossy().to_string()),
+        _ => None,
+    }
 }

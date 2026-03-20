@@ -1,0 +1,618 @@
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
+import { listen as tauriListen } from '@tauri-apps/api/event';
+import './style.css';
+// ── Browser/Tauri detection ───────────────────────────────────────────────────
+const IS_TAURI = '__TAURI_INTERNALS__' in window;
+async function invoke(cmd, args) {
+    if (IS_TAURI)
+        return tauriInvoke(cmd, args);
+    return mockInvoke(cmd, args);
+}
+function listen(event, cb) {
+    if (IS_TAURI)
+        return tauriListen(event, cb);
+    return Promise.resolve(() => { });
+}
+async function getAppWindow() {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    return getCurrentWindow();
+}
+async function setWindowSize(w, h) {
+    if (!IS_TAURI)
+        return;
+    const { LogicalSize } = await import('@tauri-apps/api/dpi');
+    const win = await getAppWindow();
+    // Set min size first so GTK doesn't clamp our target size
+    await win.setMinSize(new LogicalSize(W_PILL, H_PILL));
+    await win.setSize(new LogicalSize(w, h));
+}
+async function closeApp() {
+    if (!IS_TAURI)
+        return;
+    (await getAppWindow()).close();
+}
+// ── Mock backend ──────────────────────────────────────────────────────────────
+const MOCK_LOCAL = [
+    { id: 'a1', content_type: 'text', preview: 'npm install @tauri-apps/api@2 --save', size_bytes: 38, created_at: Date.now() / 1000, file_name: null, mime_type: 'text/plain; charset=utf-8' },
+    { id: 'a2', content_type: 'file', preview: 'diseño-fenix-hub.fig', size_bytes: 4400000, created_at: Date.now() / 1000 - 60, file_name: 'diseño-fenix-hub.fig', mime_type: 'application/octet-stream' },
+    { id: 'a3', content_type: 'image', preview: 'screenshot-2026.png', size_bytes: 1100000, created_at: Date.now() / 1000 - 120, file_name: 'screenshot-2026.png', mime_type: 'image/png' },
+];
+const MOCK_PEERS = [
+    { group_id: 'demo', content_id: 'p1', device_name: 'Windows Laptop', preview: 'Reunión viernes 10h sala B', content_type: 'text', size_bytes: 34, send_mode: { Broadcast: null }, created_at: Date.now() / 1000, port: 0, file_name: null, mime_type: 'text/plain; charset=utf-8' },
+    { group_id: 'demo', content_id: 'p2', device_name: 'Windows Laptop', preview: 'presupuesto-q2.xlsx', content_type: 'file', size_bytes: 90000, send_mode: { Broadcast: null }, created_at: Date.now() / 1000, port: 0, file_name: 'presupuesto-q2.xlsx', mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+];
+let mockLocal = [...MOCK_LOCAL];
+let mockPeers = [...MOCK_PEERS];
+let mockPublished = new Set();
+let mockId = 100;
+async function mockInvoke(cmd, args) {
+    const a = args;
+    switch (cmd) {
+        case 'get_identity': return { device_name: 'Arch Desktop', group_id: 'demo', configured: true };
+        case 'get_local_content': return [...mockLocal];
+        case 'get_peers': return [...mockPeers];
+        case 'add_text_content': {
+            const text = a?.text;
+            const item = { id: String(mockId++), content_type: 'text', preview: text.slice(0, 80), size_bytes: text.length, created_at: Date.now() / 1000, file_name: null, mime_type: 'text/plain; charset=utf-8' };
+            mockLocal = [item, ...mockLocal];
+            return item;
+        }
+        case 'add_binary_content': {
+            const args = a?.args;
+            const item = {
+                id: String(mockId++),
+                content_type: args?.mime_type?.startsWith('image/') ? 'image' : 'file',
+                preview: args?.preview || args?.file_name || 'archivo',
+                size_bytes: 0,
+                created_at: Date.now() / 1000,
+                file_name: args?.file_name ?? 'archivo',
+                mime_type: args?.mime_type ?? 'application/octet-stream',
+            };
+            mockLocal = [item, ...mockLocal];
+            return item;
+        }
+        case 'remove_content':
+            mockLocal = mockLocal.filter(i => i.id !== a?.id);
+            mockPublished.delete(a?.id);
+            return undefined;
+        case 'publish_content': {
+            const id = a?.args?.content_id;
+            if (id)
+                mockPublished.add(id);
+            return undefined;
+        }
+        case 'stop_server':
+            mockPublished.clear();
+            return undefined;
+        case 'pull_peer_content': {
+            const id = a?.content_id;
+            mockPeers = mockPeers.filter(p => p.content_id !== id);
+            return { id, content_type: 'text', preview: '', size_bytes: 0, created_at: 0 };
+        }
+        case 'setup_identity':
+            return { device_name: a?.args?.device_name ?? 'Device', group_id: 'demo', configured: true };
+        default: return undefined;
+    }
+}
+// ── State ─────────────────────────────────────────────────────────────────────
+let identity = null;
+let localContent = [];
+let peerContent = [];
+let publishedIds = new Set();
+let onlineDevices = [];
+let activeTab = 'local';
+let collapsed = false;
+const W = 820, H = 185;
+const W_PILL = 280, H_PILL = 34;
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+    identity = await invoke('get_identity');
+    if (!identity.configured) {
+        renderSetup();
+        return;
+    }
+    await loadContent();
+    renderHub();
+    setupEventListeners();
+}
+async function loadContent() {
+    [localContent, peerContent] = await Promise.all([
+        invoke('get_local_content'),
+        invoke('get_peers'),
+    ]);
+    onlineDevices = [...new Set(peerContent.map(p => p.device_name))];
+}
+// ── Tauri events ──────────────────────────────────────────────────────────────
+function setupEventListeners() {
+    listen('hub-activate', () => {
+        if (collapsed)
+            expand();
+    });
+    listen('peer-content-available', ({ payload }) => {
+        const ann = payload.announcement;
+        peerContent = [...peerContent.filter(p => p.content_id !== ann.content_id), ann];
+        if (!onlineDevices.includes(ann.device_name))
+            onlineDevices = [...onlineDevices, ann.device_name];
+        updateHeader();
+        if (activeTab === 'red')
+            renderPeerContent();
+    });
+    listen('peer-content-gone', ({ payload }) => {
+        peerContent = peerContent.filter(p => p.content_id !== payload.content_id);
+        if (!peerContent.some(p => p.device_name === payload.device_name))
+            onlineDevices = onlineDevices.filter(d => d !== payload.device_name);
+        updateHeader();
+        if (activeTab === 'red')
+            renderPeerContent();
+    });
+    listen('direct-notify-received', ({ payload }) => {
+        const ann = payload.announcement;
+        peerContent = [ann, ...peerContent.filter(p => p.content_id !== ann.content_id)];
+        updateHeader();
+        if (collapsed)
+            expand();
+        switchTab('red');
+    });
+}
+// ── Setup screen ──────────────────────────────────────────────────────────────
+function renderSetup() {
+    document.getElementById('app').innerHTML = `
+    <div class="hub-setup">
+      <div class="setup-row">
+        <div class="setup-logo">${iconHub(20)}</div>
+        <h1>FenixHub</h1>
+        <p>Portapapeles efímero · sin cuenta · sin nube</p>
+      </div>
+      <div class="setup-fields">
+        <input type="password" id="passphrase" placeholder="Frase de acceso (igual en todos los dispositivos)" autocomplete="off" />
+        <input type="text"     id="device-name" placeholder="Nombre del dispositivo" style="max-width:190px" />
+        <button id="setup-btn">${iconCheckmark(11)} Activar</button>
+      </div>
+    </div>`;
+    const submit = async () => {
+        const passphrase = document.getElementById('passphrase').value.trim();
+        const deviceName = document.getElementById('device-name').value.trim();
+        if (!passphrase || !deviceName)
+            return;
+        const btn = document.getElementById('setup-btn');
+        btn.disabled = true;
+        btn.textContent = 'Activando…';
+        identity = await invoke('setup_identity', { args: { passphrase, device_name: deviceName } });
+        await loadContent();
+        renderHub();
+        setupEventListeners();
+    };
+    document.getElementById('setup-btn').addEventListener('click', submit);
+    document.addEventListener('keydown', function h(e) {
+        if (e.key === 'Enter') {
+            submit();
+            document.removeEventListener('keydown', h);
+        }
+    });
+}
+// ── Hub ───────────────────────────────────────────────────────────────────────
+function renderHub() {
+    document.getElementById('app').innerHTML = `
+    <div class="hub" id="hub-root">
+      <header class="hub-header" id="hub-header">
+        <div class="hub-logo">${iconHub(15)}</div>
+        <span class="hub-title">FenixHub</span>
+
+        <div class="hub-tabs" id="hub-tabs">
+          <button class="tab active" data-tab="local">${iconInbox(10)} Local <span class="badge" id="count-local">0</span></button>
+          <button class="tab"        data-tab="red"  >${iconWifi(10)}  Red   <span class="badge" id="count-red">0</span></button>
+        </div>
+
+        <div class="hub-status">
+          <div class="status-dot scanning" id="status-dot"></div>
+          <span id="status-text">Buscando…</span>
+        </div>
+
+        <div class="hub-actions">
+          <button class="btn-icon" id="btn-share-all" title="Compartir todo con todos">${iconBroadcast(13)}</button>
+          <button class="btn-icon" id="btn-collapse"  title="Minimizar a notch">${iconMinus(13)}</button>
+          <button class="btn-icon danger" id="btn-close" title="Cerrar">${iconX(12)}</button>
+        </div>
+      </header>
+
+      <div class="tab-panel active" id="panel-local"></div>
+      <div class="tab-panel"        id="panel-red"></div>
+    </div>`;
+    // Tabs
+    document.getElementById('hub-tabs').addEventListener('click', (e) => {
+        const btn = e.target.closest('.tab');
+        if (btn?.dataset.tab)
+            switchTab(btn.dataset.tab);
+    });
+    // Share all
+    document.getElementById('btn-share-all').addEventListener('click', async () => {
+        for (const item of localContent) {
+            if (!publishedIds.has(item.id)) {
+                await invoke('publish_content', { args: { content_id: item.id, target_device: null } });
+                publishedIds.add(item.id);
+            }
+        }
+        renderLocalContent();
+    });
+    // Collapse → pill
+    document.getElementById('btn-collapse').addEventListener('click', () => collapsed ? expand() : collapse());
+    // Click header when collapsed → expand
+    document.getElementById('hub-header').addEventListener('click', (e) => {
+        if (collapsed && !e.target.closest('.hub-actions'))
+            expand();
+    });
+    // Close app
+    document.getElementById('btn-close').addEventListener('click', async () => {
+        await closeApp();
+    });
+    // Drag-to-hub
+    const hub = document.getElementById('hub-root');
+    hub.addEventListener('dragover', (e) => { e.preventDefault(); hub.classList.add('drag-over'); });
+    hub.addEventListener('dragleave', (e) => {
+        if (!e.relatedTarget?.closest('#hub-root'))
+            hub.classList.remove('drag-over');
+    });
+    hub.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        hub.classList.remove('drag-over');
+        const files = Array.from(e.dataTransfer?.files ?? []);
+        if (files.length > 0) {
+            const items = await Promise.all(files.map(addBrowserFileToHub));
+            localContent = [...items, ...localContent];
+            updateHeader();
+            if (activeTab !== 'local')
+                switchTab('local');
+            else
+                renderLocalContent();
+            return;
+        }
+        const text = e.dataTransfer?.getData('text/plain');
+        if (text) {
+            const item = await invoke('add_text_content', { text });
+            localContent = [item, ...localContent];
+            updateHeader();
+            if (activeTab !== 'local')
+                switchTab('local');
+            else
+                renderLocalContent();
+        }
+    });
+    // Ctrl+V → add to hub
+    document.addEventListener('paste', async (e) => {
+        const cd = e.clipboardData;
+        if (!cd)
+            return;
+        // Image from clipboard (screenshot, copied image)
+        const imgItem = Array.from(cd.items).find(i => i.type.startsWith('image/'));
+        if (imgItem) {
+            const blob = imgItem.getAsFile();
+            if (!blob)
+                return;
+            const file = new File([blob], `clipboard-${Date.now()}.png`, { type: blob.type || 'image/png' });
+            const ci = await addBrowserFileToHub(file);
+            localContent = [ci, ...localContent];
+            updateHeader();
+            if (activeTab !== 'local')
+                switchTab('local');
+            else
+                renderLocalContent();
+            return;
+        }
+        // Plain text
+        const text = cd.getData('text/plain').trim();
+        if (text) {
+            const ci = await invoke('add_text_content', { text });
+            localContent = [ci, ...localContent];
+            updateHeader();
+            if (activeTab !== 'local')
+                switchTab('local');
+            else
+                renderLocalContent();
+        }
+    });
+    updateHeader();
+    renderLocalContent();
+    renderPeerContent();
+}
+async function collapse() {
+    collapsed = true;
+    const hub = document.getElementById('hub-root');
+    const header = document.getElementById('hub-header');
+    document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+    header.style.borderBottom = 'none';
+    // Shrink the hub div and body so the glass pill is visible
+    hub.style.height = H_PILL + 'px';
+    hub.style.borderRadius = '19px';
+    document.body.style.height = H_PILL + 'px';
+    document.getElementById('btn-collapse').innerHTML = iconChevronDown(13);
+    await setWindowSize(W_PILL, H_PILL);
+}
+async function expand() {
+    collapsed = false;
+    const hub = document.getElementById('hub-root');
+    const header = document.getElementById('hub-header');
+    // Restore size before showing content
+    hub.style.height = H + 'px';
+    hub.style.borderRadius = '';
+    document.body.style.height = H + 'px';
+    await setWindowSize(W, H);
+    setTimeout(() => {
+        header.style.borderBottom = '';
+        document.querySelectorAll('.tab-panel').forEach(p => p.style.display = '');
+        switchTab(activeTab);
+    }, 60);
+    document.getElementById('btn-collapse').innerHTML = iconMinus(13);
+}
+function switchTab(tab) {
+    activeTab = tab;
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tab}`));
+}
+function updateHeader() {
+    const lc = document.getElementById('count-local');
+    const rc = document.getElementById('count-red');
+    if (lc)
+        lc.textContent = String(localContent.length);
+    if (rc)
+        rc.textContent = String(peerContent.length);
+    const dot = document.getElementById('status-dot');
+    const txt = document.getElementById('status-text');
+    if (!dot || !txt)
+        return;
+    if (onlineDevices.length > 0) {
+        dot.className = 'status-dot online';
+        txt.textContent = `${onlineDevices.length} disp.`;
+    }
+    else {
+        dot.className = 'status-dot scanning';
+        txt.textContent = 'Buscando…';
+    }
+}
+// ── Local panel ───────────────────────────────────────────────────────────────
+function renderLocalContent() {
+    const container = document.getElementById('panel-local');
+    updateHeader();
+    if (localContent.length === 0) {
+        container.innerHTML = `
+      <div class="empty-state">
+        ${iconInboxLarge()}
+        <p>Arrastra contenido aquí o cópialo al portapapeles para añadirlo al hub</p>
+      </div>`;
+        return;
+    }
+    container.innerHTML = `<div class="card-grid">${localContent.map(item => {
+        const pub = publishedIds.has(item.id);
+        const actionBtns = pub
+            ? `<button class="btn-stop" data-id="${item.id}" data-action="stop">■ Parar</button>`
+            : [
+                `<button class="btn-broadcast" data-id="${item.id}" data-action="broadcast">${iconBroadcast(9)} Todos</button>`,
+                ...onlineDevices.map(d => `<button class="btn-direct" data-id="${item.id}" data-action="direct" data-device="${escapeHtml(d)}">${iconDevice(9)} ${escapeHtml(d)}</button>`)
+            ].join('');
+        const isImg = item.preview.startsWith('data:image');
+        const topContent = isImg
+            ? `<img class="card-thumb" src="${item.preview}" />`
+            : `<div class="card-top">
+           <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
+           <div class="card-body">
+             <div class="card-preview">${escapeHtml(item.file_name || item.preview)}</div>
+           </div>
+         </div>`;
+        return `
+    <div class="content-card${pub ? ' broadcasting' : ''}" data-id="${item.id}" draggable="true">
+      ${topContent}
+      <div class="card-meta">${humanSize(item.size_bytes)}${pub ? ' · <span style="color:var(--accent)">live</span>' : ''}</div>
+      <div class="card-actions">${actionBtns}</div>
+      <button class="btn-delete" data-id="${item.id}">${iconX(8)}</button>
+    </div>`;
+    }).join('')}</div>`;
+    container.querySelectorAll('[data-action]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const el = btn;
+            const id = el.dataset.id;
+            if (el.dataset.action === 'stop') {
+                await invoke('stop_server');
+                publishedIds.clear();
+            }
+            else if (el.dataset.action === 'broadcast') {
+                await invoke('publish_content', { args: { content_id: id, target_device: null } });
+                publishedIds.add(id);
+            }
+            else if (el.dataset.action === 'direct') {
+                await invoke('publish_content', { args: { content_id: id, target_device: el.dataset.device } });
+                publishedIds.add(id);
+            }
+            renderLocalContent();
+        });
+    });
+    container.querySelectorAll('.btn-delete').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.id;
+            await invoke('remove_content', { id });
+            publishedIds.delete(id);
+            localContent = localContent.filter(i => i.id !== id);
+            updateHeader();
+            renderLocalContent();
+        });
+    });
+    // Click on card body/thumb → copy to local clipboard
+    container.querySelectorAll('.card-body, .card-thumb').forEach(el => {
+        el.style.cursor = 'pointer';
+        el.addEventListener('click', async () => {
+            const card = el.closest('.content-card');
+            const item = localContent.find(i => i.id === card?.dataset.id);
+            if (!item)
+                return;
+            if (IS_TAURI) {
+                await invoke('write_local_to_clipboard', { id: item.id }).catch(() => { });
+            }
+            else {
+                await navigator.clipboard.writeText(item.preview).catch(() => { });
+            }
+            // Brief visual feedback
+            card.style.outline = '1px solid var(--accent)';
+            setTimeout(() => card.style.outline = '', 600);
+        });
+    });
+    container.querySelectorAll('.content-card').forEach(card => {
+        card.addEventListener('dragstart', async (event) => {
+            const id = card.dataset.id;
+            const item = localContent.find(entry => entry.id === id);
+            if (!id || !item)
+                return;
+            const dataTransfer = event.dataTransfer;
+            if (!dataTransfer)
+                return;
+            dataTransfer.effectAllowed = 'copy';
+            if (IS_TAURI) {
+                const payload = await invoke('prepare_local_drag', { id }).catch(() => null);
+                if (payload?.text)
+                    dataTransfer.setData('text/plain', payload.text);
+                if (payload?.uri_list)
+                    dataTransfer.setData('text/uri-list', payload.uri_list);
+            }
+            else {
+                const fallbackText = item.transfer_path || item.file_name || item.preview;
+                dataTransfer.setData('text/plain', fallbackText);
+            }
+        });
+    });
+}
+// ── Red panel ─────────────────────────────────────────────────────────────────
+function renderPeerContent() {
+    const container = document.getElementById('panel-red');
+    updateHeader();
+    if (peerContent.length === 0) {
+        container.innerHTML = `
+      <div class="empty-state">
+        ${iconWifiLarge()}
+        <p>Sin contenido de otros dispositivos en la red</p>
+      </div>`;
+        return;
+    }
+    container.innerHTML = `<div class="card-grid">${peerContent.map(item => {
+        const isImg = item.preview.startsWith('data:image');
+        const topContent = isImg
+            ? `<img class="card-thumb" src="${item.preview}" />`
+            : `<div class="card-top">
+           <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
+           <div class="card-body">
+             <div class="card-preview">${escapeHtml(item.file_name || item.preview)}</div>
+           </div>
+         </div>`;
+        return `
+    <div class="content-card peer-card">
+      ${topContent}
+      <div class="card-meta card-device">${iconDevice(9)} ${escapeHtml(item.device_name)} · ${humanSize(item.size_bytes)}</div>
+      <div class="card-actions">
+        <button class="btn-receive" data-id="${item.content_id}">${iconDownload(9)} Recibir</button>
+      </div>
+    </div>`;
+    }).join('')}</div>`;
+    container.querySelectorAll('.btn-receive').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.id;
+            btn.disabled = true;
+            btn.textContent = 'Recibiendo…';
+            const received = await invoke('pull_peer_content', { content_id: id });
+            localContent = [received, ...localContent];
+            peerContent = peerContent.filter(i => i.content_id !== id);
+            updateHeader();
+            renderPeerContent();
+            renderLocalContent();
+        });
+    });
+}
+// ── Icons ─────────────────────────────────────────────────────────────────────
+const svg = (s, vb, path, extra = 'stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"') => `<svg width="${s}" height="${s}" viewBox="${vb}" fill="none" ${extra}>${path}</svg>`;
+function iconHub(s) {
+    return svg(s, '0 0 20 20', '<polygon points="10,2 18,6.5 18,13.5 10,18 2,13.5 2,6.5" stroke-width="1.6"/><circle cx="10" cy="10" r="2.5" stroke-width="1.6"/>');
+}
+function iconCheckmark(s) {
+    return svg(s, '0 0 16 16', '<polyline points="2.5,8 6.5,12 13.5,4" stroke-width="2.2"/>');
+}
+function iconInbox(s) {
+    return svg(s, '0 0 16 16', '<rect x="1.5" y="1.5" width="13" height="13" rx="2" stroke-width="1.7"/><polyline points="1.5,10 4.5,10 5.5,12.5 10.5,12.5 11.5,10 14.5,10" stroke-width="1.7"/>');
+}
+function iconWifi(s) {
+    return svg(s, '0 0 16 16', '<path d="M1.5,6 Q8,1 14.5,6" stroke-width="1.7"/><path d="M3.5,9 Q8,5.5 12.5,9" stroke-width="1.7"/><path d="M5.5,12 Q8,10 10.5,12" stroke-width="1.7"/><circle cx="8" cy="14" r="0.8" fill="currentColor" stroke="none"/>');
+}
+function iconBroadcast(s) {
+    return svg(s, '0 0 16 16', '<circle cx="8" cy="8" r="2" stroke-width="1.8"/><path d="M4,4 Q8,0.5 12,4" stroke-width="1.8"/><path d="M2.5,2.5 Q8,-1.5 13.5,2.5" stroke-width="1.8"/><path d="M4,12 Q8,15.5 12,12" stroke-width="1.8"/><path d="M2.5,13.5 Q8,17.5 13.5,13.5" stroke-width="1.8"/>');
+}
+function iconX(s) {
+    return svg(s, '0 0 14 14', '<line x1="2" y1="2" x2="12" y2="12" stroke-width="2"/><line x1="12" y1="2" x2="2" y2="12" stroke-width="2"/>');
+}
+function iconDownload(s) {
+    return svg(s, '0 0 16 16', '<polyline points="4,7 8,11 12,7" stroke-width="1.8"/><line x1="8" y1="3" x2="8" y2="11" stroke-width="1.8"/><line x1="2" y1="13" x2="14" y2="13" stroke-width="1.8"/>');
+}
+function iconDevice(s) {
+    return svg(s, '0 0 14 14', '<rect x="1" y="2" width="12" height="9" rx="1.5" stroke-width="1.6"/><line x1="4" y1="13" x2="10" y2="13" stroke-width="1.6"/>');
+}
+function iconMinus(s) {
+    return svg(s, '0 0 14 14', '<line x1="2" y1="7" x2="12" y2="7" stroke-width="2"/>');
+}
+function iconChevronDown(s) {
+    return svg(s, '0 0 14 14', '<polyline points="2,4.5 7,9.5 12,4.5" stroke-width="2"/>');
+}
+function iconInboxLarge() {
+    return svg(36, '0 0 24 24', '<rect x="2" y="2" width="20" height="20" rx="3" stroke-width="1.2"/><polyline points="2,15 7,15 8.5,19 15.5,19 17,15 22,15" stroke-width="1.2"/>');
+}
+function iconWifiLarge() {
+    return svg(36, '0 0 24 24', '<path d="M1.5,9 Q12,1 22.5,9" stroke-width="1.2"/><path d="M4.5,13 Q12,7.5 19.5,13" stroke-width="1.2"/><path d="M7.5,17 Q12,13.5 16.5,17" stroke-width="1.2"/><circle cx="12" cy="20.5" r="1.2" fill="currentColor" stroke="none"/>');
+}
+function typeIcon(type) {
+    if (type === 'text')
+        return svg(14, '0 0 16 16', '<line x1="3" y1="5" x2="13" y2="5" stroke-width="1.8"/><line x1="3" y1="8" x2="13" y2="8" stroke-width="1.8"/><line x1="3" y1="11" x2="9" y2="11" stroke-width="1.8"/>');
+    if (type === 'image')
+        return svg(14, '0 0 16 16', '<rect x="2" y="3" width="12" height="10" rx="1.5" stroke-width="1.8"/><circle cx="6" cy="6.5" r="1" stroke-width="1.8"/><polyline points="2,11 5.5,8 7.5,10 10,7.5 14,11" stroke-width="1.8"/>');
+    return svg(14, '0 0 16 16', '<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.8"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.8"/>');
+}
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function escapeHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function humanSize(b) {
+    if (b < 1024)
+        return `${b} B`;
+    if (b < 1048576)
+        return `${(b / 1024).toFixed(1)} KB`;
+    return `${(b / 1048576).toFixed(1)} MB`;
+}
+async function addBrowserFileToHub(file) {
+    const bytesBase64 = await fileToBase64(file);
+    const preview = file.type.startsWith('image/') ? await imageFileToPreview(file) : undefined;
+    return invoke('add_binary_content', {
+        args: {
+            file_name: file.name || `clipboard-${Date.now()}`,
+            mime_type: file.type || null,
+            bytes_base64: bytesBase64,
+            preview: preview || null,
+        },
+    });
+}
+async function fileToBase64(file) {
+    const buffer = await file.arrayBuffer();
+    let binary = '';
+    const chunk = 0x8000;
+    const bytes = new Uint8Array(buffer);
+    for (let index = 0; index < bytes.length; index += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+    }
+    return btoa(binary);
+}
+async function imageFileToPreview(file) {
+    const bitmap = await createImageBitmap(file).catch(() => null);
+    if (!bitmap)
+        return undefined;
+    const canvas = document.createElement('canvas');
+    canvas.width = 72;
+    canvas.height = 72;
+    const ctx = canvas.getContext('2d');
+    if (!ctx)
+        return undefined;
+    const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
+    const width = bitmap.width * scale;
+    const height = bitmap.height * scale;
+    ctx.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+    return canvas.toDataURL('image/jpeg', 0.58);
+}
+// ── Boot ──────────────────────────────────────────────────────────────────────
+init();

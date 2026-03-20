@@ -1,3 +1,6 @@
+use crate::daemon::HubDaemon;
+use anyhow::Result;
+use fenix_hub_core::identity::GroupIdentity;
 /// Windows daemon implementation.
 ///
 /// Integration points:
@@ -16,11 +19,7 @@
 ///   Tauri installer can handle this via a manifest rule, or prompt user on first content share.
 /// - WSL2: devices on WSL2 are on a different virtual network. FenixHub will not discover
 ///   them via mDNS (WSL2 network is NAT'd). This is expected behavior — WSL2 is not a LAN peer.
-
 use std::sync::Arc;
-use anyhow::Result;
-use fenix_hub_core::identity::GroupIdentity;
-use crate::daemon::HubDaemon;
 
 pub struct WindowsDaemon {
     // TODO: hold Tauri AppHandle

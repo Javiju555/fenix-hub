@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">FenixHub</string>
+    <string name="tile_label">FenixHub</string>
+    <string name="channel_service_name">FenixHub Service</string>
+    <string name="channel_service_description">LAN clipboard sharing and overlay controls.</string>
+    <string name="notification_title">FenixHub activo</string>
+    <string name="notification_text">Descubrimiento LAN y overlay disponibles.</string>
+    <string name="notification_action_open">Abrir Hub</string>
+</resources>

@@ -7,4 +7,4 @@ pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-pub use daemon::{HubDaemon, DaemonEvent};
+pub use daemon::{DaemonEvent, HubDaemon};

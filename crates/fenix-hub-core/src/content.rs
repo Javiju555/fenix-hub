@@ -1,6 +1,7 @@
 /// Content types that FenixHub can transfer between devices.
-
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -22,84 +23,125 @@ pub struct ContentItem {
     pub preview: String,
     /// Size in bytes of the full content (for progress indication)
     pub size_bytes: u64,
-    /// The actual content, held in RAM only — never persisted to disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    /// The actual content, held in memory or in the hub's temp storage.
     #[serde(skip)]
     pub data: ContentData,
     /// Unix timestamp when this item was added to the hub
     pub created_at: u64,
 }
 
-/// The actual content data, kept in RAM.
+/// The actual content data, kept in memory or backed by a temp file.
 #[derive(Debug, Clone, Default)]
 pub enum ContentData {
     #[default]
     Empty,
     Text(String),
     Bytes(Vec<u8>), // images and files share this
+    FilePath(PathBuf),
 }
 
 impl ContentItem {
     pub fn from_text(text: String) -> Self {
-        let preview = if text.len() > 80 {
-            format!("{}…", &text[..80])
-        } else {
-            text.clone()
-        };
+        let preview = text.chars().take(80).collect::<String>();
         let size = text.len() as u64;
         Self {
             id: new_id(),
             content_type: ContentType::Text,
             preview,
             size_bytes: size,
+            mime_type: Some("text/plain; charset=utf-8".to_string()),
+            file_name: None,
             data: ContentData::Text(text),
             created_at: unix_now(),
         }
     }
 
     pub fn from_file(filename: &str, data: Vec<u8>) -> Self {
+        Self::from_binary(
+            ContentType::File,
+            Some(filename.to_string()),
+            None,
+            data,
+            Some(filename.to_string()),
+        )
+    }
+
+    pub fn from_image(filename: &str, data: Vec<u8>) -> Self {
+        Self::from_binary(
+            ContentType::Image,
+            Some(filename.to_string()),
+            Some("image/*".to_string()),
+            data,
+            Some(filename.to_string()),
+        )
+    }
+
+    pub fn from_binary(
+        content_type: ContentType,
+        file_name: Option<String>,
+        mime_type: Option<String>,
+        data: Vec<u8>,
+        preview: Option<String>,
+    ) -> Self {
         let size = data.len() as u64;
         Self {
             id: new_id(),
-            content_type: ContentType::File,
-            preview: format!("{} ({})", filename, human_size(size)),
+            content_type,
+            preview: preview.unwrap_or_else(|| {
+                file_name
+                    .clone()
+                    .unwrap_or_else(|| format!("clipboard-{}", unix_now()))
+            }),
             size_bytes: size,
+            mime_type,
+            file_name,
             data: ContentData::Bytes(data),
             created_at: unix_now(),
         }
     }
 
-    pub fn from_image(filename: &str, data: Vec<u8>) -> Self {
-        let size = data.len() as u64;
-        Self {
+    pub fn from_temp_file(
+        path: PathBuf,
+        content_type: ContentType,
+        file_name: Option<String>,
+        mime_type: Option<String>,
+        preview: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let size = std::fs::metadata(&path)?.len();
+        let resolved_name = file_name.or_else(|| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+        });
+
+        Ok(Self {
             id: new_id(),
-            content_type: ContentType::Image,
-            preview: format!("{} ({})", filename, human_size(size)),
+            content_type,
+            preview: preview.unwrap_or_else(|| {
+                resolved_name
+                    .clone()
+                    .unwrap_or_else(|| format!("clipboard-{}", unix_now()))
+            }),
             size_bytes: size,
-            data: ContentData::Bytes(data),
+            mime_type,
+            file_name: resolved_name,
+            data: ContentData::FilePath(path),
             created_at: unix_now(),
-        }
+        })
     }
 }
 
 fn new_id() -> String {
-    use rand::Rng;
-    let bytes: [u8; 8] = rand::thread_rng().gen();
-    hex::encode(bytes)
+    Uuid::new_v4().to_string()
 }
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
-}
-
-fn human_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    }
+        .as_millis() as u64
 }

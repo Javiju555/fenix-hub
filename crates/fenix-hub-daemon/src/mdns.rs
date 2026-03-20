@@ -1,15 +1,15 @@
-/// mDNS announcement and discovery — shared between all platforms.
-
-use std::collections::HashMap;
-use std::net::IpAddr;
 use anyhow::Result;
-use mdns_sd::{ServiceDaemon, ServiceInfo, ServiceEvent};
+use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperty};
+/// mDNS announcement and discovery — shared between all platforms.
+use std::net::IpAddr;
 use tokio::sync::mpsc;
 
-use fenix_hub_core::protocol::{Announcement, MDNS_SERVICE_TYPE};
 use crate::daemon::DaemonEvent;
+use fenix_hub_core::protocol::{Announcement, MDNS_SERVICE_TYPE};
 
 /// Announces a content item via mDNS. Returns instance_name for later unannounce.
+const TXT_CHUNK_SIZE: usize = 240;
+
 pub fn announce_content(
     mdns: &ServiceDaemon,
     announcement: &Announcement,
@@ -17,8 +17,12 @@ pub fn announce_content(
 ) -> Result<String> {
     let instance_name = format!("fenixhub-{}", announcement.content_id);
     let json = serde_json::to_string(announcement)?;
-    let mut properties = HashMap::new();
-    properties.insert("data".to_string(), json);
+    let properties = json
+        .as_bytes()
+        .chunks(TXT_CHUNK_SIZE)
+        .enumerate()
+        .map(|(index, chunk)| TxtProperty::from((format!("data{}", index), chunk.to_vec())))
+        .collect::<Vec<_>>();
 
     let service = ServiceInfo::new(
         MDNS_SERVICE_TYPE,
@@ -30,7 +34,11 @@ pub fn announce_content(
     )?;
 
     mdns.register(service)?;
-    tracing::info!("mDNS: announced content {} ({})", announcement.content_id, announcement.preview);
+    tracing::info!(
+        "mDNS: announced content {} ({})",
+        announcement.content_id,
+        announcement.preview
+    );
     Ok(instance_name)
 }
 
@@ -61,9 +69,8 @@ pub fn start_discovery(
                         .or_else(|| info.get_addresses().iter().next())
                         .copied();
 
-                    if let (Some(peer_ip), Some(data)) =
-                        (peer_ip, info.get_property_val_str("data"))
-                    {
+                    let json_data = reassemble_txt(&info);
+                    if let (Some(peer_ip), Some(data)) = (peer_ip, json_data.as_deref()) {
                         if let Ok(announcement) = serde_json::from_str::<Announcement>(data) {
                             if announcement.group_id != group_id {
                                 continue;
@@ -91,4 +98,30 @@ pub fn start_discovery(
     });
 
     Ok(())
+}
+
+fn reassemble_txt(info: &mdns_sd::ServiceInfo) -> Option<String> {
+    let mut chunks = info
+        .get_properties()
+        .iter()
+        .filter_map(|property| {
+            property
+                .key()
+                .strip_prefix("data")
+                .and_then(|index| index.parse::<usize>().ok())
+                .map(|index| (index, property.val().unwrap_or_default().to_vec()))
+        })
+        .collect::<Vec<_>>();
+
+    if chunks.is_empty() {
+        return None;
+    }
+
+    chunks.sort_by_key(|(index, _)| *index);
+    let payload = chunks
+        .into_iter()
+        .flat_map(|(_, chunk)| chunk)
+        .collect::<Vec<u8>>();
+
+    String::from_utf8(payload).ok()
 }

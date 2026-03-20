@@ -38,14 +38,14 @@ async function closeApp() {
 // ── Mock backend ──────────────────────────────────────────────────────────────
 
 const MOCK_LOCAL: ContentItem[] = [
-  { id: 'a1', content_type: 'text',  preview: 'npm install @tauri-apps/api@2 --save', size_bytes: 38,        created_at: Date.now()/1000 },
-  { id: 'a2', content_type: 'file',  preview: 'diseño-fenix-hub.fig',                 size_bytes: 4_400_000, created_at: Date.now()/1000 - 60 },
-  { id: 'a3', content_type: 'image', preview: 'screenshot-2026.png',                  size_bytes: 1_100_000, created_at: Date.now()/1000 - 120 },
+  { id: 'a1', content_type: 'text',  preview: 'npm install @tauri-apps/api@2 --save', size_bytes: 38,        created_at: Date.now()/1000, file_name: null, mime_type: 'text/plain; charset=utf-8' },
+  { id: 'a2', content_type: 'file',  preview: 'diseño-fenix-hub.fig',                 size_bytes: 4_400_000, created_at: Date.now()/1000 - 60, file_name: 'diseño-fenix-hub.fig', mime_type: 'application/octet-stream' },
+  { id: 'a3', content_type: 'image', preview: 'screenshot-2026.png',                  size_bytes: 1_100_000, created_at: Date.now()/1000 - 120, file_name: 'screenshot-2026.png', mime_type: 'image/png' },
 ];
 
 const MOCK_PEERS: PeerAnnouncement[] = [
-  { group_id: 'demo', content_id: 'p1', device_name: 'Windows Laptop', preview: 'Reunión viernes 10h sala B', content_type: 'text', size_bytes: 34,     send_mode: { Broadcast: null }, created_at: Date.now()/1000, port: 0 },
-  { group_id: 'demo', content_id: 'p2', device_name: 'Windows Laptop', preview: 'presupuesto-q2.xlsx',        content_type: 'file', size_bytes: 90_000, send_mode: { Broadcast: null }, created_at: Date.now()/1000, port: 0 },
+  { group_id: 'demo', content_id: 'p1', device_name: 'Windows Laptop', preview: 'Reunión viernes 10h sala B', content_type: 'text', size_bytes: 34,     send_mode: { Broadcast: null }, created_at: Date.now()/1000, port: 0, file_name: null, mime_type: 'text/plain; charset=utf-8' },
+  { group_id: 'demo', content_id: 'p2', device_name: 'Windows Laptop', preview: 'presupuesto-q2.xlsx',        content_type: 'file', size_bytes: 90_000, send_mode: { Broadcast: null }, created_at: Date.now()/1000, port: 0, file_name: 'presupuesto-q2.xlsx', mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
 ];
 
 let mockLocal = [...MOCK_LOCAL];
@@ -61,8 +61,22 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
     case 'get_peers': return [...mockPeers] as T;
     case 'add_text_content': {
       const text = a?.text as string;
-      const item: ContentItem = { id: String(mockId++), content_type: 'text', preview: text.slice(0, 80), size_bytes: text.length, created_at: Date.now()/1000 };
+      const item: ContentItem = { id: String(mockId++), content_type: 'text', preview: text.slice(0, 80), size_bytes: text.length, created_at: Date.now()/1000, file_name: null, mime_type: 'text/plain; charset=utf-8' };
       mockLocal = [item, ...mockLocal]; return item as T;
+    }
+    case 'add_binary_content': {
+      const args = a?.args as { file_name: string; mime_type?: string | null; preview?: string | null } | undefined;
+      const item: ContentItem = {
+        id: String(mockId++),
+        content_type: args?.mime_type?.startsWith('image/') ? 'image' : 'file',
+        preview: args?.preview || args?.file_name || 'archivo',
+        size_bytes: 0,
+        created_at: Date.now()/1000,
+        file_name: args?.file_name ?? 'archivo',
+        mime_type: args?.mime_type ?? 'application/octet-stream',
+      };
+      mockLocal = [item, ...mockLocal];
+      return item as T;
     }
     case 'remove_content':
       mockLocal = mockLocal.filter(i => i.id !== (a?.id as string));
@@ -86,9 +100,10 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface IdentityInfo   { device_name: string; group_id: string; configured: boolean; }
-interface ContentItem    { id: string; content_type: 'text'|'image'|'file'; preview: string; size_bytes: number; created_at: number; }
-interface PeerAnnouncement { group_id: string; content_id: string; device_name: string; preview: string; content_type: 'text'|'image'|'file'; size_bytes: number; send_mode: { Broadcast: null }|{ Direct: { target_device: string } }; created_at: number; port: number; }
+interface ContentItem    { id: string; content_type: 'text'|'image'|'file'; preview: string; size_bytes: number; created_at: number; file_name?: string | null; mime_type?: string | null; transfer_path?: string | null; }
+interface PeerAnnouncement { group_id: string; content_id: string; device_name: string; preview: string; content_type: 'text'|'image'|'file'; size_bytes: number; send_mode: { Broadcast: null }|{ Direct: { target_device: string } }; created_at: number; port: number; file_name?: string | null; mime_type?: string | null; }
 interface PeerContentPayload { announcement: PeerAnnouncement; peer_ip: string; }
+interface DragPayload { text?: string | null; uri_list?: string | null; }
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -124,6 +139,9 @@ async function loadContent() {
 // ── Tauri events ──────────────────────────────────────────────────────────────
 
 function setupEventListeners() {
+  listen('hub-activate', () => {
+    if (collapsed) expand();
+  });
   listen<PeerContentPayload>('peer-content-available', ({ payload }) => {
     const ann = payload.announcement;
     peerContent = [...peerContent.filter(p => p.content_id !== ann.content_id), ann];
@@ -236,7 +254,6 @@ function renderHub() {
 
   // Close app
   document.getElementById('btn-close')!.addEventListener('click', async () => {
-    await invoke('stop_server');
     await closeApp();
   });
 
@@ -248,6 +265,14 @@ function renderHub() {
   });
   hub.addEventListener('drop', async (e) => {
     e.preventDefault(); hub.classList.remove('drag-over');
+    const files = Array.from((e as DragEvent).dataTransfer?.files ?? []);
+    if (files.length > 0) {
+      const items = await Promise.all(files.map(addBrowserFileToHub));
+      localContent = [...items, ...localContent];
+      updateHeader();
+      if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
+      return;
+    }
     const text = (e as DragEvent).dataTransfer?.getData('text/plain');
     if (text) {
       const item = await invoke<ContentItem>('add_text_content', { text });
@@ -267,15 +292,11 @@ function renderHub() {
     if (imgItem) {
       const blob = imgItem.getAsFile();
       if (!blob) return;
-      const reader = new FileReader();
-      reader.onload = async (ev) => {
-        const dataUrl = ev.target?.result as string;
-        const ci = await invoke<ContentItem>('add_text_content', { text: dataUrl });
-        localContent = [ci, ...localContent];
-        updateHeader();
-        if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
-      };
-      reader.readAsDataURL(blob);
+      const file = new File([blob], `clipboard-${Date.now()}.png`, { type: blob.type || 'image/png' });
+      const ci = await addBrowserFileToHub(file);
+      localContent = [ci, ...localContent];
+      updateHeader();
+      if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
       return;
     }
 
@@ -383,12 +404,12 @@ function renderLocalContent() {
       : `<div class="card-top">
            <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
            <div class="card-body">
-             <div class="card-preview">${escapeHtml(item.preview)}</div>
+             <div class="card-preview">${escapeHtml(item.file_name || item.preview)}</div>
            </div>
          </div>`;
 
     return `
-    <div class="content-card${pub ? ' broadcasting' : ''}">
+    <div class="content-card${pub ? ' broadcasting' : ''}" data-id="${item.id}" draggable="true">
       ${topContent}
       <div class="card-meta">${humanSize(item.size_bytes)}${pub ? ' · <span style="color:var(--accent)">live</span>' : ''}</div>
       <div class="card-actions">${actionBtns}</div>
@@ -438,6 +459,27 @@ function renderLocalContent() {
       setTimeout(() => card.style.outline = '', 600);
     });
   });
+
+  container.querySelectorAll('.content-card').forEach(card => {
+    (card as HTMLElement).addEventListener('dragstart', async event => {
+      const id = (card as HTMLElement).dataset.id;
+      const item = localContent.find(entry => entry.id === id);
+      if (!id || !item) return;
+
+      const dataTransfer = (event as DragEvent).dataTransfer;
+      if (!dataTransfer) return;
+      dataTransfer.effectAllowed = 'copy';
+
+      if (IS_TAURI) {
+        const payload = await invoke<DragPayload>('prepare_local_drag', { id }).catch(() => null);
+        if (payload?.text) dataTransfer.setData('text/plain', payload.text);
+        if (payload?.uri_list) dataTransfer.setData('text/uri-list', payload.uri_list);
+      } else {
+        const fallbackText = item.transfer_path || item.file_name || item.preview;
+        dataTransfer.setData('text/plain', fallbackText);
+      }
+    });
+  });
 }
 
 // ── Red panel ─────────────────────────────────────────────────────────────────
@@ -462,7 +504,7 @@ function renderPeerContent() {
       : `<div class="card-top">
            <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
            <div class="card-body">
-             <div class="card-preview">${escapeHtml(item.preview)}</div>
+             <div class="card-preview">${escapeHtml(item.file_name || item.preview)}</div>
            </div>
          </div>`;
     return `
@@ -480,9 +522,12 @@ function renderPeerContent() {
       const id = (btn as HTMLElement).dataset.id!;
       (btn as HTMLButtonElement).disabled = true;
       (btn as HTMLButtonElement).textContent = 'Recibiendo…';
-      await invoke('pull_peer_content', { content_id: id });
+      const received = await invoke<ContentItem>('pull_peer_content', { content_id: id });
+      localContent = [received, ...localContent];
       peerContent = peerContent.filter(i => i.content_id !== id);
-      updateHeader(); renderPeerContent();
+      updateHeader();
+      renderPeerContent();
+      renderLocalContent();
     });
   });
 }
@@ -541,6 +586,46 @@ function humanSize(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1048576) return `${(b/1024).toFixed(1)} KB`;
   return `${(b/1048576).toFixed(1)} MB`;
+}
+
+async function addBrowserFileToHub(file: File): Promise<ContentItem> {
+  const bytesBase64 = await fileToBase64(file);
+  const preview = file.type.startsWith('image/') ? await imageFileToPreview(file) : undefined;
+  return invoke<ContentItem>('add_binary_content', {
+    args: {
+      file_name: file.name || `clipboard-${Date.now()}`,
+      mime_type: file.type || null,
+      bytes_base64: bytesBase64,
+      preview: preview || null,
+    },
+  });
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  let binary = '';
+  const chunk = 0x8000;
+  const bytes = new Uint8Array(buffer);
+  for (let index = 0; index < bytes.length; index += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+  }
+  return btoa(binary);
+}
+
+async function imageFileToPreview(file: File): Promise<string | undefined> {
+  const bitmap = await createImageBitmap(file).catch(() => null);
+  if (!bitmap) return undefined;
+  const canvas = document.createElement('canvas');
+  canvas.width = 72;
+  canvas.height = 72;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return undefined;
+
+  const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
+  const width = bitmap.width * scale;
+  const height = bitmap.height * scale;
+  ctx.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+  return canvas.toDataURL('image/jpeg', 0.58);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

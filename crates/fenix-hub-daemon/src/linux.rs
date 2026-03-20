@@ -1,3 +1,6 @@
+use crate::daemon::HubDaemon;
+use anyhow::Result;
+use fenix_hub_core::identity::GroupIdentity;
 /// Linux daemon implementation.
 ///
 /// Integration points:
@@ -7,11 +10,7 @@
 /// - Lifecycle: can run embedded in fenix-shell process or as standalone fenixhubd daemon
 /// - Drag-to-hub: implemented in the Tauri frontend via Wayland DnD (wl-drag-and-drop),
 ///   drops on the bar button trigger a Tauri command that calls daemon.add_content()
-
 use std::sync::Arc;
-use anyhow::Result;
-use fenix_hub_core::identity::GroupIdentity;
-use crate::daemon::HubDaemon;
 
 pub struct LinuxDaemon {
     // TODO: hold Tauri AppHandle for window management
