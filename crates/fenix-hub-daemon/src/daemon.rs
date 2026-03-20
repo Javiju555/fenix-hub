@@ -4,21 +4,29 @@
 /// - Linux:   LinuxDaemon   — integrates with fenix-shell, D-Bus notifications
 /// - Windows: WindowsDaemon — system tray process, Windows toast notifications
 /// - Android: implemented in Kotlin (separate repo), communicates via same HTTP protocol
-
 use anyhow::Result;
-use std::sync::Arc;
 use fenix_hub_core::identity::GroupIdentity;
 use fenix_hub_core::protocol::Announcement;
+use std::sync::Arc;
 
 /// Events emitted by the daemon to the Tauri frontend (via Tauri event system).
 #[derive(Debug, Clone)]
 pub enum DaemonEvent {
     /// A peer announced new content available for broadcast pull (includes their IP for HTTP pull)
-    PeerContentAvailable { announcement: Announcement, peer_ip: std::net::IpAddr },
+    PeerContentAvailable {
+        announcement: Announcement,
+        peer_ip: std::net::IpAddr,
+    },
     /// A peer sent a direct notification targeting this device
-    DirectNotifyReceived { announcement: Announcement, peer_ip: std::net::IpAddr },
+    DirectNotifyReceived {
+        announcement: Announcement,
+        peer_ip: std::net::IpAddr,
+    },
     /// A peer's content disappeared (they closed their hub)
-    PeerContentGone { content_id: String, device_name: String },
+    PeerContentGone {
+        content_id: String,
+        device_name: String,
+    },
     /// A new device in our group came online
     PeerOnline { device_name: String },
     /// A device in our group went offline

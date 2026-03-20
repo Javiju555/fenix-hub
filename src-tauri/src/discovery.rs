@@ -1,20 +1,18 @@
+use serde::Serialize;
 /// mDNS discovery wiring for Tauri.
 ///
 /// Starts the discovery loop and forwards DaemonEvents as Tauri events
 /// so the frontend can react in real time.
-
 use std::net::IpAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
 use tauri::{AppHandle, Emitter};
-use serde::Serialize;
+use tokio::sync::{mpsc, RwLock};
 
 use fenix_hub_core::identity::GroupIdentity;
 use fenix_hub_core::protocol::Announcement;
 use fenix_hub_daemon::daemon::DaemonEvent;
 use fenix_hub_daemon::mdns::start_discovery;
-
-use crate::state::HubState;
+use crate::windowing;
 
 /// Tauri event payloads (must be Serialize for emit)
 
@@ -48,28 +46,53 @@ pub fn start(
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
-                DaemonEvent::PeerContentAvailable { announcement, peer_ip } => {
+                DaemonEvent::PeerContentAvailable {
+                    announcement,
+                    peer_ip,
+                } => {
                     let id = announcement.content_id.clone();
-                    peer_store.write().await.insert(id, (announcement.clone(), peer_ip));
-                    let _ = app.emit("peer-content-available", PeerContentPayload {
-                        announcement,
-                        peer_ip: peer_ip.to_string(),
-                    });
+                    peer_store
+                        .write()
+                        .await
+                        .insert(id, (announcement.clone(), peer_ip));
+                    let _ = app.emit(
+                        "peer-content-available",
+                        PeerContentPayload {
+                            announcement,
+                            peer_ip: peer_ip.to_string(),
+                        },
+                    );
                 }
-                DaemonEvent::PeerContentGone { content_id, device_name } => {
+                DaemonEvent::PeerContentGone {
+                    content_id,
+                    device_name,
+                } => {
                     peer_store.write().await.remove(&content_id);
-                    let _ = app.emit("peer-content-gone", PeerGonePayload {
-                        content_id,
-                        device_name,
-                    });
+                    let _ = app.emit(
+                        "peer-content-gone",
+                        PeerGonePayload {
+                            content_id,
+                            device_name,
+                        },
+                    );
                 }
-                DaemonEvent::DirectNotifyReceived { announcement, peer_ip } => {
+                DaemonEvent::DirectNotifyReceived {
+                    announcement,
+                    peer_ip,
+                } => {
                     let id = announcement.content_id.clone();
-                    peer_store.write().await.insert(id, (announcement.clone(), peer_ip));
-                    let _ = app.emit("direct-notify-received", PeerContentPayload {
-                        announcement,
-                        peer_ip: peer_ip.to_string(),
-                    });
+                    peer_store
+                        .write()
+                        .await
+                        .insert(id, (announcement.clone(), peer_ip));
+                    let _ = windowing::show_or_create_hub_window(&app);
+                    let _ = app.emit(
+                        "direct-notify-received",
+                        PeerContentPayload {
+                            announcement,
+                            peer_ip: peer_ip.to_string(),
+                        },
+                    );
                 }
                 _ => {}
             }

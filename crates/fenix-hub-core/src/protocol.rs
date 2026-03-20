@@ -1,3 +1,4 @@
+use crate::content::ContentType;
 /// FenixHub wire protocol.
 ///
 /// Two layers:
@@ -7,16 +8,13 @@
 ///
 /// 2. HTTP (axum server): actual content transfer + direct-send notifications.
 ///    Every request carries an HMAC-SHA256 signature header for authentication.
-
 use serde::{Deserialize, Serialize};
-use crate::content::ContentType;
 
 /// Sent mode: how content is being shared
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
 pub enum SendMode {
     /// Content is broadcast to all paired devices — anyone in the group can pull it
-    Broadcast,
+    Broadcast {},
     /// Content is sent directly to a specific device, which receives a notification
     Direct {
         /// Target device name (for display and routing)
@@ -38,6 +36,10 @@ pub struct Announcement {
     pub preview: String,
     pub content_type: ContentType,
     pub size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
     pub send_mode: SendMode,
     /// Unix timestamp
     pub created_at: u64,
@@ -57,18 +59,15 @@ pub enum HubMessage {
         signature: String,
     },
     /// Response from B's daemon acknowledging the direct notification
-    DirectAck {
-        accepted: bool,
-    },
+    DirectAck { accepted: bool },
 }
 
 /// HTTP API routes served by the ephemeral content server on Device A:
 ///
 ///   GET  /content/{content_id}         → raw content bytes (authenticated via HMAC header)
-///   GET  /content/{content_id}/preview → preview string (unauthenticated, low-value)
 ///   POST /notify                        → HubMessage::DirectNotify (from peer daemon)
 ///
-/// Authentication header: `X-FenixHub-Sig: <hmac_hex>` where the HMAC is computed over
-/// the request path + body.
-pub const HMAC_HEADER: &str = "X-FenixHub-Sig";
+/// Authentication header: `X-FenixHub-Auth: <hmac_hex>` where the HMAC is computed over
+/// the raw `content_id` bytes.
+pub const HMAC_HEADER: &str = "X-FenixHub-Auth";
 pub const MDNS_SERVICE_TYPE: &str = "_fenixhub._tcp.local.";

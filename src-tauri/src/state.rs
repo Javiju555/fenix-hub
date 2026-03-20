@@ -1,13 +1,13 @@
-/// Tauri managed state — shared between all command handlers.
-
-use std::collections::HashMap;
-use std::net::IpAddr;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use mdns_sd::ServiceDaemon;
 use fenix_hub_core::content::ContentItem;
 use fenix_hub_core::identity::GroupIdentity;
 use fenix_hub_core::protocol::Announcement;
+use mdns_sd::ServiceDaemon;
+/// Tauri managed state — shared between all command handlers.
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct HubState {
     pub identity: Arc<RwLock<Option<Arc<GroupIdentity>>>>,
@@ -19,6 +19,7 @@ pub struct HubState {
     pub mdns: ServiceDaemon,
     pub server_shutdown: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
     pub server_port: Arc<RwLock<Option<u16>>>,
+    pub ui_closing: Arc<AtomicBool>,
 }
 
 impl HubState {
@@ -31,6 +32,7 @@ impl HubState {
             mdns,
             server_shutdown: Arc::new(RwLock::new(None)),
             server_port: Arc::new(RwLock::new(None)),
+            ui_closing: Arc::new(AtomicBool::new(false)),
         }
     }
 }

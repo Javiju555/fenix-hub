@@ -5,3 +5,7 @@ dist/
 *.lock
 !bun.lockb
 src-tauri/icons/
+android/local.properties
+android/.gradle/
+android/app/build/
+android/build/

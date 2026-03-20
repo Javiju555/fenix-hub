@@ -1,0 +1,23 @@
+[package]
+name = "fenix-nfc-unlock"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fenix-nfc-unlock"
+path = "src/main.rs"
+
+[dependencies]
+fenix-hub-core = { path = "../fenix-hub-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+hex = { workspace = true }
+mdns-sd = { workspace = true }
+reqwest = { workspace = true }
+toml = "0.8"
+rand = "0.8"
+dirs = "5"

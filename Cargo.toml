@@ -2,6 +2,15 @@
 members = [
     "crates/fenix-hub-core",
     "crates/fenix-hub-daemon",
+    "crates/fenix-nfc-unlock",
+    "crates/fenix-polkit-agent",
+    "src-tauri",
+]
+# Linux-only crates (gtk4, sysfs) are excluded from default build
+# to avoid breaking Windows/macOS development. Build explicitly with -p.
+default-members = [
+    "crates/fenix-hub-core",
+    "crates/fenix-hub-daemon",
     "src-tauri",
 ]
 resolver = "2"
@@ -29,9 +38,9 @@ argon2 = "0.5"
 # HMAC authentication
 hmac = "0.12"
 sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Crypto utilities
-rand = "0.8"
 hex = "0.4"
 
 # Logging

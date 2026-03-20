@@ -1,18 +1,17 @@
+use anyhow::Result;
+use argon2::Argon2;
 /// FenixHub identity system.
 ///
 /// A "group" is defined by a passphrase (can be a PIN, phrase, or anything the user sets).
-/// The passphrase never leaves the device — Argon2id derives a 32-byte group key from it.
+/// The passphrase never leaves the device — Argon2id derives a deterministic 32-byte group key.
 /// Any device that uses the same passphrase derives the same group key and can communicate.
 ///
 /// The group key is used as an HMAC-SHA256 key to sign all mDNS announcements and HTTP
 /// requests. Strangers on the same LAN with a different passphrase cannot interact.
-
-use argon2::Argon2;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use anyhow::Result;
 
-const ARGON2_SALT: &[u8] = b"fenixhub-v1-salt"; // fixed salt — key is deterministic per passphrase
+const ARGON2_SALT: &[u8] = b"fenixhub-v1-salt";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -34,20 +33,25 @@ impl GroupIdentity {
         argon2
             .hash_password_into(passphrase.as_bytes(), ARGON2_SALT, &mut group_key)
             .map_err(|e| anyhow::anyhow!("Key derivation failed: {}", e))?;
-        Ok(Self { group_key, device_name: device_name.to_string() })
+        Ok(Self {
+            group_key,
+            device_name: device_name.to_string(),
+        })
     }
 
     /// Restore identity from a previously persisted key (hex-encoded).
     /// Used on startup to avoid re-deriving from passphrase.
     pub fn from_key_hex(key_hex: &str, device_name: &str) -> Result<Self> {
-        let bytes = hex::decode(key_hex)
-            .map_err(|e| anyhow::anyhow!("Invalid key hex: {}", e))?;
+        let bytes = hex::decode(key_hex).map_err(|e| anyhow::anyhow!("Invalid key hex: {}", e))?;
         if bytes.len() != 32 {
             anyhow::bail!("Key must be 32 bytes, got {}", bytes.len());
         }
         let mut group_key = [0u8; 32];
         group_key.copy_from_slice(&bytes);
-        Ok(Self { group_key, device_name: device_name.to_string() })
+        Ok(Self {
+            group_key,
+            device_name: device_name.to_string(),
+        })
     }
 
     /// Returns the full group key as hex (for persistence — stored locally, never sent).
@@ -63,16 +67,16 @@ impl GroupIdentity {
 
     /// Signs a message with HMAC-SHA256 using the full group key.
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
-        let mut mac = HmacSha256::new_from_slice(&self.group_key)
-            .expect("HMAC key size is always valid");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.group_key).expect("HMAC key size is always valid");
         mac.update(message);
         mac.finalize().into_bytes().to_vec()
     }
 
     /// Verifies a signature from a peer.
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
-        let mut mac = HmacSha256::new_from_slice(&self.group_key)
-            .expect("HMAC key size is always valid");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.group_key).expect("HMAC key size is always valid");
         mac.update(message);
         mac.verify_slice(signature).is_ok()
     }

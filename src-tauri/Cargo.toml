@@ -7,12 +7,17 @@ edition = "2021"
 name = "fenix_hub_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "fenix-hub"
+path = "src/main.rs"
+
 [dependencies]
 fenix-hub-core = { path = "../crates/fenix-hub-core" }
 fenix-hub-daemon = { path = "../crates/fenix-hub-daemon" }
 
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -21,6 +26,8 @@ mdns-sd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+base64 = "0.22"
+uuid = { workspace = true }
 
 # Cross-platform clipboard (Wayland/X11/Windows)
 arboard = "3"
