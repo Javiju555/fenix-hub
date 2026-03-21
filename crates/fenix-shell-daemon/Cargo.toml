@@ -1,0 +1,21 @@
+[package]
+name = "fenix-shell-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fenix-shelld"
+path = "src/main.rs"
+
+[dependencies]
+zbus        = { version = "4", default-features = false, features = ["tokio"] }
+tokio       = { workspace = true }
+mpris       = "2.0.1"
+inotify     = { version = "0.10", default-features = false, features = ["stream"] }
+base64      = "0.22"
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde       = { workspace = true }
+futures-util = "0.3"
+serde_json   = "1"
