@@ -4,6 +4,7 @@ members = [
     "crates/fenix-hub-daemon",
     "crates/fenix-nfc-unlock",
     "crates/fenix-polkit-agent",
+    "crates/fenix-shell-daemon",
     "src-tauri",
 ]
 # Linux-only crates (gtk4, sysfs) are excluded from default build
