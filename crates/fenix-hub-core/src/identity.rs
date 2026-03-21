@@ -1,5 +1,5 @@
 use anyhow::Result;
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 /// FenixHub identity system.
 ///
 /// A "group" is defined by a passphrase (can be a PIN, phrase, or anything the user sets).
@@ -28,7 +28,9 @@ impl GroupIdentity {
     /// Derive a group identity from a passphrase.
     /// This is deterministic: same passphrase always produces same group_key.
     pub fn from_passphrase(passphrase: &str, device_name: &str) -> Result<Self> {
-        let argon2 = Argon2::default();
+        let params = Params::new(4096, 3, 1, Some(32))
+            .map_err(|e| anyhow::anyhow!("Invalid Argon2 params: {}", e))?;
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let mut group_key = [0u8; 32];
         argon2
             .hash_password_into(passphrase.as_bytes(), ARGON2_SALT, &mut group_key)

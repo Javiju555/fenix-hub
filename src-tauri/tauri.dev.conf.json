@@ -1,0 +1,6 @@
+{
+  "build": {
+    "devUrl": "http://localhost:1421",
+    "beforeDevCommand": "cd /home/javiju/proyectos/fenix-hub/frontend && ~/.bun/bin/bun run dev --host --port 1421"
+  }
+}

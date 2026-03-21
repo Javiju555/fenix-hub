@@ -5,9 +5,7 @@
   "identifier": "dev.fenix.hub",
   "build": {
     "frontendDist": "../frontend/dist",
-    "devUrl": "http://localhost:1421",
-    "beforeDevCommand": "cd frontend && bun run dev --host --port 1421",
-    "beforeBuildCommand": "cd frontend && bun run build"
+    "beforeBuildCommand": "cd /home/javiju/proyectos/fenix-hub/frontend && ~/.bun/bin/bun run build"
   },
   "app": {
     "windows": [
