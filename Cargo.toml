@@ -4,7 +4,6 @@ members = [
     "crates/fenix-hub-daemon",
     "crates/fenix-nfc-unlock",
     "crates/fenix-polkit-agent",
-    "crates/fenix-shell-daemon",
     "src-tauri",
 ]
 # Linux-only crates (gtk4, sysfs) are excluded from default build
@@ -52,3 +51,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
 async-trait = "0.1"
+
+[profile.release]
+strip = true
