@@ -46,6 +46,28 @@ class SettingsStore(context: Context) {
         return settings
     }
 
+    fun ignoredPeerContentIds(): Set<String> {
+        return prefs.getStringSet(KEY_IGNORED_PEER_CONTENT_IDS, emptySet()).orEmpty()
+    }
+
+    fun isIgnoredPeerContent(contentId: String): Boolean {
+        return ignoredPeerContentIds().contains(contentId)
+    }
+
+    fun ignorePeerContent(contentId: String) {
+        val updated = ignoredPeerContentIds().toMutableSet().apply { add(contentId) }
+        prefs.edit()
+            .putStringSet(KEY_IGNORED_PEER_CONTENT_IDS, updated)
+            .apply()
+    }
+
+    fun clearIgnoredPeerContent(contentId: String) {
+        val updated = ignoredPeerContentIds().toMutableSet().apply { remove(contentId) }
+        prefs.edit()
+            .putStringSet(KEY_IGNORED_PEER_CONTENT_IDS, updated)
+            .apply()
+    }
+
     private fun load(): AppSettings {
         val configured = prefs.getBoolean(KEY_CONFIGURED, false)
         return AppSettings(
@@ -62,5 +84,6 @@ class SettingsStore(context: Context) {
         const val KEY_DEVICE_NAME = "device_name"
         const val KEY_GROUP_KEY_HEX = "group_key_hex"
         const val KEY_GROUP_ID = "group_id"
+        const val KEY_IGNORED_PEER_CONTENT_IDS = "ignored_peer_content_ids"
     }
 }

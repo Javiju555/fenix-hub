@@ -16,6 +16,11 @@ use crate::persist;
 use crate::state::HubState;
 use crate::temp_store;
 
+const MAX_ANNOUNCEMENT_BYTES: usize = 1000;
+const MAX_ANNOUNCEMENT_FILE_NAME_CHARS: usize = 80;
+const MIN_ANNOUNCEMENT_PREVIEW_CHARS: usize = 24;
+const ANNOUNCEMENT_PREVIEW_TRIM_STEP: usize = 8;
+
 // ── Identity ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -240,7 +245,7 @@ pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> R
         },
     };
 
-    let announcement = Announcement {
+    let announcement = compact_announcement_for_mdns(Announcement {
         group_id: identity.group_id(),
         content_id: item.id.clone(),
         device_name: identity.device_name.clone(),
@@ -252,7 +257,7 @@ pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> R
         send_mode,
         created_at: item.created_at,
         port,
-    };
+    });
 
     // Get local IP for mDNS announcement
     let local_ip = local_ipv4().ok_or("Cannot determine local IP")?;
@@ -512,5 +517,125 @@ fn transfer_path(item: &ContentItem) -> Option<String> {
     match &item.data {
         ContentData::FilePath(path) => Some(path.to_string_lossy().to_string()),
         _ => None,
+    }
+}
+
+fn compact_announcement_for_mdns(mut announcement: Announcement) -> Announcement {
+    if announcement_size(&announcement) <= MAX_ANNOUNCEMENT_BYTES {
+        return announcement;
+    }
+
+    let fallback_preview = announcement_preview_fallback(&announcement);
+    if announcement.preview != fallback_preview {
+        announcement.preview = fallback_preview;
+    }
+    if announcement_size(&announcement) <= MAX_ANNOUNCEMENT_BYTES {
+        return announcement;
+    }
+
+    if let Some(file_name) = announcement
+        .file_name
+        .clone()
+        .filter(|name| name.chars().count() > MAX_ANNOUNCEMENT_FILE_NAME_CHARS)
+    {
+        announcement.file_name = Some(truncate_chars(
+            &file_name,
+            MAX_ANNOUNCEMENT_FILE_NAME_CHARS,
+        ));
+    }
+    if announcement_size(&announcement) <= MAX_ANNOUNCEMENT_BYTES {
+        return announcement;
+    }
+
+    announcement.mime_type = None;
+    if announcement_size(&announcement) <= MAX_ANNOUNCEMENT_BYTES {
+        return announcement;
+    }
+
+    let mut preview_len = announcement.preview.chars().count();
+    while announcement_size(&announcement) > MAX_ANNOUNCEMENT_BYTES
+        && preview_len > MIN_ANNOUNCEMENT_PREVIEW_CHARS
+    {
+        preview_len = preview_len
+            .saturating_sub(ANNOUNCEMENT_PREVIEW_TRIM_STEP)
+            .max(MIN_ANNOUNCEMENT_PREVIEW_CHARS);
+        announcement.preview = truncate_chars(&announcement.preview, preview_len);
+    }
+    if announcement_size(&announcement) <= MAX_ANNOUNCEMENT_BYTES {
+        return announcement;
+    }
+
+    announcement.file_name = None;
+    if announcement_size(&announcement) <= MAX_ANNOUNCEMENT_BYTES {
+        return announcement;
+    }
+
+    announcement.preview = announcement_kind_label(&announcement.content_type).to_string();
+    announcement
+}
+
+fn announcement_size(announcement: &Announcement) -> usize {
+    serde_json::to_vec(announcement)
+        .map(|payload| payload.len())
+        .unwrap_or(usize::MAX)
+}
+
+fn announcement_preview_fallback(announcement: &Announcement) -> String {
+    match announcement.content_type {
+        fenix_hub_core::content::ContentType::Text => {
+            truncate_chars(&announcement.preview, MAX_ANNOUNCEMENT_FILE_NAME_CHARS)
+        }
+        fenix_hub_core::content::ContentType::Image => announcement
+            .file_name
+            .as_deref()
+            .map(|name| format!("Imagen: {}", truncate_chars(name, 48)))
+            .unwrap_or_else(|| "Imagen lista para descargar".to_string()),
+        fenix_hub_core::content::ContentType::File => announcement
+            .file_name
+            .as_deref()
+            .map(|name| format!("Archivo: {}", truncate_chars(name, 48)))
+            .unwrap_or_else(|| "Archivo listo para descargar".to_string()),
+    }
+}
+
+fn announcement_kind_label(
+    content_type: &fenix_hub_core::content::ContentType,
+) -> &'static str {
+    match content_type {
+        fenix_hub_core::content::ContentType::Text => "Texto",
+        fenix_hub_core::content::ContentType::Image => "Imagen",
+        fenix_hub_core::content::ContentType::File => "Archivo",
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fenix_hub_core::content::ContentType;
+    use fenix_hub_core::protocol::SendMode;
+
+    #[test]
+    fn compacts_large_image_announcement_for_mdns() {
+        let announcement = Announcement {
+            group_id: "g".repeat(32),
+            content_id: "content-1".to_string(),
+            device_name: "Pixel".to_string(),
+            preview: format!("data:image/jpeg;base64,{}", "A".repeat(4096)),
+            content_type: ContentType::Image,
+            size_bytes: 42,
+            file_name: Some("camera-roll-photo.jpg".to_string()),
+            mime_type: Some("image/jpeg".to_string()),
+            send_mode: SendMode::Broadcast {},
+            created_at: 1,
+            port: 8765,
+        };
+
+        let compacted = compact_announcement_for_mdns(announcement);
+        assert!(announcement_size(&compacted) <= MAX_ANNOUNCEMENT_BYTES);
+        assert!(!compacted.preview.starts_with("data:image"));
     }
 }

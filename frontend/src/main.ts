@@ -5,6 +5,7 @@ import './style.css';
 // ── Browser/Tauri detection ───────────────────────────────────────────────────
 
 const IS_TAURI = '__TAURI_INTERNALS__' in window;
+const IS_ANDROID = navigator.userAgent.toLowerCase().includes('android');
 
 async function invoke<T>(cmd: string, args?: unknown): Promise<T> {
   if (IS_TAURI) return tauriInvoke<T>(cmd, args as Record<string, unknown>);
@@ -630,4 +631,8 @@ async function imageFileToPreview(file: File): Promise<string | undefined> {
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
-init();
+if (IS_ANDROID) {
+  import('./android').then(m => m.initAndroid());
+} else {
+  init();
+}
