@@ -215,6 +215,7 @@ function renderHub() {
         <div class="hub-status">
           <div class="status-dot scanning" id="status-dot"></div>
           <span id="status-text">Buscando…</span>
+          <span class="enc-badge" title="Cifrado AES-256-GCM extremo a extremo activo">${iconLock(9)}</span>
         </div>
 
         <div class="hub-actions">
@@ -567,6 +568,9 @@ function iconMinus(s: number) {
 }
 function iconChevronDown(s: number) {
   return svg(s,'0 0 14 14','<polyline points="2,4.5 7,9.5 12,4.5" stroke-width="2"/>');
+}
+function iconLock(s: number) {
+  return svg(s,'0 0 14 14','<rect x="2" y="6" width="10" height="7" rx="1.5" stroke-width="1.6"/><path d="M4,6 V4 a4,4 0 0 1 6,0 V6" stroke-width="1.6" fill="none"/>');
 }
 function iconInboxLarge() {
   return svg(36,'0 0 24 24','<rect x="2" y="2" width="20" height="20" rx="3" stroke-width="1.2"/><polyline points="2,15 7,15 8.5,19 15.5,19 17,15 22,15" stroke-width="1.2"/>');

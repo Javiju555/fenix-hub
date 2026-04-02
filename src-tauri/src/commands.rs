@@ -246,6 +246,7 @@ pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> R
     };
 
     let announcement = compact_announcement_for_mdns(Announcement {
+        protocol_version: fenix_hub_core::protocol::PROTOCOL_VERSION,
         group_id: identity.group_id(),
         content_id: item.id.clone(),
         device_name: identity.device_name.clone(),
