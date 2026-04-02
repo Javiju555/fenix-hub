@@ -3,6 +3,7 @@ import { listen as tauriListen } from '@tauri-apps/api/event';
 import './style.css';
 // ── Browser/Tauri detection ───────────────────────────────────────────────────
 const IS_TAURI = '__TAURI_INTERNALS__' in window;
+const IS_ANDROID = navigator.userAgent.toLowerCase().includes('android');
 async function invoke(cmd, args) {
     if (IS_TAURI)
         return tauriInvoke(cmd, args);
@@ -615,4 +616,9 @@ async function imageFileToPreview(file) {
     return canvas.toDataURL('image/jpeg', 0.58);
 }
 // ── Boot ──────────────────────────────────────────────────────────────────────
-init();
+if (IS_ANDROID) {
+    import('./android').then(m => m.initAndroid());
+}
+else {
+    init();
+}

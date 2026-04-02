@@ -5,8 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.ClipDescription
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.hardware.Sensor
@@ -35,7 +33,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-class FenixHubService : Service(), OverlayController.Callbacks {
+class FenixHubService : Service() {
     inner class LocalBinder : Binder() {
         fun getService(): FenixHubService = this@FenixHubService
     }
@@ -46,12 +44,23 @@ class FenixHubService : Service(), OverlayController.Callbacks {
     private val container by lazy { (application as FenixHubApplication).container }
     private val repository by lazy { container.contentRepository }
     private val settingsStore by lazy { container.settingsStore }
+    private val tempClipboardStore by lazy { container.tempClipboardStore }
     private val httpClient by lazy { container.httpClient }
     private val receivedHandler by lazy { container.receivedContentHandler }
     private val localContentFactory by lazy { container.localContentFactory }
     private val httpServer by lazy { FenixHttpServer(settingsStore, repository) }
     private val nsdController by lazy { NsdController(this, repository, settingsStore) }
-    private val overlayController by lazy { OverlayController(this, repository, this) }
+    private val overlayController by lazy {
+        OverlayController(
+            context = this,
+            repository = repository,
+            settingsStore = settingsStore,
+            localContentFactory = localContentFactory,
+            tempClipboardStore = tempClipboardStore,
+            receivedContentHandler = receivedHandler,
+            httpClient = httpClient,
+        )
+    }
 
     private var syncJob: Job? = null
     private var sensorManager: SensorManager? = null
@@ -112,48 +121,6 @@ class FenixHubService : Service(), OverlayController.Callbacks {
         } else {
             showToast("Contenido publicado en LAN")
         }
-    }
-
-    override fun onPasteTextRequested() {
-        val clipboard = getSystemService(ClipboardManager::class.java)
-        val clip = clipboard.primaryClip
-        val text = if (clip != null && clip.description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) {
-            clip.getItemAt(0).coerceToText(this)?.toString()
-        } else {
-            clip?.getItemAt(0)?.coerceToText(this)?.toString()
-        }
-        if (text.isNullOrBlank()) {
-            showToast("El portapapeles no contiene texto")
-            return
-        }
-        repository.addLocalContent(localContentFactory.fromText(text))
-        showToast("Texto añadido al hub")
-    }
-
-    override fun onPickImageRequested() {
-        overlayController.dismiss()
-        val intent = MainActivity.createIntent(this, launchImagePicker = true).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        }
-        startActivity(intent)
-    }
-
-    override fun onPublishRequested() {
-        publishSelected()
-    }
-
-    override fun onCopySelectedRequested() {
-        val selectedId = repository.selectedLocalContentId.value ?: repository.latestLocalContent()?.contentId
-        val selected = selectedId?.let(repository::getLocalContent)
-        if (selected == null) {
-            showToast("No hay contenido local seleccionado")
-            return
-        }
-        showToast(receivedHandler.copyToSystemClipboard(selected))
-    }
-
-    override fun onReceivePeer(peer: PeerContent) {
-        receivePeer(peer)
     }
 
     override fun onDestroy() {

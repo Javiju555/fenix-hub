@@ -1,5 +1,7 @@
 use anyhow::Result;
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperty};
+use mdns_sd::{ServiceDaemon, ServiceInfo, TxtProperty};
+#[cfg(not(target_os = "linux"))]
+use mdns_sd::ServiceEvent;
 /// mDNS announcement and discovery — shared between all platforms.
 use std::net::IpAddr;
 use tokio::sync::mpsc;
@@ -136,7 +138,7 @@ fn start_discovery_avahi(group_id: String, event_tx: mpsc::Sender<DaemonEvent>) 
 
     std::thread::spawn(move || {
         let mut child = match Command::new("avahi-browse")
-            .args(["-r", "-p", "--no-db-lookup", MDNS_SERVICE_TYPE])
+            .args(["-r", "-p", "--no-db-lookup", avahi_service_type()])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -231,6 +233,13 @@ fn start_discovery_avahi(group_id: String, event_tx: mpsc::Sender<DaemonEvent>) 
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn avahi_service_type() -> &'static str {
+    MDNS_SERVICE_TYPE
+        .strip_suffix(".local.")
+        .unwrap_or(MDNS_SERVICE_TYPE)
+}
+
 /// Parses avahi-browse -p TXT block: `"data0=chunk0" "data1=chunk1" ...`
 /// Values are avahi-quote-escaped (inner `"` → `\"`, `\` → `\\`).
 /// Returns the reassembled JSON string, or None if unparseable.
@@ -247,27 +256,23 @@ fn parse_avahi_txt(txt_block: &str) -> Option<String> {
 
         // Decode avahi-escaped quoted value
         let mut value = String::new();
-        let mut bytes = remaining.as_bytes().iter().enumerate();
-        let mut end = 0;
-        loop {
-            match bytes.next() {
-                None => {
-                    end = remaining.len();
-                    break;
-                }
-                Some((i, b'\\')) => {
-                    end = i + 1;
-                    match bytes.next() {
-                        Some((j, b'"')) => { value.push('"'); end = j + 1; }
-                        Some((j, b'\\')) => { value.push('\\'); end = j + 1; }
-                        Some((j, c)) => { value.push('\\'); value.push(*c as char); end = j + 1; }
-                        None => { end = remaining.len(); break; }
+        let mut chars = remaining.char_indices();
+        let end = loop {
+            match chars.next() {
+                None => break remaining.len(),
+                Some((_, '\\')) => match chars.next() {
+                    Some((_, '"')) => value.push('"'),
+                    Some((_, '\\')) => value.push('\\'),
+                    Some((_, c)) => {
+                        value.push('\\');
+                        value.push(c);
                     }
-                }
-                Some((i, b'"')) => { end = i + 1; break; }
-                Some((i, c)) => { value.push(*c as char); end = i + 1; }
+                    None => break remaining.len(),
+                },
+                Some((i, '"')) => break i + 1,
+                Some((_, c)) => value.push(c),
             }
-        }
+        };
         remaining = remaining[end..].trim_start();
 
         // value = "data0=json_chunk" or "data1=json_chunk"
@@ -298,6 +303,7 @@ fn which_avahi_browse() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("avahi-browse not found — install avahi package"))
 }
 
+#[cfg(not(target_os = "linux"))]
 fn reassemble_txt(info: &mdns_sd::ServiceInfo) -> Option<String> {
     let mut chunks = info
         .get_properties()
@@ -322,4 +328,25 @@ fn reassemble_txt(info: &mdns_sd::ServiceInfo) -> Option<String> {
         .collect::<Vec<u8>>();
 
     String::from_utf8(payload).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn avahi_service_type_strips_local_suffix() {
+        assert_eq!(avahi_service_type(), "_fenixhub._tcp");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_avahi_txt_reassembles_chunks() {
+        let txt = "\"data0={\\\"preview\\\":\\\"hello \" \"data1=world\\\"}\"";
+        assert_eq!(
+            parse_avahi_txt(txt).as_deref(),
+            Some("{\"preview\":\"hello world\"}")
+        );
+    }
 }

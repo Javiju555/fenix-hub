@@ -3,6 +3,14 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val frontendDir = project.file("../../frontend")
+val frontendDistDir = frontendDir.resolve("dist")
+val bunExecutable = System.getenv("BUN")
+    ?: project.file("${System.getProperty("user.home")}/.bun/bin/bun")
+        .takeIf { it.exists() }
+        ?.absolutePath
+    ?: "bun"
+
 android {
     namespace = "com.fenixhub.mobile"
     compileSdk = 34
@@ -54,6 +62,10 @@ android {
             excludes += "META-INF/io.netty.versions.properties"
         }
     }
+
+    sourceSets {
+        getByName("main").assets.srcDir(frontendDistDir)
+    }
 }
 
 dependencies {
@@ -68,6 +80,7 @@ dependencies {
     implementation("androidx.compose.animation:animation:1.6.4")
     implementation("androidx.compose.material:material-icons-extended:1.6.4")
     implementation("androidx.compose.material3:material3:1.2.1")
+    implementation("androidx.webkit:webkit:1.10.0")
 
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
@@ -84,4 +97,23 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling:1.6.4")
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.6.4")
+}
+
+val buildFrontend by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Builds the Android web frontend bundle."
+    workingDir(frontendDir)
+    commandLine(bunExecutable, "run", "build")
+    inputs.files(
+        frontendDir.resolve("index.html"),
+        frontendDir.resolve("package.json"),
+        frontendDir.resolve("tsconfig.json"),
+        frontendDir.resolve("vite.config.ts"),
+    )
+    inputs.dir(frontendDir.resolve("src"))
+    outputs.dir(frontendDistDir)
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(buildFrontend)
 }
