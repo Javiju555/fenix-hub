@@ -47,6 +47,14 @@ class ContentRepository {
         }
     }
 
+    fun unpublishAll() {
+        synchronized(localLock) {
+            if (localItems.isEmpty()) return
+            localItems.replaceAll { _, current -> current.copy(isPublished = false) }
+            emitLocalContentLocked()
+        }
+    }
+
     fun publishSelected(sendMode: SendMode = SendMode.Broadcast): LocalContent? {
         val selected = mutableSelectedLocalContentId.value ?: latestLocalContent()?.contentId ?: return null
         publish(selected, sendMode)
@@ -58,6 +66,15 @@ class ContentRepository {
     }
 
     fun getLocalContent(contentId: String): LocalContent? = synchronized(localLock) { localItems[contentId] }
+
+    fun removeLocalContent(contentId: String): LocalContent? = synchronized(localLock) {
+        val removed = localItems.remove(contentId) ?: return null
+        if (mutableSelectedLocalContentId.value == contentId) {
+            mutableSelectedLocalContentId.value = localItems.values.maxByOrNull { it.createdAt }?.contentId
+        }
+        emitLocalContentLocked()
+        removed
+    }
 
     fun latestLocalContent(): LocalContent? = synchronized(localLock) {
         localItems.values.maxByOrNull { it.createdAt }
@@ -76,6 +93,8 @@ class ContentRepository {
             emitPeersLocked()
         }
     }
+
+    fun getPeer(contentId: String): PeerContent? = synchronized(peerLock) { peerItems[contentId] }
 
     fun clearPeers() {
         synchronized(peerLock) {

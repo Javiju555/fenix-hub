@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { resolve } from 'node:path';
 
 export default defineConfig({
   clearScreen: false,
@@ -15,5 +16,11 @@ export default defineConfig({
     minify: !process.env.TAURI_ENV_DEBUG ? 'esbuild' : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
     outDir: 'dist',
+    rollupOptions: {
+      input: {
+        app: resolve(__dirname, 'index.html'),
+        overlay: resolve(__dirname, 'overlay.html'),
+      },
+    },
   },
 });

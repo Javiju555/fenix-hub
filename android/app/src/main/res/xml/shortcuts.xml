@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_tile_hub"
+        android:shortcutId="open_overlay"
+        android:shortcutLongLabel="@string/shortcut_overlay_long"
+        android:shortcutShortLabel="@string/shortcut_overlay_short">
+        <intent
+            android:action="com.fenixhub.mobile.action.OPEN_OVERLAY"
+            android:targetClass="com.fenixhub.mobile.MainActivity"
+            android:targetPackage="com.fenixhub.mobile" />
+    </shortcut>
+</shortcuts>

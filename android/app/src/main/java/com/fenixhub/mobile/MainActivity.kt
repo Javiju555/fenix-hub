@@ -1,184 +1,198 @@
 package com.fenixhub.mobile
 
-import android.Manifest
 import android.content.ClipDescription
 import android.content.ClipboardManager
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
+import android.content.pm.ApplicationInfo
+import android.graphics.Color
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.IBinder
 import android.provider.Settings
+import android.view.ViewGroup
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.webkit.WebViewAssetLoader
 import com.fenixhub.mobile.service.FenixHubService
-import com.fenixhub.mobile.ui.hub.HubScreen
-import com.fenixhub.mobile.ui.hub.HubViewModel
-import com.fenixhub.mobile.ui.setup.SetupScreen
-import com.fenixhub.mobile.ui.setup.SetupViewModel
-import com.fenixhub.mobile.ui.theme.FenixHubTheme
+import com.fenixhub.mobile.web.AndroidHubBridge
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
-    private val setupViewModel: SetupViewModel by viewModels()
-    private val hubViewModel: HubViewModel by viewModels()
     private val container by lazy { (application as FenixHubApplication).container }
 
-    private var boundService: FenixHubService? = null
-    private val overlayPermissionGranted = mutableStateOf(false)
-    private val notificationPermissionGranted = mutableStateOf(false)
-    private val pendingImagePickerLaunch = mutableStateOf(false)
+    private lateinit var webView: WebView
+    private lateinit var assetLoader: WebViewAssetLoader
+    private lateinit var bridge: AndroidHubBridge
 
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            boundService = (service as? FenixHubService.LocalBinder)?.getService()
-        }
+    private var pendingFilePicker: CompletableDeferred<Uri?>? = null
 
-        override fun onServiceDisconnected(name: ComponentName?) {
-            boundService = null
-        }
+    private val filePickerLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri: Uri? ->
+        pendingFilePicker?.takeIf { it.isActive }?.complete(uri)
+        pendingFilePicker = null
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        refreshPermissionState()
-        pendingImagePickerLaunch.value = intent?.getBooleanExtra(EXTRA_LAUNCH_IMAGE_PICKER, false) == true
 
-        setContent {
-            FenixHubTheme {
-                val settings by setupViewModel.settings.collectAsStateWithLifecycle()
-                val hubState by hubViewModel.uiState.collectAsStateWithLifecycle()
-                val context = LocalContext.current
+        if (tryOpenOverlayShortcut(intent)) {
+            return
+        }
 
-                val imagePickerLauncher = rememberLauncherForActivityResult(
-                    contract = ActivityResultContracts.GetContent(),
-                ) { uri: Uri? ->
-                    uri?.let(hubViewModel::importImage)
-                    pendingImagePickerLaunch.value = false
-                }
+        assetLoader = WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .build()
 
-                val notificationPermissionLauncher = rememberLauncherForActivityResult(
-                    contract = ActivityResultContracts.RequestPermission(),
-                ) {
-                    refreshPermissionState()
-                }
+        bridge = AndroidHubBridge(
+            activity = this,
+            container = container,
+            launchFilePicker = ::launchFilePicker,
+            readClipboardText = ::clipboardText,
+            openOverlayPermissionSettings = ::openOverlayPermissionSettings,
+        )
 
-                LaunchedEffect(settings.configured) {
-                    if (settings.configured) {
-                        FenixHubService.start(context)
-                    }
-                }
+        webView = createWebView()
+        bridge.attach(webView)
+        setContentView(webView)
 
-                LaunchedEffect(settings.configured, pendingImagePickerLaunch.value) {
-                    if (settings.configured && pendingImagePickerLaunch.value) {
-                        imagePickerLauncher.launch("*/*")
-                    }
-                }
+        startServiceIfConfigured()
+        webView.loadUrl(HUB_URL)
+        handleIntent(intent)
+    }
 
-                if (!settings.configured) {
-                    SetupScreen(
-                        deviceName = setupViewModel.deviceName,
-                        passphrase = setupViewModel.passphrase,
-                        groupIdPreview = setupViewModel.groupIdPreview,
-                        isSaving = setupViewModel.isSaving,
-                        overlayPermissionGranted = overlayPermissionGranted.value,
-                        onDeviceNameChange = setupViewModel::onDeviceNameChange,
-                        onPassphraseChange = setupViewModel::onPassphraseChange,
-                        onRequestOverlayPermission = ::openOverlayPermissionSettings,
-                        onSave = setupViewModel::saveIdentity,
-                    )
-                } else {
-                    HubScreen(
-                        uiState = hubState,
-                        overlayPermissionGranted = overlayPermissionGranted.value,
-                        notificationPermissionGranted = notificationPermissionGranted.value,
-                        onOpenOverlay = {
-                            if (overlayPermissionGranted.value) {
-                                FenixHubService.start(context, FenixHubService.ACTION_SHOW_OVERLAY)
-                            } else {
-                                openOverlayPermissionSettings()
-                            }
-                        },
-                        onRequestOverlayPermission = ::openOverlayPermissionSettings,
-                        onRequestNotificationPermission = {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            }
-                        },
-                        onPasteText = {
-                            val clipboardText = clipboardText()
-                            if (clipboardText.isNullOrBlank()) {
-                                toast("El portapapeles no contiene texto")
-                            } else {
-                                hubViewModel.importText(clipboardText)
-                            }
-                        },
-                        onPickImage = {
-                            pendingImagePickerLaunch.value = true
-                            imagePickerLauncher.launch("*/*")
-                        },
-                        onPublishSelected = {
-                            boundService?.publishSelected() ?: hubViewModel.publishSelected()
-                        },
-                        onCopySelected = {
-                            val selected = hubState.localContent.firstOrNull { it.contentId == hubState.selectedLocalContentId }
-                                ?: hubState.localContent.firstOrNull()
-                            if (selected == null) {
-                                toast("No hay contenido local seleccionado")
-                            } else {
-                                toast(container.receivedContentHandler.copyToSystemClipboard(selected))
-                            }
-                        },
-                        onSelectLocalContent = hubViewModel::selectLocalContent,
-                        onReceivePeer = { peer ->
-                            boundService?.receivePeer(peer) ?: toast("Servicio FenixHub no conectado")
-                        },
-                    )
+    override fun onResume() {
+        super.onResume()
+        startServiceIfConfigured()
+        notifyFrontendRefresh()
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (tryOpenOverlayShortcut(intent)) {
+            return
+        }
+        handleIntent(intent)
+    }
+
+    override fun onDestroy() {
+        if (::webView.isInitialized) {
+            webView.removeJavascriptInterface(BRIDGE_NAME)
+            webView.destroy()
+        }
+        pendingFilePicker?.takeIf { it.isActive }?.complete(null)
+        pendingFilePicker = null
+        super.onDestroy()
+    }
+
+    private fun createWebView(): WebView {
+        if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            WebView.setWebContentsDebuggingEnabled(true)
+        }
+
+        return WebView(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            setBackgroundColor(Color.BLACK)
+            isVerticalScrollBarEnabled = false
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = WebView.OVER_SCROLL_NEVER
+
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                cacheMode = WebSettings.LOAD_DEFAULT
+                allowFileAccess = false
+                allowContentAccess = true
+                builtInZoomControls = false
+                displayZoomControls = false
+                setSupportZoom(false)
+            }
+
+            addJavascriptInterface(bridge, BRIDGE_NAME)
+
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest,
+                ): WebResourceResponse? {
+                    return assetLoader.shouldInterceptRequest(request.url)
                 }
             }
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        bindService(Intent(this, FenixHubService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
-    }
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_LAUNCH_IMAGE_PICKER, false) != true) return
+        intent.removeExtra(EXTRA_LAUNCH_IMAGE_PICKER)
 
-    override fun onStop() {
-        runCatching { unbindService(serviceConnection) }
-        boundService = null
-        super.onStop()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        refreshPermissionState()
-    }
-
-    override fun onNewIntent(intent: Intent?) {
-        super.onNewIntent(intent)
-        if (intent?.getBooleanExtra(EXTRA_LAUNCH_IMAGE_PICKER, false) == true) {
-            pendingImagePickerLaunch.value = true
+        lifecycleScope.launch {
+            val item = runCatching { bridge.importPickedFile() }
+                .getOrElse {
+                    toast("No se pudo anadir el archivo")
+                    return@launch
+                }
+            if (item != null) {
+                toast("Contenido anadido al hub")
+                notifyFrontendRefresh()
+            }
         }
     }
 
-    private fun refreshPermissionState() {
-        overlayPermissionGranted.value = Settings.canDrawOverlays(this)
-        notificationPermissionGranted.value = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        } else {
-            true
+    private fun tryOpenOverlayShortcut(intent: Intent?): Boolean {
+        if (intent?.action != ACTION_OPEN_OVERLAY) return false
+        if (!container.settingsStore.current().configured || !Settings.canDrawOverlays(this)) {
+            return false
+        }
+        FenixHubService.start(this, FenixHubService.ACTION_SHOW_OVERLAY)
+        finish()
+        return true
+    }
+
+    private fun startServiceIfConfigured() {
+        if (container.settingsStore.current().configured) {
+            FenixHubService.start(this)
+        }
+    }
+
+    private suspend fun launchFilePicker(): Uri? {
+        if (pendingFilePicker?.isActive == true) {
+            error("Ya hay un selector de archivos abierto")
+        }
+        val deferred = CompletableDeferred<Uri?>()
+        pendingFilePicker = deferred
+        withContext(Dispatchers.Main.immediate) {
+            filePickerLauncher.launch("*/*")
+        }
+        return try {
+            deferred.await()
+        } finally {
+            if (pendingFilePicker === deferred) {
+                pendingFilePicker = null
+            }
+        }
+    }
+
+    private fun notifyFrontendRefresh() {
+        if (!::webView.isInitialized) return
+        webView.post {
+            webView.evaluateJavascript(
+                "window.__fenixExternalRefresh && window.__fenixExternalRefresh();",
+                null,
+            )
         }
     }
 
@@ -206,7 +220,10 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        private const val BRIDGE_NAME = "FenixHubBridge"
         private const val EXTRA_LAUNCH_IMAGE_PICKER = "extra_launch_image_picker"
+        private const val HUB_URL = "https://appassets.androidplatform.net/assets/index.html"
+        const val ACTION_OPEN_OVERLAY = "com.fenixhub.mobile.action.OPEN_OVERLAY"
 
         fun createIntent(context: Context, launchImagePicker: Boolean = false): Intent {
             return Intent(context, MainActivity::class.java).apply {
