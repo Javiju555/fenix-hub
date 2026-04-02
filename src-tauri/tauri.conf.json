@@ -5,7 +5,7 @@
   "identifier": "dev.fenix.hub",
   "build": {
     "frontendDist": "../frontend/dist",
-    "beforeBuildCommand": "cd /home/javiju/proyectos/fenix-hub/frontend && ~/.bun/bin/bun run build"
+    "beforeBuildCommand": "cd ../frontend && bun run build"
   },
   "app": {
     "windows": [
@@ -14,17 +14,26 @@
         "title": "FenixHub",
         "width": 820,
         "height": 185,
-        "resizable": true,
+        "minWidth": 280,
+        "minHeight": 34,
+        "resizable": false,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
         "visible": true,
         "center": true,
-        "skipTaskbar": true
+        "skipTaskbar": true,
+        "shadow": false
       }
     ],
     "security": {
       "csp": null
+    },
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/32x32.png",
+      "iconAsTemplate": true,
+      "tooltip": "FenixHub — portapapeles efímero"
     }
   },
   "bundle": {
@@ -36,6 +45,11 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
   }
 }
