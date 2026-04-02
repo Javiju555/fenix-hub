@@ -1,7 +1,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --glass-bg: rgba(8, 13, 30, 0.84);
+  --glass-bg: rgba(8, 13, 30, 0.88);
   --glass-border: rgba(255, 255, 255, 0.09);
   --surface: rgba(255, 255, 255, 0.055);
   --surface-hover: rgba(255, 255, 255, 0.09);
@@ -24,6 +24,12 @@
   font-size: 13px;
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+}
+
+/* Windows / no-blur fallback: when backdrop-filter is unsupported,
+   the higher opacity glass-bg keeps the UI legible on any background. */
+@supports not (backdrop-filter: blur(1px)) {
+  :root { --glass-bg: rgba(10, 15, 35, 0.97); }
 }
 
 body {
@@ -166,6 +172,12 @@ button:active { opacity: 0.65; }
 .hub-status {
   display: flex; align-items: center; gap: 5px;
   font-size: 11px; color: var(--text-dim); margin: 0 10px;
+}
+.enc-badge {
+  color: var(--green);
+  opacity: 0.7;
+  display: flex;
+  align-items: center;
 }
 .status-dot {
   width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
