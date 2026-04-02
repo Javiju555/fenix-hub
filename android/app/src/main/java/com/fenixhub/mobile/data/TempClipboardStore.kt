@@ -24,6 +24,10 @@ class TempClipboardStore(private val context: Context) {
         rootDir.mkdirs()
     }
 
+    fun deleteContent(contentId: String) {
+        File(rootDir, contentId).deleteRecursively()
+    }
+
     fun createTextContent(text: String): LocalContent {
         val contentId = UUID.randomUUID().toString()
         val createdAt = System.currentTimeMillis()

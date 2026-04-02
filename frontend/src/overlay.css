@@ -1,0 +1,345 @@
+:root {
+  --overlay-bg: rgba(9, 13, 24, 0.96);
+  --overlay-panel: rgba(20, 28, 48, 0.92);
+  --overlay-border: rgba(255, 255, 255, 0.08);
+  --overlay-text: #f7f8fb;
+  --overlay-dim: rgba(247, 248, 251, 0.6);
+  --overlay-accent: #5e8cf4;
+  --overlay-accent-soft: rgba(94, 140, 244, 0.16);
+  --overlay-green: #5dd28f;
+  --overlay-red: #f06b71;
+  --overlay-red-soft: rgba(240, 107, 113, 0.14);
+  --overlay-radius: 20px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: var(--overlay-text);
+  font-family: 'Avenir Next', 'Segoe UI', system-ui, sans-serif;
+}
+
+body.overlay-mode {
+  background:
+    radial-gradient(circle at top left, rgba(94, 140, 244, 0.18), transparent 34%),
+    linear-gradient(180deg, rgba(9, 13, 24, 0.98), rgba(9, 13, 24, 0.92));
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+.overlay-shell {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 12px;
+  padding: 14px;
+  background: var(--overlay-bg);
+}
+
+.overlay-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.overlay-tabs {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--overlay-border);
+}
+
+.overlay-tab,
+.overlay-expand,
+.overlay-action,
+.overlay-card,
+.overlay-sheet-item {
+  border: none;
+  color: inherit;
+  font: inherit;
+}
+
+.overlay-tab {
+  min-width: 70px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--overlay-dim);
+  font-size: 13px;
+  font-weight: 700;
+  touch-action: manipulation;
+}
+
+.overlay-tab.active {
+  background: var(--overlay-accent);
+  color: white;
+}
+
+.overlay-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--overlay-border);
+  font-size: 13px;
+  font-weight: 700;
+  touch-action: manipulation;
+}
+
+.overlay-stack {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.overlay-card {
+  width: 100%;
+  padding: 14px;
+  border-radius: var(--overlay-radius);
+  text-align: left;
+  background: var(--overlay-panel);
+  border: 1px solid transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  touch-action: manipulation;
+}
+
+.overlay-card.selected {
+  border-color: rgba(94, 140, 244, 0.64);
+  box-shadow: inset 0 0 0 1px rgba(94, 140, 244, 0.24);
+}
+
+.overlay-card.peer.selected {
+  border-color: rgba(93, 210, 143, 0.56);
+  box-shadow: inset 0 0 0 1px rgba(93, 210, 143, 0.22);
+}
+
+.overlay-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.overlay-type {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.overlay-type.text {
+  color: var(--overlay-accent);
+  background: var(--overlay-accent-soft);
+}
+
+.overlay-type.image {
+  color: #c984ff;
+  background: rgba(201, 132, 255, 0.16);
+}
+
+.overlay-type.file {
+  color: #ffbf66;
+  background: rgba(255, 191, 102, 0.16);
+}
+
+.overlay-live,
+.overlay-device {
+  color: var(--overlay-dim);
+  font-weight: 600;
+}
+
+.overlay-live {
+  color: var(--overlay-green);
+}
+
+.overlay-title {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.overlay-meta {
+  font-size: 12px;
+  color: var(--overlay-dim);
+}
+
+.overlay-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.overlay-hint {
+  font-size: 12px;
+  color: var(--overlay-dim);
+  min-height: 16px;
+}
+
+.overlay-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.overlay-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--overlay-border);
+  font-size: 13px;
+  font-weight: 700;
+  touch-action: manipulation;
+}
+
+.overlay-action.success {
+  color: #081511;
+  background: var(--overlay-green);
+}
+
+.overlay-action.danger {
+  color: var(--overlay-red);
+  background: var(--overlay-red-soft);
+}
+
+.overlay-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px;
+  border-radius: var(--overlay-radius);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed var(--overlay-border);
+}
+
+.overlay-empty-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.overlay-empty-copy {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--overlay-dim);
+}
+
+.overlay-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: rgba(6, 10, 18, 0.94);
+  border: 1px solid var(--overlay-border);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  font-size: 13px;
+  font-weight: 700;
+  transition: opacity 0.24s ease;
+}
+
+.overlay-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.34);
+  display: grid;
+  place-items: end center;
+  padding: 12px;
+}
+
+.overlay-sheet {
+  width: min(100%, 360px);
+  padding: 12px;
+  border-radius: 20px;
+  background: rgba(11, 16, 29, 0.98);
+  border: 1px solid var(--overlay-border);
+  display: grid;
+  gap: 8px;
+}
+
+.overlay-sheet-title {
+  padding: 4px 2px 8px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.overlay-sheet-item {
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  text-align: left;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.overlay-sheet-item.ghost {
+  text-align: center;
+  color: var(--overlay-dim);
+}
+
+@media (orientation: landscape) {
+  .overlay-shell {
+    grid-template-rows: auto 1fr;
+    grid-template-columns: minmax(0, 1fr) 260px;
+    align-items: stretch;
+  }
+
+  .overlay-header {
+    grid-column: 1 / span 2;
+  }
+
+  .overlay-stack {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .overlay-card {
+    min-width: 220px;
+    height: 100%;
+  }
+
+  .overlay-actions {
+    justify-content: space-between;
+  }
+
+  .overlay-grid {
+    grid-template-columns: 1fr;
+  }
+}

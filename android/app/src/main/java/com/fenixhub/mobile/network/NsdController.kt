@@ -5,12 +5,15 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import com.fenixhub.mobile.data.ContentRepository
 import com.fenixhub.mobile.data.SettingsStore
+import com.fenixhub.mobile.model.AppSettings
 import com.fenixhub.mobile.model.Announcement
 import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.model.PeerContent
+import com.fenixhub.mobile.model.HubContentType
 import com.fenixhub.mobile.model.SendMode
 import com.fenixhub.mobile.util.AnnouncementCodec
 import com.fenixhub.mobile.util.TxtRecordCodec
@@ -23,26 +26,86 @@ class NsdController(
     private val nsdManager = context.getSystemService(NsdManager::class.java)
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    private var discoveryEnabled = false
+    private var refreshRequested = false
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private val registrations = linkedMapOf<String, RegistrationHandle>()
+    private val peerLastSeenAt = linkedMapOf<String, Long>()
+    private val refreshRunnable = Runnable {
+        if (!discoveryEnabled) return@Runnable
+        pruneExpiredPeers()
+        if (discoveryListener == null) {
+            startDiscoveryInternal()
+        } else {
+            refreshRequested = true
+            stopDiscoveryInternal()
+        }
+        scheduleRefresh()
+    }
 
     fun startDiscovery() {
+        if (discoveryEnabled) return
+        discoveryEnabled = true
+        startDiscoveryInternal()
+        scheduleRefresh()
+    }
+
+    fun syncPublishedContent(items: List<LocalContent>, port: Int) {
+        val settings = settingsStore.current()
+        if (!settings.configured) return
+
+        val desiredIds = items.map { it.contentId }.toSet()
+        val obsoleteIds = registrations.keys.filterNot(desiredIds::contains)
+        obsoleteIds.forEach(::unregisterInternal)
+
+        items.forEach { item ->
+            val payload = payloadForAnnouncement(item, settings, port)
+            val existing = registrations[item.contentId]
+            if (existing?.payload == payload) {
+                return@forEach
+            }
+            unregisterInternal(item.contentId)
+            register(item.contentId, payload, port)
+        }
+    }
+
+    fun stop() {
+        discoveryEnabled = false
+        refreshRequested = false
+        mainHandler.removeCallbacks(refreshRunnable)
+        stopDiscoveryInternal()
+        registrations.keys.toList().forEach(::unregisterInternal)
+        peerLastSeenAt.clear()
+        repository.clearPeers()
+    }
+
+    private fun startDiscoveryInternal() {
         if (discoveryListener != null) return
 
         val listener = object : NsdManager.DiscoveryListener {
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.w(TAG, "Discovery start failed: $errorCode")
                 stopDiscoveryInternal()
+                scheduleRetry()
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.w(TAG, "Discovery stop failed: $errorCode")
                 stopDiscoveryInternal()
+                if (discoveryEnabled && refreshRequested) {
+                    refreshRequested = false
+                    scheduleRetry()
+                }
             }
 
             override fun onDiscoveryStarted(serviceType: String) = Unit
 
-            override fun onDiscoveryStopped(serviceType: String) = Unit
+            override fun onDiscoveryStopped(serviceType: String) {
+                if (discoveryEnabled && refreshRequested) {
+                    refreshRequested = false
+                    startDiscoveryInternal()
+                }
+            }
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
                 if (serviceInfo.serviceType != SERVICE_TYPE) return
@@ -61,6 +124,7 @@ class NsdController(
                             val settings = settingsStore.current()
 
                             if (!settings.configured || announcement.groupId != settings.groupId) return
+                            if (settingsStore.isIgnoredPeerContent(announcement.contentId)) return
                             if (announcement.deviceName == settings.deviceName &&
                                 repository.getLocalContent(announcement.contentId) != null
                             ) {
@@ -75,6 +139,7 @@ class NsdController(
 
                             val host = resolvedServiceInfo.host?.hostAddress?.substringBefore('%') ?: return
                             mainHandler.post {
+                                peerLastSeenAt[announcement.contentId] = SystemClock.elapsedRealtime()
                                 repository.upsertPeer(
                                     PeerContent(
                                         peerIp = host,
@@ -90,7 +155,10 @@ class NsdController(
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 val contentId = contentIdFromServiceName(serviceInfo.serviceName) ?: return
-                mainHandler.post { repository.removePeer(contentId) }
+                mainHandler.post {
+                    peerLastSeenAt.remove(contentId)
+                    repository.removePeer(contentId)
+                }
             }
         }
 
@@ -98,52 +166,19 @@ class NsdController(
         nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
     }
 
-    fun syncPublishedContent(items: List<LocalContent>, port: Int) {
-        val settings = settingsStore.current()
-        if (!settings.configured) return
-
-        val desiredIds = items.map { it.contentId }.toSet()
-        val obsoleteIds = registrations.keys.filterNot(desiredIds::contains)
-        obsoleteIds.forEach(::unregisterInternal)
-
-        items.forEach { item ->
-            val announcement = Announcement(
-                groupId = settings.groupId,
-                contentId = item.contentId,
-                deviceName = settings.deviceName,
-                preview = item.preview,
-                contentType = item.contentType,
-                sizeBytes = item.sizeBytes,
-                fileName = item.fileName,
-                mimeType = item.mimeType,
-                sendMode = item.sendMode,
-                createdAt = item.createdAt,
-                port = port,
-            )
-            val payload = AnnouncementCodec.encode(announcement)
-            val existing = registrations[item.contentId]
-            if (existing?.payload == payload) {
-                return@forEach
-            }
-            unregisterInternal(item.contentId)
-            register(item.contentId, payload, port)
-        }
-    }
-
-    fun stop() {
-        stopDiscoveryInternal()
-        registrations.keys.toList().forEach(::unregisterInternal)
-        repository.clearPeers()
-    }
-
     private fun register(contentId: String, payload: String, port: Int) {
-        val serviceInfo = NsdServiceInfo().apply {
-            serviceName = "fenixhub-$contentId"
-            serviceType = SERVICE_TYPE
-            setPort(port)
-            TxtRecordCodec.encode(payload).forEach { (key, value) ->
-                setAttribute(key, value)
+        val serviceInfo = runCatching {
+            NsdServiceInfo().apply {
+                serviceName = "fenixhub-$contentId"
+                serviceType = SERVICE_TYPE
+                setPort(port)
+                TxtRecordCodec.encode(payload).forEach { (key, value) ->
+                    setAttribute(key, value)
+                }
             }
+        }.getOrElse { error ->
+            Log.e(TAG, "Cannot encode NSD payload for $contentId", error)
+            return
         }
 
         val listener = object : NsdManager.RegistrationListener {
@@ -189,8 +224,138 @@ class NsdController(
         val listener: NsdManager.RegistrationListener,
     )
 
+    private fun payloadForAnnouncement(
+        item: LocalContent,
+        settings: AppSettings,
+        port: Int,
+    ): String {
+        var announcement = Announcement(
+            groupId = settings.groupId,
+            contentId = item.contentId,
+            deviceName = settings.deviceName,
+            preview = item.preview,
+            contentType = item.contentType,
+            sizeBytes = item.sizeBytes,
+            fileName = item.fileName,
+            mimeType = item.mimeType,
+            sendMode = item.sendMode,
+            createdAt = item.createdAt,
+            port = port,
+        )
+        var payload = AnnouncementCodec.encode(announcement)
+        if (payload.encodedSize() <= MAX_ANNOUNCEMENT_BYTES) {
+            return payload
+        }
+
+        val fallbackPreview = fallbackPreview(announcement)
+        if (announcement.preview != fallbackPreview) {
+            announcement = announcement.copy(preview = fallbackPreview)
+            payload = AnnouncementCodec.encode(announcement)
+        }
+        if (payload.encodedSize() <= MAX_ANNOUNCEMENT_BYTES) {
+            return payload
+        }
+
+        announcement.fileName?.takeIf { it.length > MAX_ANNOUNCEMENT_FILE_NAME_CHARS }?.let { fileName ->
+            announcement = announcement.copy(fileName = fileName.take(MAX_ANNOUNCEMENT_FILE_NAME_CHARS))
+            payload = AnnouncementCodec.encode(announcement)
+        }
+        if (payload.encodedSize() <= MAX_ANNOUNCEMENT_BYTES) {
+            return payload
+        }
+
+        if (announcement.mimeType != null) {
+            announcement = announcement.copy(mimeType = null)
+            payload = AnnouncementCodec.encode(announcement)
+        }
+        if (payload.encodedSize() <= MAX_ANNOUNCEMENT_BYTES) {
+            return payload
+        }
+
+        var preview = announcement.preview
+        while (payload.encodedSize() > MAX_ANNOUNCEMENT_BYTES && preview.length > MIN_ANNOUNCEMENT_PREVIEW_CHARS) {
+            preview = preview.take((preview.length - ANNOUNCEMENT_PREVIEW_TRIM_STEP).coerceAtLeast(MIN_ANNOUNCEMENT_PREVIEW_CHARS))
+            announcement = announcement.copy(preview = preview)
+            payload = AnnouncementCodec.encode(announcement)
+        }
+        if (payload.encodedSize() <= MAX_ANNOUNCEMENT_BYTES) {
+            return payload
+        }
+
+        if (announcement.fileName != null) {
+            announcement = announcement.copy(fileName = null)
+            payload = AnnouncementCodec.encode(announcement)
+        }
+        if (payload.encodedSize() <= MAX_ANNOUNCEMENT_BYTES) {
+            return payload
+        }
+
+        announcement = announcement.copy(preview = compactKindLabel(announcement.contentType))
+        return AnnouncementCodec.encode(announcement)
+    }
+
+    private fun fallbackPreview(announcement: Announcement): String {
+        return when (announcement.contentType) {
+            HubContentType.TEXT -> announcement.preview.take(MAX_ANNOUNCEMENT_FILE_NAME_CHARS)
+            HubContentType.IMAGE -> announcement.fileName
+                ?.let { "Imagen: ${it.take(48)}" }
+                ?: "Imagen lista para descargar"
+            HubContentType.FILE -> announcement.fileName
+                ?.let { "Archivo: ${it.take(48)}" }
+                ?: "Archivo listo para descargar"
+        }
+    }
+
+    private fun compactKindLabel(contentType: HubContentType): String {
+        return when (contentType) {
+            HubContentType.TEXT -> "Texto"
+            HubContentType.IMAGE -> "Imagen"
+            HubContentType.FILE -> "Archivo"
+        }
+    }
+
+    private fun scheduleRefresh() {
+        mainHandler.removeCallbacks(refreshRunnable)
+        if (discoveryEnabled) {
+            mainHandler.postDelayed(refreshRunnable, DISCOVERY_REFRESH_MS)
+        }
+    }
+
+    private fun scheduleRetry() {
+        mainHandler.postDelayed(
+            {
+                if (discoveryEnabled && discoveryListener == null) {
+                    startDiscoveryInternal()
+                }
+            },
+            DISCOVERY_RETRY_MS,
+        )
+    }
+
+    private fun pruneExpiredPeers() {
+        val now = SystemClock.elapsedRealtime()
+        val expiredIds = peerLastSeenAt
+            .filterValues { lastSeen -> now - lastSeen > PEER_EXPIRY_MS }
+            .keys
+            .toList()
+
+        expiredIds.forEach { contentId ->
+            peerLastSeenAt.remove(contentId)
+            repository.removePeer(contentId)
+        }
+    }
+
+    private fun String.encodedSize(): Int = toByteArray(Charsets.UTF_8).size
+
     private companion object {
         const val TAG = "FenixHubNsd"
         const val SERVICE_TYPE = "_fenixhub._tcp."
+        const val DISCOVERY_REFRESH_MS = 15_000L
+        const val DISCOVERY_RETRY_MS = 3_000L
+        const val PEER_EXPIRY_MS = 45_000L
+        const val MAX_ANNOUNCEMENT_BYTES = 1_000
+        const val MAX_ANNOUNCEMENT_FILE_NAME_CHARS = 80
+        const val MIN_ANNOUNCEMENT_PREVIEW_CHARS = 24
+        const val ANNOUNCEMENT_PREVIEW_TRIM_STEP = 8
     }
 }
