@@ -50,6 +50,7 @@ class FenixHubService : Service() {
     private val localContentFactory by lazy { container.localContentFactory }
     private val httpServer by lazy { FenixHttpServer(settingsStore, repository) }
     private val nsdController by lazy { NsdController(this, repository, settingsStore) }
+    private val hotspotManager by lazy { container.hotspotManager }
     private val overlayController by lazy {
         OverlayController(
             context = this,
@@ -89,6 +90,13 @@ class FenixHubService : Service() {
 
             ACTION_REFRESH_IDENTITY -> restartNetworkStack()
 
+            ACTION_START_HOTSPOT -> {
+                startNetworkStack()
+                hotspotManager.start()
+            }
+
+            ACTION_STOP_HOTSPOT -> hotspotManager.stop()
+
             else -> startNetworkStack()
         }
 
@@ -126,6 +134,7 @@ class FenixHubService : Service() {
     override fun onDestroy() {
         overlayController.dismiss()
         stopNetworkStack(clearPeers = true)
+        hotspotManager.stop()
         releaseMulticastLock()
         serviceScope.cancel()
         super.onDestroy()
@@ -261,6 +270,8 @@ class FenixHubService : Service() {
     companion object {
         const val ACTION_SHOW_OVERLAY = "com.fenixhub.mobile.action.SHOW_OVERLAY"
         const val ACTION_REFRESH_IDENTITY = "com.fenixhub.mobile.action.REFRESH_IDENTITY"
+        const val ACTION_START_HOTSPOT = "com.fenixhub.mobile.action.START_HOTSPOT"
+        const val ACTION_STOP_HOTSPOT = "com.fenixhub.mobile.action.STOP_HOTSPOT"
         private const val CHANNEL_ID = "fenixhub-service"
         private const val NOTIFICATION_ID = 3106
 

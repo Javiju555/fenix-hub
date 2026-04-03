@@ -57,7 +57,7 @@ let mockId = 100;
 async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
   const a = args as Record<string, unknown> | undefined;
   switch (cmd) {
-    case 'get_identity': return { device_name: 'Arch Desktop', group_id: 'demo', configured: true } as T;
+    case 'get_identity': return { device_name: 'Arch Desktop', group_id: 'demo', configured: true, device_type: 'desktop' } as T;
     case 'get_local_content': return [...mockLocal] as T;
     case 'get_peers': return [...mockPeers] as T;
     case 'add_text_content': {
@@ -93,14 +93,14 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
       return { id, content_type: 'text', preview: '', size_bytes: 0, created_at: 0 } as T;
     }
     case 'setup_identity':
-      return { device_name: (a?.args as { device_name: string })?.device_name ?? 'Device', group_id: 'demo', configured: true } as T;
+      return { device_name: (a?.args as { device_name: string })?.device_name ?? 'Device', group_id: 'demo', configured: true, device_type: (a?.args as { device_type?: string })?.device_type ?? 'desktop' } as T;
     default: return undefined as T;
   }
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface IdentityInfo   { device_name: string; group_id: string; configured: boolean; }
+interface IdentityInfo   { device_name: string; group_id: string; configured: boolean; device_type: string; }
 interface ContentItem    { id: string; content_type: 'text'|'image'|'file'; preview: string; size_bytes: number; created_at: number; file_name?: string | null; mime_type?: string | null; transfer_path?: string | null; }
 interface PeerAnnouncement { group_id: string; content_id: string; device_name: string; preview: string; content_type: 'text'|'image'|'file'; size_bytes: number; send_mode: { Broadcast: null }|{ Direct: { target_device: string } }; created_at: number; port: number; file_name?: string | null; mime_type?: string | null; }
 interface PeerContentPayload { announcement: PeerAnnouncement; peer_ip: string; }
@@ -115,6 +115,15 @@ let publishedIds  = new Set<string>();
 let onlineDevices: string[] = [];
 let activeTab: 'local' | 'red' = 'local';
 let collapsed = false;
+let selectedDeviceType = 'desktop';
+
+const DEVICE_TYPES: { id: string; label: string; icon: () => string }[] = [
+  { id: 'desktop', label: 'Desktop',  icon: () => svg(18,'0 0 20 18','<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>') },
+  { id: 'laptop',  label: 'Laptop',   icon: () => svg(18,'0 0 20 18','<rect x="2" y="2" width="16" height="11" rx="1.5" stroke-width="1.5"/><path d="M0,16 Q10,14 20,16" stroke-width="1.5" fill="none"/>') },
+  { id: 'phone',   label: 'Android',  icon: () => svg(18,'0 0 14 20','<rect x="1" y="1" width="12" height="18" rx="3" stroke-width="1.5"/><line x1="5.5" y1="16.5" x2="8.5" y2="16.5" stroke-width="1.5"/>') },
+  { id: 'tablet',  label: 'Tablet',   icon: () => svg(18,'0 0 16 20','<rect x="1" y="1" width="14" height="18" rx="2.5" stroke-width="1.5"/><line x1="6" y1="16.5" x2="10" y2="16.5" stroke-width="1.5"/>') },
+  { id: 'server',  label: 'Servidor', icon: () => svg(18,'0 0 20 18','<rect x="1" y="1" width="18" height="7" rx="1.5" stroke-width="1.5"/><rect x="1" y="10" width="18" height="7" rx="1.5" stroke-width="1.5"/><circle cx="4.5" cy="4.5" r="1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="13.5" r="1" fill="currentColor" stroke="none"/>') },
+];
 
 const W = 820, H = 185;
 const W_PILL = 280, H_PILL = 34;
@@ -176,12 +185,27 @@ function renderSetup() {
         <h1>FenixHub</h1>
         <p>Portapapeles efímero · sin cuenta · sin nube</p>
       </div>
+      <div class="device-type-row">
+        ${DEVICE_TYPES.map(dt => `
+          <button class="device-type-btn${dt.id === selectedDeviceType ? ' active' : ''}" data-dtype="${dt.id}" title="${dt.label}">
+            ${dt.icon()}<span>${dt.label}</span>
+          </button>`).join('')}
+      </div>
       <div class="setup-fields">
-        <input type="password" id="passphrase" placeholder="Frase de acceso (igual en todos los dispositivos)" autocomplete="off" />
-        <input type="text"     id="device-name" placeholder="Nombre del dispositivo" style="max-width:190px" />
+        <input type="text"     id="device-name" placeholder="Nombre de este dispositivo" style="max-width:190px" autocomplete="off" />
+        <input type="password" id="passphrase"   placeholder="Nombre del grupo (igual en todos)" autocomplete="off" />
         <button id="setup-btn">${iconCheckmark(11)} Activar</button>
       </div>
     </div>`;
+
+  // Device type picker
+  document.querySelectorAll('.device-type-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      selectedDeviceType = (btn as HTMLElement).dataset.dtype!;
+      document.querySelectorAll('.device-type-btn').forEach(b =>
+        b.classList.toggle('active', (b as HTMLElement).dataset.dtype === selectedDeviceType));
+    });
+  });
 
   const submit = async () => {
     const passphrase = (document.getElementById('passphrase') as HTMLInputElement).value.trim();
@@ -189,7 +213,9 @@ function renderSetup() {
     if (!passphrase || !deviceName) return;
     const btn = document.getElementById('setup-btn') as HTMLButtonElement;
     btn.disabled = true; btn.textContent = 'Activando…';
-    identity = await invoke<IdentityInfo>('setup_identity', { args: { passphrase, device_name: deviceName } });
+    identity = await invoke<IdentityInfo>('setup_identity', {
+      args: { passphrase, device_name: deviceName, device_type: selectedDeviceType },
+    });
     await loadContent(); renderHub(); setupEventListeners();
   };
   document.getElementById('setup-btn')!.addEventListener('click', submit);
@@ -206,6 +232,9 @@ function renderHub() {
       <header class="hub-header" id="hub-header">
         <div class="hub-logo">${iconHub(15)}</div>
         <span class="hub-title">FenixHub</span>
+        <span class="hub-device-label" title="Dispositivo: ${escapeHtml(identity?.device_name ?? '')}">
+          ${deviceTypeIcon(identity?.device_type ?? 'desktop', 13)}
+        </span>
 
         <div class="hub-tabs" id="hub-tabs">
           <button class="tab active" data-tab="local">${iconInbox(10)} Local <span class="badge" id="count-local">0</span></button>
@@ -572,6 +601,18 @@ function iconChevronDown(s: number) {
 function iconLock(s: number) {
   return svg(s,'0 0 14 14','<rect x="2" y="6" width="10" height="7" rx="1.5" stroke-width="1.6"/><path d="M4,6 V4 a4,4 0 0 1 6,0 V6" stroke-width="1.6" fill="none"/>');
 }
+function deviceTypeIcon(type: string, s: number): string {
+  const dt = DEVICE_TYPES.find(d => d.id === type) ?? DEVICE_TYPES[0];
+  // Re-render with custom size
+  switch (type) {
+    case 'laptop':  return svg(s,'0 0 20 18','<rect x="2" y="2" width="16" height="11" rx="1.5" stroke-width="1.5"/><path d="M0,16 Q10,14 20,16" stroke-width="1.5" fill="none"/>');
+    case 'phone':   return svg(s,'0 0 14 20','<rect x="1" y="1" width="12" height="18" rx="3" stroke-width="1.5"/><line x1="5.5" y1="16.5" x2="8.5" y2="16.5" stroke-width="1.5"/>');
+    case 'tablet':  return svg(s,'0 0 16 20','<rect x="1" y="1" width="14" height="18" rx="2.5" stroke-width="1.5"/><line x1="6" y1="16.5" x2="10" y2="16.5" stroke-width="1.5"/>');
+    case 'server':  return svg(s,'0 0 20 18','<rect x="1" y="1" width="18" height="7" rx="1.5" stroke-width="1.5"/><rect x="1" y="10" width="18" height="7" rx="1.5" stroke-width="1.5"/>');
+    default:        return svg(s,'0 0 20 18','<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>');
+  }
+  return dt.icon();
+}
 function iconInboxLarge() {
   return svg(36,'0 0 24 24','<rect x="2" y="2" width="20" height="20" rx="3" stroke-width="1.2"/><polyline points="2,15 7,15 8.5,19 15.5,19 17,15 22,15" stroke-width="1.2"/>');
 }
@@ -593,7 +634,17 @@ function humanSize(b: number) {
   return `${(b/1048576).toFixed(1)} MB`;
 }
 
+const WARN_SIZE_BYTES = 100 * 1024 * 1024;   // 100 MB — mostrar aviso
+const MAX_SIZE_BYTES  = 500 * 1024 * 1024;   // 500 MB — límite práctico (cifrado en RAM)
+
 async function addBrowserFileToHub(file: File): Promise<ContentItem> {
+  if (file.size > MAX_SIZE_BYTES) {
+    throw new Error(`El archivo "${file.name}" supera el límite de 500 MB para transferencia cifrada en RAM.`);
+  }
+  if (file.size > WARN_SIZE_BYTES) {
+    // Aviso no bloqueante — el usuario puede continuar
+    showSizeWarning(file.name, file.size);
+  }
   const bytesBase64 = await fileToBase64(file);
   const preview = file.type.startsWith('image/') ? await imageFileToPreview(file) : undefined;
   return invoke<ContentItem>('add_binary_content', {
@@ -604,6 +655,17 @@ async function addBrowserFileToHub(file: File): Promise<ContentItem> {
       preview: preview || null,
     },
   });
+}
+
+function showSizeWarning(name: string, size: number) {
+  const existing = document.getElementById('size-warn');
+  if (existing) existing.remove();
+  const el = document.createElement('div');
+  el.id = 'size-warn';
+  el.className = 'size-warn';
+  el.innerHTML = `⚠ <strong>${escapeHtml(name)}</strong> (${humanSize(size)}) — archivo grande, puede tardar. <button onclick="this.parentElement.remove()">×</button>`;
+  document.getElementById('panel-local')?.prepend(el);
+  setTimeout(() => el.remove(), 8000);
 }
 
 async function fileToBase64(file: File): Promise<string> {

@@ -12,7 +12,7 @@ use fenix_hub_core::server::{start_content_server, ContentStore};
 use fenix_hub_daemon::mdns::{announce_content, unannounce_content};
 
 use crate::discovery;
-use crate::persist;
+use crate::persist::{self, DeviceType};
 use crate::state::HubState;
 use crate::temp_store;
 
@@ -28,21 +28,26 @@ pub struct IdentityInfo {
     pub device_name: String,
     pub group_id: String,
     pub configured: bool,
+    /// Cosmetic device type shown in the hub header (desktop/laptop/phone/tablet/server).
+    pub device_type: String,
 }
 
 #[tauri::command]
 pub async fn get_identity(state: State<'_, HubState>) -> Result<IdentityInfo, String> {
     let id = state.identity.read().await;
+    let device_type = format!("{:?}", *state.device_type.read().await).to_lowercase();
     match id.as_ref() {
         Some(identity) => Ok(IdentityInfo {
             device_name: identity.device_name.clone(),
             group_id: identity.group_id(),
             configured: true,
+            device_type,
         }),
         None => Ok(IdentityInfo {
             device_name: String::new(),
             group_id: String::new(),
             configured: false,
+            device_type,
         }),
     }
 }
@@ -52,6 +57,8 @@ pub struct SetupIdentityArgs {
     /// None means "keep existing key, only update device_name"
     pub passphrase: Option<String>,
     pub device_name: String,
+    /// Cosmetic device type. None = keep existing or use default.
+    pub device_type: Option<String>,
 }
 
 #[tauri::command]
@@ -75,8 +82,20 @@ pub async fn setup_identity(
     };
     let identity = Arc::new(identity);
 
+    // Resolve device_type: use provided value, fall back to existing, then default.
+    let device_type = match args.device_type.as_deref() {
+        Some("laptop")  => DeviceType::Laptop,
+        Some("phone")   => DeviceType::Phone,
+        Some("tablet")  => DeviceType::Tablet,
+        Some("server")  => DeviceType::Server,
+        Some("desktop") => DeviceType::Desktop,
+        Some(_)         => DeviceType::Desktop,
+        // No type provided: keep the existing value (e.g. updating device_name only).
+        None            => state.device_type.read().await.clone(),
+    };
+
     // Persist derived key to disk (passphrase never saved)
-    persist::save(&identity).map_err(|e| e.to_string())?;
+    persist::save(&identity, &device_type).map_err(|e| e.to_string())?;
 
     // Start discovery with the new identity
     discovery::start(
@@ -86,11 +105,14 @@ pub async fn setup_identity(
         state.peer_content.clone(),
     );
 
+    let dt_str = format!("{:?}", device_type).to_lowercase();
     let info = IdentityInfo {
         device_name: identity.device_name.clone(),
         group_id: identity.group_id(),
         configured: true,
+        device_type: dt_str,
     };
+    *state.device_type.write().await = device_type;
     *state.identity.write().await = Some(identity);
     Ok(info)
 }
