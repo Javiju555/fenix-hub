@@ -77,6 +77,41 @@ body {
 .setup-row h1 { font-size: 16px; font-weight: 660; letter-spacing: -0.2px; }
 .setup-row p { font-size: 11.5px; color: var(--text-dim); flex: 1; }
 
+/* Device type picker */
+.device-type-row {
+  display: flex; gap: 5px; width: 100%; justify-content: flex-start; flex-wrap: wrap;
+}
+.device-type-btn {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-sm); color: var(--text-dim);
+  padding: 5px 8px; font-size: 10.5px; cursor: pointer;
+  display: flex; align-items: center; gap: 5px;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+  flex-shrink: 0;
+}
+.device-type-btn:hover { background: var(--surface-hover); color: var(--text); opacity: 1; }
+.device-type-btn.active {
+  background: var(--accent-dim); border-color: var(--border-accent); color: var(--accent);
+}
+
+/* Device icon next to hub title */
+.hub-device-label {
+  display: flex; align-items: center; color: var(--text-dim);
+  margin-left: -4px; flex-shrink: 0;
+}
+
+/* File size warning toast */
+.size-warn {
+  background: rgba(244,173,94,0.12); border: 1px solid rgba(244,173,94,0.25);
+  border-radius: var(--r-sm); padding: 5px 10px; font-size: 11px; color: var(--amber);
+  display: flex; align-items: center; gap: 8px; margin-bottom: 5px;
+}
+.size-warn button {
+  background: transparent; color: var(--amber); padding: 0; width: 16px; height: 16px;
+  font-size: 13px; font-weight: 700; border: none; border-radius: 3px;
+  flex-shrink: 0; line-height: 1;
+}
+
 .setup-fields { display: flex; gap: 7px; width: 100%; }
 .setup-fields input { flex: 1; }
 
