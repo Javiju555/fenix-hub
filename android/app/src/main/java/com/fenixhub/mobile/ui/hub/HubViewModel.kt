@@ -9,6 +9,8 @@ import com.fenixhub.mobile.model.AppSettings
 import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.SendMode
+import com.fenixhub.mobile.service.FenixHubService
+import com.fenixhub.mobile.service.HotspotManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -47,6 +49,11 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
         initialValue = HubUiState(),
     )
 
+    /** Estado del hotspot local (sin internet). Observar para actualizar la UI. */
+    val hotspotState: StateFlow<HotspotManager.State> = container.hotspotManager.state
+
+    // ── Contenido ─────────────────────────────────────────────────────────────
+
     fun importText(text: String) {
         if (text.isBlank()) return
         repository.addLocalContent(localContentFactory.fromText(text))
@@ -68,5 +75,24 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
 
     fun unpublish(contentId: String) {
         repository.unpublish(contentId)
+    }
+
+    // ── Hotspot local ─────────────────────────────────────────────────────────
+
+    /**
+     * Activa el hotspot local sin internet.
+     * El servicio arranca la red y llama a [HotspotManager.start].
+     * Requiere permiso ACCESS_FINE_LOCATION (API 31–32) o
+     * NEARBY_WIFI_DEVICES (API 33+) concedido previamente.
+     */
+    fun startHotspot() {
+        FenixHubService.start(getApplication(), FenixHubService.ACTION_START_HOTSPOT)
+    }
+
+    /**
+     * Desactiva el hotspot y cierra la reserva del sistema.
+     */
+    fun stopHotspot() {
+        FenixHubService.start(getApplication(), FenixHubService.ACTION_STOP_HOTSPOT)
     }
 }

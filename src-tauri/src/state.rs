@@ -1,3 +1,4 @@
+use crate::persist::DeviceType;
 use fenix_hub_core::content::ContentItem;
 use fenix_hub_core::identity::GroupIdentity;
 use fenix_hub_core::protocol::Announcement;
@@ -11,6 +12,8 @@ use tokio::sync::RwLock;
 
 pub struct HubState {
     pub identity: Arc<RwLock<Option<Arc<GroupIdentity>>>>,
+    /// Device type (Desktop / Laptop / Phone / Tablet / Server) — cosmetic only.
+    pub device_type: Arc<RwLock<DeviceType>>,
     pub local_content: Arc<RwLock<HashMap<String, ContentItem>>>,
     /// Peer content: content_id → (Announcement, peer_ip)
     pub peer_content: Arc<RwLock<HashMap<String, (Announcement, IpAddr)>>>,
@@ -26,6 +29,7 @@ impl HubState {
     pub fn new(mdns: ServiceDaemon) -> Self {
         Self {
             identity: Arc::new(RwLock::new(None)),
+            device_type: Arc::new(RwLock::new(DeviceType::default())),
             local_content: Arc::new(RwLock::new(HashMap::new())),
             peer_content: Arc::new(RwLock::new(HashMap::new())),
             active_announcements: Arc::new(RwLock::new(HashMap::new())),
