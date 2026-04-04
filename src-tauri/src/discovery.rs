@@ -43,6 +43,17 @@ pub fn start(
         return;
     }
 
+    // Collect local IPs once to filter self-announcements.
+    let local_ips: std::collections::HashSet<IpAddr> = {
+        let mut set = std::collections::HashSet::new();
+        if let Ok(ifaces) = local_ip_address::list_afinet_netifas() {
+            for (_, ip) in ifaces {
+                set.insert(ip);
+            }
+        }
+        set
+    };
+
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
@@ -50,6 +61,10 @@ pub fn start(
                     announcement,
                     peer_ip,
                 } => {
+                    // Skip self — avahi sees our own published services too
+                    if local_ips.contains(&peer_ip) {
+                        continue;
+                    }
                     let id = announcement.content_id.clone();
                     peer_store
                         .write()

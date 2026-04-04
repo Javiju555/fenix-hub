@@ -225,6 +225,7 @@ fn start_discovery_avahi(group_id: String, event_tx: mpsc::Sender<DaemonEvent>) 
                 "-" if fields.len() >= 4 => {
                     let instance_name = fields[3];
                     if let Some(content_id) = instance_name.strip_prefix("fenixhub-") {
+                        tracing::info!("avahi: peer content gone {}", content_id);
                         seen.remove(content_id);
                         let _ = event_tx.blocking_send(DaemonEvent::PeerContentGone {
                             content_id: content_id.to_string(),
