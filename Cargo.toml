@@ -40,6 +40,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Crypto utilities
 hex = "0.4"
+# AES-256-GCM authenticated encryption
+aes-gcm = "0.10"
+# HKDF key derivation (separate mac/enc keys from group_key)
+hkdf = "0.12"
+# Random nonce generation
+rand = "0.8"
 
 # Logging
 tracing = "0.1"
