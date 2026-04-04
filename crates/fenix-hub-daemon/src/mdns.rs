@@ -137,8 +137,10 @@ fn start_discovery_avahi(group_id: String, event_tx: mpsc::Sender<DaemonEvent>) 
     which_avahi_browse()?;
 
     std::thread::spawn(move || {
-        let mut child = match Command::new("avahi-browse")
-            .args(["-r", "-p", "--no-db-lookup", avahi_service_type()])
+        // stdbuf -oL forces line-buffering on avahi-browse stdout so new
+        // services appear immediately instead of waiting for the 4 KB pipe buffer.
+        let mut child = match Command::new("stdbuf")
+            .args(["-oL", "avahi-browse", "-r", "-p", "--no-db-lookup", avahi_service_type()])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -198,21 +200,26 @@ fn start_discovery_avahi(group_id: String, event_tx: mpsc::Sender<DaemonEvent>) 
                     };
 
                     if let Some(json) = parse_avahi_txt(txt_block) {
-                        if let Ok(announcement) = serde_json::from_str::<Announcement>(&json) {
-                            if announcement.group_id != group_id {
+                        let announcement = match serde_json::from_str::<Announcement>(&json) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                tracing::error!("avahi: JSON parse failed: {} | json snippet: {}", e, &json[..json.len().min(200)]);
                                 continue;
                             }
-                            tracing::info!(
-                                "avahi: peer content from {} at {}",
-                                announcement.device_name,
-                                peer_ip
-                            );
-                            seen.insert(content_id);
-                            let _ = event_tx.blocking_send(DaemonEvent::PeerContentAvailable {
-                                announcement,
-                                peer_ip,
-                            });
+                        };
+                        if announcement.group_id != group_id {
+                            continue;
                         }
+                        tracing::info!(
+                            "avahi: peer content from {} at {}",
+                            announcement.device_name,
+                            peer_ip
+                        );
+                        seen.insert(content_id);
+                        let _ = event_tx.blocking_send(DaemonEvent::PeerContentAvailable {
+                            announcement,
+                            peer_ip,
+                        });
                     }
                 }
                 "-" if fields.len() >= 4 => {
@@ -241,7 +248,12 @@ fn avahi_service_type() -> &'static str {
 }
 
 /// Parses avahi-browse -p TXT block: `"data0=chunk0" "data1=chunk1" ...`
-/// Values are avahi-quote-escaped (inner `"` → `\"`, `\` → `\\`).
+///
+/// avahi escaping rules (output of avahi-browse -p):
+///   `\"` → literal `"`
+///   `\\` → literal `\`
+///   `\DDD` (3 decimal digits) → raw byte with that value (non-ASCII UTF-8)
+///
 /// Returns the reassembled JSON string, or None if unparseable.
 #[cfg(target_os = "linux")]
 fn parse_avahi_txt(txt_block: &str) -> Option<String> {
@@ -254,26 +266,43 @@ fn parse_avahi_txt(txt_block: &str) -> Option<String> {
         }
         remaining = &remaining[1..];
 
-        // Decode avahi-escaped quoted value
-        let mut value = String::new();
+        // Decode avahi-escaped quoted value into raw bytes, then UTF-8 decode.
+        // avahi emits non-ASCII chars as `\DDD` (3-digit decimal byte value).
+        let mut value_bytes: Vec<u8> = Vec::new();
         let mut chars = remaining.char_indices();
         let end = loop {
             match chars.next() {
                 None => break remaining.len(),
                 Some((_, '\\')) => match chars.next() {
-                    Some((_, '"')) => value.push('"'),
-                    Some((_, '\\')) => value.push('\\'),
+                    Some((_, '"')) => value_bytes.push(b'"'),
+                    Some((_, '\\')) => value_bytes.push(b'\\'),
+                    // \DDD decimal byte escape (avahi non-ASCII encoding)
+                    Some((_, c)) if c.is_ascii_digit() => {
+                        let d1 = c.to_digit(10).unwrap() as u32;
+                        let d2 = chars.next()
+                            .and_then(|(_, d)| d.to_digit(10))
+                            .unwrap_or(0);
+                        let d3 = chars.next()
+                            .and_then(|(_, d)| d.to_digit(10))
+                            .unwrap_or(0);
+                        value_bytes.push((d1 * 100 + d2 * 10 + d3) as u8);
+                    }
                     Some((_, c)) => {
-                        value.push('\\');
-                        value.push(c);
+                        value_bytes.push(b'\\');
+                        let mut buf = [0u8; 4];
+                        value_bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
                     }
                     None => break remaining.len(),
                 },
                 Some((i, '"')) => break i + 1,
-                Some((_, c)) => value.push(c),
+                Some((_, c)) => {
+                    let mut buf = [0u8; 4];
+                    value_bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                }
             }
         };
         remaining = remaining[end..].trim_start();
+        let value = String::from_utf8_lossy(&value_bytes).into_owned();
 
         // value = "data0=json_chunk" or "data1=json_chunk"
         if let Some(rest) = value.strip_prefix("data") {
@@ -294,13 +323,18 @@ fn parse_avahi_txt(txt_block: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn which_avahi_browse() -> Result<()> {
-    std::process::Command::new("which")
-        .arg("avahi-browse")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| ())
-        .ok_or_else(|| anyhow::anyhow!("avahi-browse not found — install avahi package"))
+    for bin in &["avahi-browse", "stdbuf"] {
+        let found = std::process::Command::new("which")
+            .arg(bin)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some();
+        if !found {
+            anyhow::bail!("{} not found — install {} package", bin, if *bin == "avahi-browse" { "avahi" } else { "coreutils" });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
