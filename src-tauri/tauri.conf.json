@@ -5,6 +5,8 @@
   "identifier": "dev.fenix.hub",
   "build": {
     "frontendDist": "../frontend/dist",
+    "devUrl": "http://localhost:1435",
+    "beforeDevCommand": "cd ../frontend && ~/.bun/bin/bun run dev",
     "beforeBuildCommand": "cd ../frontend && bun run build"
   },
   "app": {
