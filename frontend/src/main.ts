@@ -553,12 +553,18 @@ function renderPeerContent() {
       const id = (btn as HTMLElement).dataset.id!;
       (btn as HTMLButtonElement).disabled = true;
       (btn as HTMLButtonElement).textContent = 'Recibiendo…';
-      const received = await invoke<ContentItem>('pull_peer_content', { content_id: id });
-      localContent = [received, ...localContent];
-      peerContent = peerContent.filter(i => i.content_id !== id);
-      updateHeader();
-      renderPeerContent();
-      renderLocalContent();
+      try {
+        const received = await invoke<ContentItem>('pull_peer_content', { contentId: id });
+        localContent = [received, ...localContent];
+        // Don't remove from peerContent — peer still has it published
+        updateHeader();
+        renderPeerContent();
+        renderLocalContent();
+      } catch (e) {
+        console.error('pull_peer_content failed:', e);
+        (btn as HTMLButtonElement).disabled = false;
+        (btn as HTMLButtonElement).textContent = `Error: ${e}`;
+      }
     });
   });
 }
