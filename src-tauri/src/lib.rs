@@ -37,7 +37,7 @@ pub fn run() {
             }
 
             // Load persisted identity from disk (if exists)
-            if let Ok(Some(identity)) = persist::load() {
+            if let Ok(Some((identity, device_type))) = persist::load() {
                 let identity = Arc::new(identity);
 
                 // Start discovery immediately with loaded identity
@@ -48,6 +48,7 @@ pub fn run() {
                     state.peer_content.clone(),
                 );
 
+                *tauri::async_runtime::block_on(state.device_type.write()) = device_type;
                 *tauri::async_runtime::block_on(state.identity.write()) = Some(identity);
                 tracing::info!("Identity loaded from disk, discovery started");
             } else {
