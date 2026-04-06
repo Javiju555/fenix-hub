@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 /// Tauri IPC commands — callable from the frontend via invoke().
-use std::net::IpAddr;
 use std::sync::Arc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use base64::Engine;
 use fenix_hub_core::content::{ContentData, ContentItem};
@@ -15,6 +14,7 @@ use crate::discovery;
 use crate::persist::{self, DeviceType};
 use crate::state::HubState;
 use crate::temp_store;
+use crate::windowing;
 
 const MAX_ANNOUNCEMENT_BYTES: usize = 1000;
 const MAX_ANNOUNCEMENT_FILE_NAME_CHARS: usize = 80;
@@ -84,14 +84,14 @@ pub async fn setup_identity(
 
     // Resolve device_type: use provided value, fall back to existing, then default.
     let device_type = match args.device_type.as_deref() {
-        Some("laptop")  => DeviceType::Laptop,
-        Some("phone")   => DeviceType::Phone,
-        Some("tablet")  => DeviceType::Tablet,
-        Some("server")  => DeviceType::Server,
+        Some("laptop") => DeviceType::Laptop,
+        Some("phone") => DeviceType::Phone,
+        Some("tablet") => DeviceType::Tablet,
+        Some("server") => DeviceType::Server,
         Some("desktop") => DeviceType::Desktop,
-        Some(_)         => DeviceType::Desktop,
+        Some(_) => DeviceType::Desktop,
         // No type provided: keep the existing value (e.g. updating device_name only).
-        None            => state.device_type.read().await.clone(),
+        None => state.device_type.read().await.clone(),
     };
 
     // Persist derived key to disk (passphrase never saved)
@@ -129,6 +129,8 @@ pub struct ContentItemDto {
     pub file_name: Option<String>,
     pub mime_type: Option<String>,
     pub transfer_path: Option<String>,
+    /// Full text content — only set for text items (used by drag & clipboard)
+    pub data_text: Option<String>,
 }
 
 impl From<&ContentItem> for ContentItemDto {
@@ -142,6 +144,10 @@ impl From<&ContentItem> for ContentItemDto {
             file_name: item.file_name.clone(),
             mime_type: item.mime_type.clone(),
             transfer_path: transfer_path(item),
+            data_text: match &item.data {
+                ContentData::Text(t) => Some(t.clone()),
+                _ => None,
+            },
         }
     }
 }
@@ -160,12 +166,17 @@ pub async fn add_text_content(
     state: State<'_, HubState>,
 ) -> Result<ContentItemDto, String> {
     let item = ContentItem::from_text(text);
+    if let ContentData::Text(ref t) = item.data {
+        temp_store::write_text_content(&item.id, t).ok();
+    }
+    temp_store::write_item_meta(&item, "text").ok();
     let dto = ContentItemDto::from(&item);
     state
         .local_content
         .write()
         .await
         .insert(item.id.clone(), item);
+    evict_fifo(&state).await;
     Ok(dto)
 }
 
@@ -197,12 +208,14 @@ pub async fn add_binary_content(
         args.preview,
     )
     .map_err(|e| e.to_string())?;
+    temp_store::write_item_meta(&item, "bytes").ok();
     let dto = ContentItemDto::from(&item);
     state
         .local_content
         .write()
         .await
         .insert(item.id.clone(), item);
+    evict_fifo(&state).await;
     Ok(dto)
 }
 
@@ -436,12 +449,25 @@ pub async fn pull_peer_content(
     };
 
     write_item_to_clipboard(&item).map_err(|e| e.to_string())?;
+
+    // Persist pulled item to disk history
+    match &item.data {
+        ContentData::Text(ref t) => {
+            temp_store::write_text_content(&item.id, t).ok();
+            temp_store::write_item_meta(&item, "text").ok();
+        }
+        _ => {
+            temp_store::write_item_meta(&item, "bytes").ok();
+        }
+    }
+
     let dto = ContentItemDto::from(&item);
     state
         .local_content
         .write()
         .await
         .insert(item.id.clone(), item);
+    evict_fifo(&state).await;
 
     tracing::info!(
         "Pulled {} from {} ({})",
@@ -456,34 +482,57 @@ pub async fn pull_peer_content(
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn local_ipv4() -> Option<std::net::Ipv4Addr> {
-    // Connect a UDP socket to a public IP (no data sent) to find local outbound IP
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    match socket.local_addr().ok()?.ip() {
-        IpAddr::V4(v4) => Some(v4),
-        _ => None,
-    }
+    crate::network::local_ipv4()
 }
 
 fn write_item_to_clipboard(item: &ContentItem) -> anyhow::Result<()> {
+    use fenix_hub_core::content::ContentType;
     let mut clipboard = arboard::Clipboard::new()?;
     match &item.data {
         ContentData::Text(text) => {
             clipboard.set_text(text)?;
         }
         ContentData::FilePath(path) => {
-            clipboard.set_text(path.to_string_lossy().to_string())?;
+            if item.content_type == ContentType::Image {
+                clipboard_set_image_file(&mut clipboard, path)?;
+            } else {
+                clipboard.set_text(path.to_string_lossy().to_string())?;
+            }
         }
         ContentData::Bytes(bytes) => {
-            let path = temp_store::write_item_bytes(
-                &item.id,
-                item.file_name.as_deref().unwrap_or("fenixhub-item.bin"),
-                bytes,
-            )?;
-            clipboard.set_text(path.to_string_lossy().to_string())?;
+            if item.content_type == ContentType::Image {
+                let path = temp_store::write_item_bytes(
+                    &item.id,
+                    item.file_name.as_deref().unwrap_or("fenixhub-item.png"),
+                    bytes,
+                )?;
+                clipboard_set_image_file(&mut clipboard, &path)?;
+            } else {
+                let path = temp_store::write_item_bytes(
+                    &item.id,
+                    item.file_name.as_deref().unwrap_or("fenixhub-item.bin"),
+                    bytes,
+                )?;
+                clipboard.set_text(path.to_string_lossy().to_string())?;
+            }
         }
         ContentData::Empty => {}
     }
+    Ok(())
+}
+
+fn clipboard_set_image_file(
+    clipboard: &mut arboard::Clipboard,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let img = image::open(path)?.to_rgba8();
+    let width = img.width() as usize;
+    let height = img.height() as usize;
+    clipboard.set_image(arboard::ImageData {
+        width,
+        height,
+        bytes: img.into_raw().into(),
+    })?;
     Ok(())
 }
 
@@ -531,9 +580,53 @@ fn extension_from_mime(mime_type: &str) -> Option<&'static str> {
 }
 
 fn cleanup_item_storage(item: &ContentItem) {
-    if let ContentData::FilePath(path) = &item.data {
-        temp_store::remove_item_path(path).ok();
+    temp_store::remove_item(&item.id).ok();
+}
+
+async fn evict_fifo(state: &State<'_, HubState>) {
+    match temp_store::enforce_fifo(temp_store::MAX_HISTORY_ITEMS) {
+        Ok(evicted) if !evicted.is_empty() => {
+            let mut content = state.local_content.write().await;
+            for id in &evicted {
+                content.remove(id);
+            }
+            tracing::debug!("FIFO evicted {} old item(s)", evicted.len());
+        }
+        Err(e) => tracing::warn!("FIFO enforcement failed: {}", e),
+        _ => {}
     }
+}
+
+/// Resize the hub window from Rust (bypasses `resizable: false` JS restriction).
+#[tauri::command]
+pub fn resize_hub(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("hub") {
+        win.set_size(tauri::LogicalSize::new(width, height))
+            .map_err(|e| e.to_string())?;
+        windowing::position_hub_window_top(&win);
+    }
+    Ok(())
+}
+
+/// Close the hub window cleanly from JS: unannounce, stop server, destroy window.
+/// History is intentionally kept (FIFO persists across sessions).
+#[tauri::command]
+pub async fn close_hub_window(app: AppHandle, state: State<'_, HubState>) -> Result<(), String> {
+    let announcements: Vec<(String, String)> =
+        state.active_announcements.write().await.drain().collect();
+    for (_, instance_name) in announcements {
+        fenix_hub_daemon::mdns::unannounce_content(&state.mdns, &instance_name).ok();
+    }
+    if let Some(tx) = state.server_shutdown.write().await.take() {
+        let _ = tx.send(());
+    }
+    *state.server_port.write().await = None;
+
+    if let Some(win) = app.get_webview_window("hub") {
+        win.destroy().map_err(|e| e.to_string())?;
+    }
+    tracing::info!("Hub closed via command");
+    Ok(())
 }
 
 fn transfer_path(item: &ContentItem) -> Option<String> {
@@ -561,10 +654,7 @@ fn compact_announcement_for_mdns(mut announcement: Announcement) -> Announcement
         .clone()
         .filter(|name| name.chars().count() > MAX_ANNOUNCEMENT_FILE_NAME_CHARS)
     {
-        announcement.file_name = Some(truncate_chars(
-            &file_name,
-            MAX_ANNOUNCEMENT_FILE_NAME_CHARS,
-        ));
+        announcement.file_name = Some(truncate_chars(&file_name, MAX_ANNOUNCEMENT_FILE_NAME_CHARS));
     }
     if announcement_size(&announcement) <= MAX_ANNOUNCEMENT_BYTES {
         return announcement;
@@ -621,9 +711,7 @@ fn announcement_preview_fallback(announcement: &Announcement) -> String {
     }
 }
 
-fn announcement_kind_label(
-    content_type: &fenix_hub_core::content::ContentType,
-) -> &'static str {
+fn announcement_kind_label(content_type: &fenix_hub_core::content::ContentType) -> &'static str {
     match content_type {
         fenix_hub_core::content::ContentType::Text => "Texto",
         fenix_hub_core::content::ContentType::Image => "Imagen",
@@ -644,6 +732,7 @@ mod tests {
     #[test]
     fn compacts_large_image_announcement_for_mdns() {
         let announcement = Announcement {
+            protocol_version: 1,
             group_id: "g".repeat(32),
             content_id: "content-1".to_string(),
             device_name: "Pixel".to_string(),
