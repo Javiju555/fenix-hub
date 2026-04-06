@@ -1,7 +1,7 @@
 use anyhow::Result;
-use mdns_sd::{ServiceDaemon, ServiceInfo, TxtProperty};
 #[cfg(not(target_os = "linux"))]
 use mdns_sd::ServiceEvent;
+use mdns_sd::{ServiceDaemon, ServiceInfo, TxtProperty};
 /// mDNS announcement and discovery — shared between all platforms.
 use std::net::IpAddr;
 use tokio::sync::mpsc;
@@ -85,6 +85,11 @@ fn start_discovery_mdns(
         while let Ok(event) = receiver.recv() {
             match event {
                 ServiceEvent::ServiceResolved(info) => {
+                    tracing::debug!(
+                        "mDNS resolved: {} addrs={:?}",
+                        info.get_fullname(),
+                        info.get_addresses()
+                    );
                     let peer_ip = info
                         .get_addresses()
                         .iter()
@@ -94,15 +99,36 @@ fn start_discovery_mdns(
 
                     let json_data = reassemble_txt(&info);
                     if let (Some(peer_ip), Some(data)) = (peer_ip, json_data.as_deref()) {
-                        if let Ok(announcement) = serde_json::from_str::<Announcement>(data) {
-                            if announcement.group_id != group_id {
-                                continue;
+                        match serde_json::from_str::<Announcement>(data) {
+                            Ok(announcement) => {
+                                if announcement.group_id != group_id {
+                                    tracing::debug!(
+                                        "mDNS: ignoring {} — group_id mismatch (got {}, want {})",
+                                        announcement.device_name,
+                                        &announcement.group_id[..8],
+                                        &group_id[..8],
+                                    );
+                                    continue;
+                                }
+                                tracing::info!(
+                                    "mDNS: accepted peer {} at {}",
+                                    announcement.device_name,
+                                    peer_ip
+                                );
+                                let _ = event_tx.blocking_send(DaemonEvent::PeerContentAvailable {
+                                    announcement,
+                                    peer_ip,
+                                });
                             }
-                            let _ = event_tx.blocking_send(DaemonEvent::PeerContentAvailable {
-                                announcement,
-                                peer_ip,
-                            });
+                            Err(e) => {
+                                tracing::warn!("mDNS: failed to parse announcement JSON: {}", e);
+                            }
                         }
+                    } else {
+                        tracing::debug!(
+                            "mDNS resolved but no IP or TXT data for {}",
+                            info.get_fullname()
+                        );
                     }
                 }
                 ServiceEvent::ServiceRemoved(_, fullname) => {
@@ -140,7 +166,14 @@ fn start_discovery_avahi(group_id: String, event_tx: mpsc::Sender<DaemonEvent>) 
         // stdbuf -oL forces line-buffering on avahi-browse stdout so new
         // services appear immediately instead of waiting for the 4 KB pipe buffer.
         let mut child = match Command::new("stdbuf")
-            .args(["-oL", "avahi-browse", "-r", "-p", "--no-db-lookup", avahi_service_type()])
+            .args([
+                "-oL",
+                "avahi-browse",
+                "-r",
+                "-p",
+                "--no-db-lookup",
+                avahi_service_type(),
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -203,7 +236,11 @@ fn start_discovery_avahi(group_id: String, event_tx: mpsc::Sender<DaemonEvent>) 
                         let announcement = match serde_json::from_str::<Announcement>(&json) {
                             Ok(a) => a,
                             Err(e) => {
-                                tracing::error!("avahi: JSON parse failed: {} | json snippet: {}", e, &json[..json.len().min(200)]);
+                                tracing::error!(
+                                    "avahi: JSON parse failed: {} | json snippet: {}",
+                                    e,
+                                    &json[..json.len().min(200)]
+                                );
                                 continue;
                             }
                         };
@@ -280,12 +317,8 @@ fn parse_avahi_txt(txt_block: &str) -> Option<String> {
                     // \DDD decimal byte escape (avahi non-ASCII encoding)
                     Some((_, c)) if c.is_ascii_digit() => {
                         let d1 = c.to_digit(10).unwrap() as u32;
-                        let d2 = chars.next()
-                            .and_then(|(_, d)| d.to_digit(10))
-                            .unwrap_or(0);
-                        let d3 = chars.next()
-                            .and_then(|(_, d)| d.to_digit(10))
-                            .unwrap_or(0);
+                        let d2 = chars.next().and_then(|(_, d)| d.to_digit(10)).unwrap_or(0);
+                        let d3 = chars.next().and_then(|(_, d)| d.to_digit(10)).unwrap_or(0);
                         value_bytes.push((d1 * 100 + d2 * 10 + d3) as u8);
                     }
                     Some((_, c)) => {
@@ -332,7 +365,15 @@ fn which_avahi_browse() -> Result<()> {
             .filter(|o| o.status.success())
             .is_some();
         if !found {
-            anyhow::bail!("{} not found — install {} package", bin, if *bin == "avahi-browse" { "avahi" } else { "coreutils" });
+            anyhow::bail!(
+                "{} not found — install {} package",
+                bin,
+                if *bin == "avahi-browse" {
+                    "avahi"
+                } else {
+                    "coreutils"
+                }
+            );
         }
     }
     Ok(())

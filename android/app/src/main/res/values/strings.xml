@@ -6,6 +6,7 @@
     <string name="notification_title">FenixHub activo</string>
     <string name="notification_text">Descubrimiento LAN y overlay disponibles.</string>
     <string name="notification_action_open">Abrir Hub</string>
+    <string name="share_label">Anadir a FenixHub</string>
     <string name="shortcut_overlay_short">Overlay</string>
     <string name="shortcut_overlay_long">Abrir overlay de FenixHub</string>
 </resources>

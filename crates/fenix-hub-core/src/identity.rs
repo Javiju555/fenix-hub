@@ -84,8 +84,7 @@ impl GroupIdentity {
     /// Restore identity from a previously persisted key (hex-encoded).
     /// Used on startup to avoid re-deriving from passphrase.
     pub fn from_key_hex(key_hex: &str, device_name: &str) -> Result<Self> {
-        let bytes = hex::decode(key_hex)
-            .map_err(|e| anyhow::anyhow!("Invalid key hex: {}", e))?;
+        let bytes = hex::decode(key_hex).map_err(|e| anyhow::anyhow!("Invalid key hex: {}", e))?;
         if bytes.len() != 32 {
             anyhow::bail!("Key must be 32 bytes, got {}", bytes.len());
         }
