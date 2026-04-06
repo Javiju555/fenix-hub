@@ -17,23 +17,16 @@ function listen<T>(event: string, cb: (e: { payload: T }) => void) {
   return Promise.resolve(() => {});
 }
 
-async function getAppWindow() {
-  const { getCurrentWindow } = await import('@tauri-apps/api/window');
-  return getCurrentWindow();
-}
-
 async function setWindowSize(w: number, h: number) {
   if (!IS_TAURI) return;
-  const { LogicalSize } = await import('@tauri-apps/api/dpi');
-  const win = await getAppWindow();
-  // Set min size first so GTK doesn't clamp our target size
-  await win.setMinSize(new LogicalSize(W_PILL, H_PILL));
-  await win.setSize(new LogicalSize(w, h));
+  // Use Rust command — bypasses `resizable: false` JS restriction on Windows
+  await invoke('resize_hub', { width: w, height: h });
 }
 
 async function closeApp() {
   if (!IS_TAURI) return;
-  (await getAppWindow()).close();
+  // Use Rust command for reliable cleanup + destroy
+  await invoke('close_hub_window');
 }
 
 // ── Mock backend ──────────────────────────────────────────────────────────────
@@ -101,7 +94,7 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface IdentityInfo   { device_name: string; group_id: string; configured: boolean; device_type: string; }
-interface ContentItem    { id: string; content_type: 'text'|'image'|'file'; preview: string; size_bytes: number; created_at: number; file_name?: string | null; mime_type?: string | null; transfer_path?: string | null; }
+interface ContentItem    { id: string; content_type: 'text'|'image'|'file'; preview: string; size_bytes: number; created_at: number; file_name?: string | null; mime_type?: string | null; transfer_path?: string | null; data_text?: string | null; }
 interface PeerAnnouncement { group_id: string; content_id: string; device_name: string; preview: string; content_type: 'text'|'image'|'file'; size_bytes: number; send_mode: { Broadcast: null }|{ Direct: { target_device: string } }; created_at: number; port: number; file_name?: string | null; mime_type?: string | null; }
 interface PeerContentPayload { announcement: PeerAnnouncement; peer_ip: string; }
 interface DragPayload { text?: string | null; uri_list?: string | null; }
@@ -116,6 +109,7 @@ let onlineDevices: string[] = [];
 let activeTab: 'local' | 'red' = 'local';
 let collapsed = false;
 let selectedDeviceType = 'desktop';
+const dragPayloadCache = new Map<string, DragPayload>();
 
 const DEVICE_TYPES: { id: string; label: string; icon: () => string }[] = [
   { id: 'desktop', label: 'Desktop',  icon: () => svg(18,'0 0 20 18','<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>') },
@@ -126,7 +120,7 @@ const DEVICE_TYPES: { id: string; label: string; icon: () => string }[] = [
 ];
 
 const W = 820, H = 185;
-const W_PILL = 280, H_PILL = 34;
+const W_PILL = 280, H_PILL = 48;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -181,7 +175,7 @@ function renderSetup() {
   document.getElementById('app')!.innerHTML = `
     <div class="hub-setup">
       <div class="setup-row">
-        <div class="setup-logo">${iconHub(20)}</div>
+        <div class="setup-logo">${iconHub(24)}</div>
         <h1>FenixHub</h1>
         <p>Portapapeles efímero · sin cuenta · sin nube</p>
       </div>
@@ -230,7 +224,7 @@ function renderHub() {
   document.getElementById('app')!.innerHTML = `
     <div class="hub" id="hub-root">
       <header class="hub-header" id="hub-header">
-        <div class="hub-logo">${iconHub(15)}</div>
+        <div class="hub-logo">${iconHub(18)}</div>
         <span class="hub-title">FenixHub</span>
         <span class="hub-device-label" title="Dispositivo: ${escapeHtml(identity?.device_name ?? '')}">
           ${deviceTypeIcon(identity?.device_type ?? 'desktop', 13)}
@@ -247,10 +241,21 @@ function renderHub() {
           <span class="enc-badge" title="Cifrado AES-256-GCM extremo a extremo activo">${iconLock(9)}</span>
         </div>
 
+        <div class="hub-collapsed-bar" id="hub-collapsed-bar" title="Mostrar FenixHub">
+          <span class="hub-pull-grip" aria-hidden="true"></span>
+          <span class="hub-collapsed-copy">
+            <span class="hub-collapsed-label">${iconChevronDown(10)} Abrir</span>
+            <span class="hub-collapsed-counts">
+              <span class="hub-collapsed-pill">${iconInbox(9)} <span id="count-local-mini">0</span></span>
+              <span class="hub-collapsed-pill">${iconWifi(9)} <span id="count-red-mini">0</span></span>
+            </span>
+          </span>
+        </div>
+
         <div class="hub-actions">
           <button class="btn-icon" id="btn-share-all" title="Compartir todo con todos">${iconBroadcast(13)}</button>
           <button class="btn-icon" id="btn-collapse"  title="Minimizar a notch">${iconMinus(13)}</button>
-          <button class="btn-icon danger" id="btn-close" title="Cerrar">${iconX(12)}</button>
+          <button class="btn-icon danger" id="btn-close" title="Ocultar al tray">${iconX(12)}</button>
         </div>
       </header>
 
@@ -290,7 +295,7 @@ function renderHub() {
 
   // Drag-to-hub
   const hub = document.getElementById('hub-root')!;
-  hub.addEventListener('dragover', (e) => { e.preventDefault(); hub.classList.add('drag-over'); });
+  hub.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer!.dropEffect = 'copy'; hub.classList.add('drag-over'); });
   hub.addEventListener('dragleave', (e) => {
     if (!(e.relatedTarget as HTMLElement)?.closest('#hub-root')) hub.classList.remove('drag-over');
   });
@@ -349,32 +354,26 @@ function renderHub() {
 async function collapse() {
   collapsed = true;
   const hub = document.getElementById('hub-root')!;
-  const header = document.getElementById('hub-header') as HTMLElement;
-  document.querySelectorAll('.tab-panel').forEach(p => (p as HTMLElement).style.display = 'none');
-  header.style.borderBottom = 'none';
-  // Shrink the hub div and body so the glass pill is visible
-  hub.style.height = H_PILL + 'px';
-  hub.style.borderRadius = '19px';
+  hub.classList.add('collapsed');
+  document.body.classList.add('is-collapsed');
+  document.body.style.width = W_PILL + 'px';
   document.body.style.height = H_PILL + 'px';
   document.getElementById('btn-collapse')!.innerHTML = iconChevronDown(13);
+  document.getElementById('btn-collapse')!.title = 'Mostrar FenixHub';
   await setWindowSize(W_PILL, H_PILL);
 }
 
 async function expand() {
   collapsed = false;
   const hub = document.getElementById('hub-root')!;
-  const header = document.getElementById('hub-header') as HTMLElement;
-  // Restore size before showing content
-  hub.style.height = H + 'px';
-  hub.style.borderRadius = '';
+  hub.classList.remove('collapsed');
+  document.body.classList.remove('is-collapsed');
+  document.body.style.width = W + 'px';
   document.body.style.height = H + 'px';
   await setWindowSize(W, H);
-  setTimeout(() => {
-    header.style.borderBottom = '';
-    document.querySelectorAll('.tab-panel').forEach(p => (p as HTMLElement).style.display = '');
-    switchTab(activeTab);
-  }, 60);
+  switchTab(activeTab);
   document.getElementById('btn-collapse')!.innerHTML = iconMinus(13);
+  document.getElementById('btn-collapse')!.title = 'Minimizar a notch';
 }
 
 function switchTab(tab: 'local' | 'red') {
@@ -388,8 +387,12 @@ function switchTab(tab: 'local' | 'red') {
 function updateHeader() {
   const lc = document.getElementById('count-local');
   const rc = document.getElementById('count-red');
+  const lcMini = document.getElementById('count-local-mini');
+  const rcMini = document.getElementById('count-red-mini');
   if (lc) lc.textContent = String(localContent.length);
   if (rc) rc.textContent = String(peerContent.length);
+  if (lcMini) lcMini.textContent = String(localContent.length);
+  if (rcMini) rcMini.textContent = String(peerContent.length);
 
   const dot = document.getElementById('status-dot');
   const txt = document.getElementById('status-text');
@@ -408,6 +411,12 @@ function updateHeader() {
 function renderLocalContent() {
   const container = document.getElementById('panel-local')!;
   updateHeader();
+  const validIds = new Set(localContent.map(item => item.id));
+  for (const id of dragPayloadCache.keys()) {
+    if (!validIds.has(id)) {
+      dragPayloadCache.delete(id);
+    }
+  }
 
   if (localContent.length === 0) {
     container.innerHTML = `
@@ -429,7 +438,7 @@ function renderLocalContent() {
           )
         ].join('');
 
-    const isImg = item.preview.startsWith('data:image');
+    const isImg = item.content_type === 'image' && item.preview.startsWith('data:image');
     const topContent = isImg
       ? `<img class="card-thumb" src="${item.preview}" />`
       : `<div class="card-top">
@@ -439,12 +448,22 @@ function renderLocalContent() {
            </div>
          </div>`;
 
+    const liveTag = pub ? ' · <span style="color:var(--accent)">live</span>' : '';
+    // For image cards: merge size + actions into one compact row (no separate meta row)
+    const metaRow = isImg ? '' : `<div class="card-meta">${humanSize(item.size_bytes)}${liveTag}</div>`;
+    const actionsRow = isImg
+      ? `<div class="card-actions card-actions-img">
+           <span class="card-size-inline">${humanSize(item.size_bytes)}${liveTag}</span>
+           ${actionBtns}
+         </div>`
+      : `<div class="card-actions">${actionBtns}</div>`;
+
     return `
-    <div class="content-card${pub ? ' broadcasting' : ''}" data-id="${item.id}" draggable="true">
+    <div class="content-card${pub ? ' broadcasting' : ''}${isImg ? ' image-card' : ''}" data-id="${item.id}" draggable="true">
       ${topContent}
-      <div class="card-meta">${humanSize(item.size_bytes)}${pub ? ' · <span style="color:var(--accent)">live</span>' : ''}</div>
-      <div class="card-actions">${actionBtns}</div>
-      <button class="btn-delete" data-id="${item.id}">${iconX(8)}</button>
+      ${metaRow}
+      ${actionsRow}
+      <button class="btn-delete" data-id="${item.id}" title="Quitar del hub">${iconX(8)}</button>
     </div>`;
   }).join('')}</div>`;
 
@@ -492,7 +511,18 @@ function renderLocalContent() {
   });
 
   container.querySelectorAll('.content-card').forEach(card => {
-    (card as HTMLElement).addEventListener('dragstart', async event => {
+    const id = (card as HTMLElement).dataset.id;
+    if (id) {
+      (card as HTMLElement).addEventListener('pointerdown', () => {
+        void warmupDragPayload(id);
+      }, { passive: true });
+      (card as HTMLElement).addEventListener('mouseenter', () => {
+        void warmupDragPayload(id);
+      });
+    }
+
+    // dragstart MUST be synchronous — any await empties dataTransfer before the OS reads it
+    (card as HTMLElement).addEventListener('dragstart', (event) => {
       const id = (card as HTMLElement).dataset.id;
       const item = localContent.find(entry => entry.id === id);
       if (!id || !item) return;
@@ -500,14 +530,26 @@ function renderLocalContent() {
       const dataTransfer = (event as DragEvent).dataTransfer;
       if (!dataTransfer) return;
       dataTransfer.effectAllowed = 'copy';
+      const cached = dragPayloadCache.get(id);
 
-      if (IS_TAURI) {
-        const payload = await invoke<DragPayload>('prepare_local_drag', { id }).catch(() => null);
-        if (payload?.text) dataTransfer.setData('text/plain', payload.text);
-        if (payload?.uri_list) dataTransfer.setData('text/uri-list', payload.uri_list);
+      if (item.content_type === 'text') {
+        // data_text has the full text; preview is truncated at 80 chars
+        dataTransfer.setData('text/plain', cached?.text || item.data_text || item.preview);
       } else {
-        const fallbackText = item.transfer_path || item.file_name || item.preview;
-        dataTransfer.setData('text/plain', fallbackText);
+        const uriList = cached?.uri_list || (item.transfer_path ? fileUriFromPath(item.transfer_path) : null);
+        if (uriList) {
+          const fallbackText = cached?.text || item.transfer_path || item.file_name || item.preview;
+          const mime = item.mime_type || 'application/octet-stream';
+          const name = item.file_name || 'fenixhub-item';
+          dataTransfer.setData('text/plain', fallbackText);
+          dataTransfer.setData('text/uri-list', uriList);
+          // Helps native Windows targets that expect explicit URL download payload.
+          dataTransfer.setData('DownloadURL', `${mime}:${name}:${uriList}`);
+          return;
+        }
+
+        // Normalize Windows backslashes for file URI
+        dataTransfer.setData('text/plain', item.file_name || item.preview);
       }
     });
   });
@@ -554,7 +596,7 @@ function renderPeerContent() {
       (btn as HTMLButtonElement).disabled = true;
       (btn as HTMLButtonElement).textContent = 'Recibiendo…';
       try {
-        const received = await invoke<ContentItem>('pull_peer_content', { contentId: id });
+        const received = await invoke<ContentItem>('pull_peer_content', { content_id: id });
         localContent = [received, ...localContent];
         // Don't remove from peerContent — peer still has it published
         updateHeader();
@@ -574,8 +616,10 @@ function renderPeerContent() {
 const svg = (s: number, vb: string, path: string, extra = 'stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"') =>
   `<svg width="${s}" height="${s}" viewBox="${vb}" fill="none" ${extra}>${path}</svg>`;
 
+const LOGO_SRC = './logo-mark.png';
+
 function iconHub(s: number) {
-  return svg(s,'0 0 20 20','<polygon points="10,2 18,6.5 18,13.5 10,18 2,13.5 2,6.5" stroke-width="1.6"/><circle cx="10" cy="10" r="2.5" stroke-width="1.6"/>');
+  return `<img src="${LOGO_SRC}" alt="FenixHub" width="${s}" height="${s}" style="display:block;object-fit:contain;" />`;
 }
 function iconCheckmark(s: number) {
   return svg(s,'0 0 16 16','<polyline points="2.5,8 6.5,12 13.5,4" stroke-width="2.2"/>');
@@ -629,6 +673,21 @@ function typeIcon(type: string) {
   if (type === 'text')  return svg(14,'0 0 16 16','<line x1="3" y1="5" x2="13" y2="5" stroke-width="1.8"/><line x1="3" y1="8" x2="13" y2="8" stroke-width="1.8"/><line x1="3" y1="11" x2="9" y2="11" stroke-width="1.8"/>');
   if (type === 'image') return svg(14,'0 0 16 16','<rect x="2" y="3" width="12" height="10" rx="1.5" stroke-width="1.8"/><circle cx="6" cy="6.5" r="1" stroke-width="1.8"/><polyline points="2,11 5.5,8 7.5,10 10,7.5 14,11" stroke-width="1.8"/>');
   return svg(14,'0 0 16 16','<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.8"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.8"/>');
+}
+
+function fileUriFromPath(path: string): string {
+  const fwdPath = path.replace(/\\/g, '/');
+  return fwdPath.startsWith('/') ? `file://${fwdPath}` : `file:///${fwdPath}`;
+}
+
+async function warmupDragPayload(id: string): Promise<void> {
+  if (!IS_TAURI || dragPayloadCache.has(id)) return;
+  try {
+    const payload = await invoke<DragPayload>('prepare_local_drag', { id });
+    dragPayloadCache.set(id, payload);
+  } catch {
+    // Drag has a sync fallback path; cache warm-up is best-effort.
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
