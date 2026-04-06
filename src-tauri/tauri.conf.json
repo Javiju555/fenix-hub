@@ -5,8 +5,8 @@
   "identifier": "dev.fenix.hub",
   "build": {
     "frontendDist": "../frontend/dist",
-    "devUrl": "http://localhost:1435",
-    "beforeDevCommand": "cd ../frontend && ~/.bun/bin/bun run dev",
+    "devUrl": "http://localhost:1421",
+    "beforeDevCommand": { "script": "bun run dev", "cwd": "../frontend" },
     "beforeBuildCommand": "cd ../frontend && bun run build"
   },
   "app": {
@@ -22,8 +22,7 @@
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
-        "visible": true,
-        "center": true,
+        "visible": false,
         "skipTaskbar": true,
         "shadow": false
       }
@@ -34,7 +33,7 @@
     "trayIcon": {
       "id": "main",
       "iconPath": "icons/32x32.png",
-      "iconAsTemplate": true,
+      "iconAsTemplate": false,
       "tooltip": "FenixHub — portapapeles efímero"
     }
   },
