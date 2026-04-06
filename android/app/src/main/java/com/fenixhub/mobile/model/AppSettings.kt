@@ -7,4 +7,6 @@ data class AppSettings(
     val groupId: String = "",
 ) {
     fun groupKeyBytes(): ByteArray = com.fenixhub.mobile.util.CryptoUtils.hexToBytes(groupKeyHex)
+    fun macKeyBytes(): ByteArray = com.fenixhub.mobile.util.CryptoUtils.deriveMacKey(groupKeyBytes())
+    fun encKeyBytes(): ByteArray = com.fenixhub.mobile.util.CryptoUtils.deriveEncKey(groupKeyBytes())
 }

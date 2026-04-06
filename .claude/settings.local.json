@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"\\\\.\\(md|txt|toml|lock\\)$\")",
+      "Bash(cargo tree:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(netsh wlan:*)",
+      "Bash(ipconfig)",
+      "Bash(bun --version)",
+      "Bash(npm --version)",
+      "Bash(npx tauri:*)",
+      "Bash(powershell -Command ':*)",
+      "Bash(netsh advfirewall:*)",
+      "Bash(taskkill /F /IM fenix-hub.exe)",
+      "Bash(pkill -f \"fenix-hub\")",
+      "Bash(tasklist)",
+      "Bash(taskkill /F /PID 23108)",
+      "Bash(cmd /c \"taskkill /F /PID 23108\")",
+      "Bash(cargo run:*)",
+      "Bash(where bun:*)",
+      "Bash(cmd /c \"bun --version\")",
+      "Bash(bun run:*)",
+      "Read(//d/fenix_motorsport_app/**)",
+      "Read(//d//**)",
+      "Read(//e/goofymixer/**)",
+      "Bash(cmd /c \"netsh advfirewall firewall show rule name=\\\\\"FenixHub\\\\\" verbose\")",
+      "Bash(cmd /c \"netsh advfirewall firewall show rule name=all dir=in protocol=udp localport=5353\")",
+      "Bash(powershell -Command \"Test-NetConnection -ComputerName 192.168.1.128 -Port 45107 -InformationLevel Quiet\")",
+      "Bash(cargo build:*)",
+      "Bash(ls e:/fenix-hub/*.png e:/fenix-hub/*.ico e:/fenix-hub/*.icns)",
+      "Bash(bunx tauri:*)"
+    ]
+  }
+}

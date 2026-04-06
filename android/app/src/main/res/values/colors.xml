@@ -1,4 +1,5 @@
 <resources>
     <color name="launcher_background">#1A1A2E</color>
     <color name="launcher_foreground">#5E8CF4</color>
+    <color name="ic_launcher_background">#241329</color>
 </resources>
