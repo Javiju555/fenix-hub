@@ -1,4 +1,5 @@
-use crate::persist::DeviceType;
+use crate::persist::{self, DeviceType};
+use crate::temp_store;
 use fenix_hub_core::content::ContentItem;
 use fenix_hub_core::identity::GroupIdentity;
 use fenix_hub_core::protocol::Announcement;
@@ -27,10 +28,26 @@ pub struct HubState {
 
 impl HubState {
     pub fn new(mdns: ServiceDaemon) -> Self {
+        // Load identity from disk synchronously during construction so it is
+        // available before any window (and its WebView) is created. This avoids
+        // a race where get_identity() is called before setup() finishes.
+        let (identity, device_type) = persist::load()
+            .ok()
+            .flatten()
+            .map(|(id, dt)| (Some(Arc::new(id)), dt))
+            .unwrap_or((None, DeviceType::default()));
+
+        // Restore clipboard history from disk (FIFO, up to MAX_HISTORY_ITEMS)
+        let history: HashMap<String, ContentItem> = temp_store::load_all_items()
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect();
+        tracing::info!("Loaded {} item(s) from clipboard history", history.len());
+
         Self {
-            identity: Arc::new(RwLock::new(None)),
-            device_type: Arc::new(RwLock::new(DeviceType::default())),
-            local_content: Arc::new(RwLock::new(HashMap::new())),
+            identity: Arc::new(RwLock::new(identity)),
+            device_type: Arc::new(RwLock::new(device_type)),
+            local_content: Arc::new(RwLock::new(history)),
             peer_content: Arc::new(RwLock::new(HashMap::new())),
             active_announcements: Arc::new(RwLock::new(HashMap::new())),
             mdns,
