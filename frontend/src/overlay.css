@@ -30,6 +30,7 @@ body {
 body.overlay-mode {
   background:
     radial-gradient(circle at top left, rgba(94, 140, 244, 0.18), transparent 34%),
+    radial-gradient(circle at top right, rgba(173, 94, 244, 0.10), transparent 28%),
     linear-gradient(180deg, rgba(9, 13, 24, 0.98), rgba(9, 13, 24, 0.92));
 }
 
@@ -38,11 +39,54 @@ body.overlay-mode {
   height: 100%;
 }
 
+.overlay-mini-shell {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  position: relative;
+}
+
+.overlay-mini-main {
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: radial-gradient(circle at 30% 30%, rgba(94, 140, 244, 0.34), rgba(12, 18, 33, 0.92));
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.overlay-mini-logo {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+
+.overlay-mini-close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(9, 13, 24, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--overlay-red);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
 .overlay-shell {
   width: 100%;
   height: 100%;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto;
   gap: 12px;
   padding: 14px;
   background: var(--overlay-bg);
@@ -55,7 +99,34 @@ body.overlay-mode {
   gap: 10px;
 }
 
-.overlay-tabs {
+.overlay-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.overlay-logo {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.overlay-window-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.overlay-tabs-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.overlay-tab-group {
   display: inline-flex;
   gap: 6px;
   padding: 4px;
@@ -65,6 +136,7 @@ body.overlay-mode {
 }
 
 .overlay-tab,
+.overlay-control,
 .overlay-expand,
 .overlay-action,
 .overlay-card,
@@ -88,6 +160,22 @@ body.overlay-mode {
 .overlay-tab.active {
   background: var(--overlay-accent);
   color: white;
+}
+
+.overlay-control {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--overlay-border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.overlay-control.danger {
+  color: var(--overlay-red);
+  background: var(--overlay-red-soft);
 }
 
 .overlay-expand {
@@ -225,6 +313,15 @@ body.overlay-mode {
   touch-action: manipulation;
 }
 
+.overlay-action.subtle {
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--overlay-dim);
+}
+
+.overlay-close-row {
+  display: grid;
+}
+
 .overlay-action.success {
   color: #081511;
   background: var(--overlay-green);
@@ -315,12 +412,16 @@ body.overlay-mode {
 
 @media (orientation: landscape) {
   .overlay-shell {
-    grid-template-rows: auto 1fr;
+    grid-template-rows: auto auto 1fr;
     grid-template-columns: minmax(0, 1fr) 260px;
     align-items: stretch;
   }
 
   .overlay-header {
+    grid-column: 1 / span 2;
+  }
+
+  .overlay-tabs-row {
     grid-column: 1 / span 2;
   }
 
