@@ -40,6 +40,7 @@ class SettingsStore(context: Context) {
             .putString(KEY_DEVICE_NAME, settings.deviceName)
             .putString(KEY_GROUP_KEY_HEX, settings.groupKeyHex)
             .putString(KEY_GROUP_ID, settings.groupId)
+            .putInt(KEY_KDF_VERSION, CURRENT_KDF_VERSION)
             .apply()
 
         mutableSettings.value = settings
@@ -70,6 +71,27 @@ class SettingsStore(context: Context) {
 
     private fun load(): AppSettings {
         val configured = prefs.getBoolean(KEY_CONFIGURED, false)
+        val keyVersion = prefs.getInt(KEY_KDF_VERSION, LEGACY_KDF_VERSION)
+
+        if (configured && keyVersion < CURRENT_KDF_VERSION) {
+            val savedDeviceName = prefs.getString(KEY_DEVICE_NAME, "").orEmpty()
+            prefs.edit()
+                .putBoolean(KEY_CONFIGURED, false)
+                .remove(KEY_GROUP_KEY_HEX)
+                .remove(KEY_GROUP_ID)
+                .putInt(KEY_KDF_VERSION, CURRENT_KDF_VERSION)
+                .apply()
+
+            // Legacy keys were derived with v1 parameters and are incompatible
+            // with desktop v2. Force a one-time re-setup with passphrase.
+            return AppSettings(
+                configured = false,
+                deviceName = savedDeviceName,
+                groupKeyHex = "",
+                groupId = "",
+            )
+        }
+
         return AppSettings(
             configured = configured,
             deviceName = prefs.getString(KEY_DEVICE_NAME, "").orEmpty(),
@@ -84,6 +106,10 @@ class SettingsStore(context: Context) {
         const val KEY_DEVICE_NAME = "device_name"
         const val KEY_GROUP_KEY_HEX = "group_key_hex"
         const val KEY_GROUP_ID = "group_id"
+        const val KEY_KDF_VERSION = "key_derivation_version"
         const val KEY_IGNORED_PEER_CONTENT_IDS = "ignored_peer_content_ids"
+
+        const val LEGACY_KDF_VERSION = 1
+        const val CURRENT_KDF_VERSION = 2
     }
 }

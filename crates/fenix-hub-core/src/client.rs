@@ -96,7 +96,11 @@ pub async fn pull_content(
         content_id,
         peer_ip,
         bytes.len(),
-        if is_encrypted { " (encrypted)" } else { " (plaintext, legacy)" }
+        if is_encrypted {
+            " (encrypted)"
+        } else {
+            " (plaintext, legacy)"
+        }
     );
 
     Ok(PulledContent {

@@ -74,7 +74,15 @@ class FenixHttpServer(
                             return@get
                         }
 
-                    call.respondBytes(payload, contentType = contentType)
+                    val encryptedPayload = runCatching {
+                        CryptoUtils.encryptAesGcm(settings.encKeyBytes(), payload)
+                    }.getOrElse {
+                        call.respond(HttpStatusCode.InternalServerError)
+                        return@get
+                    }
+
+                    call.response.headers.append(ENCRYPTED_HEADER, "1")
+                    call.respondBytes(encryptedPayload, contentType = contentType)
                 }
 
                 post("/auth/challenge") {
@@ -94,7 +102,7 @@ class FenixHttpServer(
                     }
 
                     val hmac = CryptoUtils.hmacSha256Hex(
-                        settings.groupKeyBytes(),
+                        settings.macKeyBytes(),
                         nonce.toByteArray(Charsets.UTF_8),
                     )
                     val response = JSONObject().put("hmac", hmac).toString()
@@ -137,12 +145,13 @@ class FenixHttpServer(
         message: ByteArray,
     ): Boolean {
         val receivedHeader = request.header(HMAC_HEADER) ?: return false
-        val expected = CryptoUtils.hmacSha256Hex(settings.groupKeyBytes(), message)
+        val expected = CryptoUtils.hmacSha256Hex(settings.macKeyBytes(), message)
         return CryptoUtils.constantTimeEquals(expected, receivedHeader)
     }
 
     private companion object {
         const val DEFAULT_PORT = 8765
         const val HMAC_HEADER = "X-FenixHub-Auth"
+        const val ENCRYPTED_HEADER = "X-FenixHub-Encrypted"
     }
 }

@@ -8,6 +8,7 @@ import org.json.JSONObject
 object AnnouncementCodec {
     fun encode(announcement: Announcement): String {
         return JSONObject()
+            .put("protocol_version", announcement.protocolVersion)
             .put("group_id", announcement.groupId)
             .put("content_id", announcement.contentId)
             .put("device_name", announcement.deviceName)
@@ -29,6 +30,7 @@ object AnnouncementCodec {
                 ?: return null
 
             Announcement(
+                protocolVersion = root.optInt("protocol_version", 0),
                 groupId = root.getString("group_id"),
                 contentId = root.getString("content_id"),
                 deviceName = root.getString("device_name"),

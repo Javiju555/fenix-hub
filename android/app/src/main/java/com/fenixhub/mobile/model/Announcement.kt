@@ -1,6 +1,7 @@
 package com.fenixhub.mobile.model
 
 data class Announcement(
+    val protocolVersion: Int = 0,
     val groupId: String,
     val contentId: String,
     val deviceName: String,

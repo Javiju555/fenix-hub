@@ -83,8 +83,7 @@ async fn serve_content(
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let sig_bytes =
-        hex::decode(sig_header).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let sig_bytes = hex::decode(sig_header).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     if !state.identity.verify(id.as_bytes(), &sig_bytes) {
         return Err(StatusCode::UNAUTHORIZED);
@@ -156,4 +155,3 @@ async fn serve_content(
 //
 // Current limit: files up to ~500 MB work fine on typical desktop hardware.
 // Streaming encryption (e.g. age-style chunked AEAD) is tracked as a TODO.
-

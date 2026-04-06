@@ -3,6 +3,7 @@ package com.fenixhub.mobile.data
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.util.Log
 import com.fenixhub.mobile.model.HubContentType
 import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.model.PeerContent
@@ -57,18 +58,21 @@ class ReceivedContentHandler(
             HubContentType.TEXT -> {
                 val text = tempStore.readBytes(item).toString(Charsets.UTF_8)
                 clipboard.setPrimaryClip(ClipData.newPlainText("FenixHub", text))
+                Log.i(TAG, "Copied TEXT to system clipboard (${text.length} chars)")
                 "Texto copiado al portapapeles"
             }
 
             HubContentType.IMAGE -> {
                 val uri = tempStore.contentUriFor(item)
                 clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, item.fileName ?: "FenixHub", uri))
+                Log.i(TAG, "Copied IMAGE URI to system clipboard: $uri")
                 "Imagen temporal lista para pegar"
             }
 
             HubContentType.FILE -> {
                 val uri = tempStore.contentUriFor(item)
                 clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, item.fileName ?: "FenixHub", uri))
+                Log.i(TAG, "Copied FILE URI to system clipboard: $uri")
                 "Archivo temporal listo para pegar"
             }
         }
@@ -77,5 +81,9 @@ class ReceivedContentHandler(
     private fun previewMimeType(preview: String): String? {
         if (!preview.startsWith("data:image")) return null
         return preview.substringAfter("data:").substringBefore(';')
+    }
+
+    private companion object {
+        const val TAG = "FenixHubClipboard"
     }
 }
