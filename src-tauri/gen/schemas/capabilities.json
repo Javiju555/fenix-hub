@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Default capabilities for FenixHub desktop","local":true,"windows":["hub"],"permissions":["core:default","core:event:default","core:window:default","core:app:default","shell:allow-open"]}}
