@@ -1,7 +1,9 @@
 package com.fenixhub.mobile.web
 
+import android.content.ClipboardManager
 import android.net.Uri
 import android.provider.Settings
+import android.util.Log
 import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -134,10 +136,23 @@ class AndroidHubBridge(
 
     private suspend fun pasteClipboardText(): JSONObject {
         val text = readClipboardText()?.trim().orEmpty()
-        require(text.isNotBlank()) { "El portapapeles no contiene texto" }
-        val item = withContext(Dispatchers.Default) {
-            container.localContentFactory.fromText(text).also(container.contentRepository::addLocalContent)
+        if (text.isNotBlank()) {
+            require(text.length <= MAX_PASTE_TEXT_CHARS) {
+                "Texto demasiado grande para pegar"
+            }
+            val item = withContext(Dispatchers.Default) {
+                container.localContentFactory.fromText(text).also(container.contentRepository::addLocalContent)
+            }
+            Log.i(TAG, "Pasted clipboard text into main hub (${text.length} chars)")
+            return localContentJson(item)
         }
+
+        val uri = clipboardPrimaryUri() ?: error("El portapapeles no contiene texto ni archivo")
+        val item = withContext(Dispatchers.IO) {
+            container.localContentFactory.fromUri(uri)
+        } ?: error("No se pudo importar el archivo del portapapeles")
+        container.contentRepository.addLocalContent(item)
+        Log.i(TAG, "Imported clipboard URI into main hub: $uri")
         return localContentJson(item)
     }
 
@@ -240,6 +255,7 @@ class AndroidHubBridge(
 
     private fun announcementJson(announcement: Announcement): JSONObject {
         return JSONObject()
+            .put("protocol_version", announcement.protocolVersion)
             .put("group_id", announcement.groupId)
             .put("content_id", announcement.contentId)
             .put("device_name", announcement.deviceName)
@@ -267,6 +283,14 @@ class AndroidHubBridge(
         return args?.optJSONObject("args") ?: args ?: JSONObject()
     }
 
+    private fun clipboardPrimaryUri(): Uri? {
+        val clipboard = activity.getSystemService(ClipboardManager::class.java)
+        val clip = clipboard.primaryClip ?: return null
+        if (clip.itemCount == 0) return null
+        val item = clip.getItemAt(0)
+        return item.uri ?: item.intent?.data
+    }
+
     private fun nullable(value: String?): Any = value ?: JSONObject.NULL
 
     private fun dispatchSuccess(requestId: String, payload: String) {
@@ -284,5 +308,10 @@ class AndroidHubBridge(
         currentWebView.post {
             currentWebView.evaluateJavascript(script, null)
         }
+    }
+
+    private companion object {
+        const val TAG = "FenixHubAndroidBridge"
+        const val MAX_PASTE_TEXT_CHARS = 8_192
     }
 }

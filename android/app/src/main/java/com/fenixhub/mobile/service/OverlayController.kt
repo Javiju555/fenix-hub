@@ -47,9 +47,17 @@ class OverlayController(
     private var bridge: OverlayWebBridge? = null
     private var webView: WebView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
+    private var minimized = false
 
     fun show() {
-        if (!Settings.canDrawOverlays(context) || webView != null) return
+        if (!Settings.canDrawOverlays(context)) return
+
+        if (webView != null) {
+            if (minimized) {
+                expand()
+            }
+            return
+        }
 
         val currentBridge = OverlayWebBridge(
             context = context,
@@ -60,15 +68,41 @@ class OverlayController(
             receivedContentHandler = receivedContentHandler,
             httpClient = httpClient,
             onOpenMainApp = ::openMainApp,
+            onMinimizeOverlay = ::minimize,
+            onExpandOverlay = ::expand,
+            onCloseOverlay = ::dismiss,
         )
         bridge = currentBridge
         val view = createWebView(currentBridge)
-        val params = baseLayoutParams()
+        val params = minimizedLayoutParams()
         webView = view
         layoutParams = params
+        minimized = true
         currentBridge.attach(view)
         windowManager.addView(view, params)
         view.loadUrl(OVERLAY_URL)
+    }
+
+    fun minimize() {
+        val current = webView ?: return
+        if (minimized) return
+
+        val params = minimizedLayoutParams()
+        layoutParams = params
+        windowManager.updateViewLayout(current, params)
+        minimized = true
+        setOverlayMinimized(true)
+    }
+
+    fun expand() {
+        val current = webView ?: return
+        if (!minimized) return
+
+        val params = baseLayoutParams()
+        layoutParams = params
+        windowManager.updateViewLayout(current, params)
+        minimized = false
+        setOverlayMinimized(false)
     }
 
     fun dismiss() {
@@ -79,8 +113,17 @@ class OverlayController(
         }
         webView = null
         layoutParams = null
+        minimized = false
         bridge?.destroy()
         bridge = null
+    }
+
+    private fun setOverlayMinimized(isMinimized: Boolean) {
+        val current = webView ?: return
+        val script = "window.__fenixOverlaySetMinimized && window.__fenixOverlaySetMinimized(${if (isMinimized) "true" else "false"});"
+        current.post {
+            current.evaluateJavascript(script, null)
+        }
     }
 
     private fun createWebView(bridge: OverlayWebBridge): WebView {
@@ -113,6 +156,11 @@ class OverlayController(
                 ): WebResourceResponse? {
                     return assetLoader.shouldInterceptRequest(request.url)
                 }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    setOverlayMinimized(minimized)
+                }
             }
         }
     }
@@ -120,8 +168,18 @@ class OverlayController(
     private fun baseLayoutParams(): WindowManager.LayoutParams {
         val bounds = currentBounds()
         val portrait = bounds.height() >= bounds.width()
-        val width = if (portrait) (bounds.width() * WIDTH_RATIO).toInt() else bounds.width()
-        val height = if (portrait) bounds.height() else (bounds.height() * HEIGHT_RATIO).toInt()
+        val maxWidth = if (portrait) {
+            (bounds.width() * PANEL_WIDTH_RATIO_PORTRAIT).toInt()
+        } else {
+            (bounds.width() * PANEL_WIDTH_RATIO_LANDSCAPE).toInt()
+        }
+        val maxHeight = if (portrait) {
+            (bounds.height() * PANEL_HEIGHT_RATIO_PORTRAIT).toInt()
+        } else {
+            (bounds.height() * PANEL_HEIGHT_RATIO_LANDSCAPE).toInt()
+        }
+        val width = minOf(dp(PANEL_WIDTH_DP), maxWidth).coerceAtLeast(dp(PANEL_MIN_WIDTH_DP))
+        val height = minOf(dp(PANEL_HEIGHT_DP), maxHeight).coerceAtLeast(dp(PANEL_MIN_HEIGHT_DP))
 
         return WindowManager.LayoutParams(
             width,
@@ -131,8 +189,30 @@ class OverlayController(
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = if (portrait) Gravity.END or Gravity.TOP else Gravity.TOP or Gravity.START
+            gravity = Gravity.END or Gravity.TOP
+            x = dp(PANEL_MARGIN_DP)
+            y = dp(PANEL_MARGIN_DP)
         }
+    }
+
+    private fun minimizedLayoutParams(): WindowManager.LayoutParams {
+        return WindowManager.LayoutParams(
+            dp(MINIMIZED_SIZE_DP),
+            dp(MINIMIZED_SIZE_DP),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.END or Gravity.TOP
+            x = dp(MINIMIZED_MARGIN_DP)
+            y = dp(MINIMIZED_MARGIN_DP)
+        }
+    }
+
+    private fun dp(value: Int): Int {
+        val density = context.resources.displayMetrics.density
+        return (value * density).toInt()
     }
 
     private fun currentBounds(): Rect {
@@ -150,7 +230,18 @@ class OverlayController(
     companion object {
         private const val BRIDGE_NAME = "FenixHubBridge"
         private const val OVERLAY_URL = "https://appassets.androidplatform.net/assets/overlay.html"
-        private const val WIDTH_RATIO = 0.30f
-        private const val HEIGHT_RATIO = 0.30f
+
+        private const val PANEL_WIDTH_DP = 360
+        private const val PANEL_HEIGHT_DP = 540
+        private const val PANEL_MIN_WIDTH_DP = 250
+        private const val PANEL_MIN_HEIGHT_DP = 330
+        private const val PANEL_MARGIN_DP = 12
+        private const val PANEL_WIDTH_RATIO_PORTRAIT = 0.60f
+        private const val PANEL_HEIGHT_RATIO_PORTRAIT = 0.74f
+        private const val PANEL_WIDTH_RATIO_LANDSCAPE = 0.46f
+        private const val PANEL_HEIGHT_RATIO_LANDSCAPE = 0.86f
+
+        private const val MINIMIZED_SIZE_DP = 58
+        private const val MINIMIZED_MARGIN_DP = 12
     }
 }

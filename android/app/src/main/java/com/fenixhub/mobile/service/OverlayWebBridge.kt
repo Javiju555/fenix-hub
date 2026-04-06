@@ -1,8 +1,10 @@
 package com.fenixhub.mobile.service
 
+import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import com.fenixhub.mobile.data.ContentRepository
@@ -33,6 +35,9 @@ class OverlayWebBridge(
     private val receivedContentHandler: ReceivedContentHandler,
     private val httpClient: FenixHttpClient,
     private val onOpenMainApp: () -> Unit,
+    private val onMinimizeOverlay: () -> Unit,
+    private val onExpandOverlay: () -> Unit,
+    private val onCloseOverlay: () -> Unit,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -97,16 +102,49 @@ class OverlayWebBridge(
                 onOpenMainApp()
                 "null"
             }
+            "minimize_overlay" -> {
+                Log.i(TAG, "Overlay command: minimize_overlay")
+                onMinimizeOverlay()
+                "true"
+            }
+            "expand_overlay" -> {
+                Log.i(TAG, "Overlay command: expand_overlay")
+                onExpandOverlay()
+                "true"
+            }
+            "close_overlay" -> {
+                Log.i(TAG, "Overlay command: close_overlay")
+                onCloseOverlay()
+                "true"
+            }
             else -> error("Comando no soportado: $command")
         }
     }
 
     private suspend fun pasteClipboardText(): JSONObject {
-        val text = clipboardText()?.trim().orEmpty()
+        val clip = clipboardPrimaryClip() ?: error("El portapapeles esta vacio")
+        val firstItem = clip.getItemAt(0)
+        val uri = firstItem.uri ?: firstItem.intent?.data
+
+        if (uri != null && !clip.description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) {
+            val item = withContext(Dispatchers.IO) {
+                localContentFactory.fromUri(uri)
+            } ?: error("No se pudo leer el contenido del portapapeles")
+            repository.addLocalContent(item)
+            Log.i(TAG, "Imported clipboard URI into overlay hub: $uri")
+            return localContentJson(item)
+        }
+
+        val text = firstItem.coerceToText(context)?.toString()?.trim().orEmpty()
         require(text.isNotBlank()) { "El portapapeles no contiene texto" }
+        require(text.length <= MAX_PASTE_TEXT_CHARS) {
+            "Texto demasiado grande para pegar desde overlay"
+        }
+
         val item = withContext(Dispatchers.Default) {
             localContentFactory.fromText(text).also(repository::addLocalContent)
         }
+        Log.i(TAG, "Pasted clipboard text into overlay hub (${text.length} chars)")
         return localContentJson(item)
     }
 
@@ -137,7 +175,9 @@ class OverlayWebBridge(
         val contentId = args?.optString("id").orEmpty()
         require(contentId.isNotBlank()) { "Contenido invalido" }
         val item = repository.getLocalContent(contentId) ?: error("Contenido local no encontrado")
-        return receivedContentHandler.copyToSystemClipboard(item)
+        val message = receivedContentHandler.copyToSystemClipboard(item)
+        Log.i(TAG, "Copied local content to system clipboard from overlay: $contentId")
+        return message
     }
 
     private suspend fun pullPeerContent(args: JSONObject?): JSONObject {
@@ -225,14 +265,9 @@ class OverlayWebBridge(
         return args?.optJSONObject("args") ?: args ?: JSONObject()
     }
 
-    private fun clipboardText(): String? {
+    private fun clipboardPrimaryClip(): ClipData? {
         val clipboard = context.getSystemService(ClipboardManager::class.java)
-        val clip = clipboard.primaryClip ?: return null
-        return if (clip.description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) {
-            clip.getItemAt(0).coerceToText(context)?.toString()
-        } else {
-            clip.getItemAt(0).coerceToText(context)?.toString()
-        }
+        return clipboard.primaryClip
     }
 
     private fun nullable(value: String?): Any = value ?: JSONObject.NULL
@@ -250,5 +285,10 @@ class OverlayWebBridge(
         currentWebView.post {
             currentWebView.evaluateJavascript(script, null)
         }
+    }
+
+    private companion object {
+        const val TAG = "FenixHubOverlayBridge"
+        const val MAX_PASTE_TEXT_CHARS = 8_192
     }
 }

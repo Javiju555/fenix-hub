@@ -17,7 +17,7 @@ class FenixHttpClient {
         return withContext(Dispatchers.IO) {
             runCatching {
                 val authHeader = CryptoUtils.hmacSha256Hex(
-                    settings.groupKeyBytes(),
+                    settings.macKeyBytes(),
                     peer.announcement.contentId.toByteArray(Charsets.UTF_8),
                 )
 
@@ -36,14 +36,26 @@ class FenixHttpClient {
                         error("HTTP ${response.code}")
                     }
                     val body = response.body ?: error("Empty response body")
+                    val encrypted = response.header(ENCRYPTED_HEADER) == "1"
+                    val rawBytes = body.bytes()
+                    val bytes = if (encrypted) {
+                        CryptoUtils.decryptAesGcm(settings.encKeyBytes(), rawBytes)
+                    } else {
+                        rawBytes
+                    }
+
                     PulledContent(
-                        bytes = body.bytes(),
+                        bytes = bytes,
                         mimeType = body.contentType()?.toString(),
                         fileName = fileNameFromDisposition(response.header("Content-Disposition")),
                     )
                 }
             }
         }
+    }
+
+    private companion object {
+        const val ENCRYPTED_HEADER = "X-FenixHub-Encrypted"
     }
 
     private fun urlHost(host: String): String = if (host.contains(':')) "[$host]" else host
