@@ -5,14 +5,14 @@ use serde::Serialize;
 /// so the frontend can react in real time.
 use std::net::IpAddr;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, RwLock};
 
+use crate::windowing;
 use fenix_hub_core::identity::GroupIdentity;
 use fenix_hub_core::protocol::Announcement;
 use fenix_hub_daemon::daemon::DaemonEvent;
 use fenix_hub_daemon::mdns::start_discovery;
-use crate::windowing;
 
 /// Tauri event payloads (must be Serialize for emit)
 
@@ -61,7 +61,7 @@ pub fn start(
                     announcement,
                     peer_ip,
                 } => {
-                    // Skip self — avahi sees our own published services too
+                    // Skip self — mDNS multicast reaches ourselves too
                     if local_ips.contains(&peer_ip) {
                         continue;
                     }
@@ -69,32 +69,46 @@ pub fn start(
                     peer_store
                         .write()
                         .await
-                        .insert(id, (announcement.clone(), peer_ip));
-                    let _ = app.emit(
-                        "peer-content-available",
-                        PeerContentPayload {
-                            announcement,
-                            peer_ip: peer_ip.to_string(),
-                        },
-                    );
+                        .insert(id.clone(), (announcement.clone(), peer_ip));
+                    let payload = PeerContentPayload {
+                        announcement,
+                        peer_ip: peer_ip.to_string(),
+                    };
+                    if let Some(win) = app.get_webview_window("hub") {
+                        if let Err(e) = win.emit("peer-content-available", &payload) {
+                            tracing::error!("failed to emit peer-content-available: {}", e);
+                        } else {
+                            tracing::info!("emitted peer-content-available for {}", id);
+                        }
+                    } else {
+                        tracing::warn!(
+                            "hub window not found, dropping peer-content-available for {}",
+                            id
+                        );
+                    }
                 }
                 DaemonEvent::PeerContentGone {
                     content_id,
                     device_name,
                 } => {
                     peer_store.write().await.remove(&content_id);
-                    let _ = app.emit(
-                        "peer-content-gone",
-                        PeerGonePayload {
-                            content_id,
-                            device_name,
-                        },
-                    );
+                    if let Some(win) = app.get_webview_window("hub") {
+                        let _ = win.emit(
+                            "peer-content-gone",
+                            PeerGonePayload {
+                                content_id,
+                                device_name,
+                            },
+                        );
+                    }
                 }
                 DaemonEvent::DirectNotifyReceived {
                     announcement,
                     peer_ip,
                 } => {
+                    if local_ips.contains(&peer_ip) {
+                        continue;
+                    }
                     let id = announcement.content_id.clone();
                     peer_store
                         .write()

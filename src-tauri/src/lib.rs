@@ -1,13 +1,21 @@
 mod commands;
 mod discovery;
+mod network;
 mod persist;
 mod state;
 mod temp_store;
 mod windowing;
 
-use std::sync::Arc;
-use tauri::Manager;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconEvent},
+    Manager,
+};
 use tracing_subscriber::EnvFilter;
+
+/// Set to true by the tray "Salir" action so ExitRequested doesn't block it.
+static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -18,6 +26,16 @@ pub fn run() {
         .init();
 
     let mdns = mdns_sd::ServiceDaemon::new().expect("Failed to start mDNS daemon");
+
+    // Restrict mDNS to the LAN interface only — prevents VMware/VPN adapters
+    // from intercepting or misdirecting multicast traffic.
+    if let Some(lan_ip) = network::local_ipv4() {
+        use mdns_sd::IfKind;
+        mdns.disable_interface(IfKind::IPv4).ok();
+        mdns.disable_interface(IfKind::IPv6).ok();
+        mdns.enable_interface(std::net::IpAddr::V4(lan_ip)).ok();
+        tracing::info!("mDNS restricted to LAN interface {}", lan_ip);
+    }
     let hub_state = state::HubState::new(mdns.clone());
 
     tauri::Builder::default()
@@ -35,24 +53,54 @@ pub fn run() {
             if let Some(window) = app_handle.get_webview_window("hub") {
                 windowing::attach_hub_window_handlers(&window, &app_handle);
             }
+            let _ = windowing::show_or_create_hub_window(&app_handle);
 
-            // Load persisted identity from disk (if exists)
-            if let Ok(Some((identity, device_type))) = persist::load() {
-                let identity = Arc::new(identity);
+            // Tray icon menu: left-click opens hub, right-click shows menu.
+            let open_item = MenuItem::with_id(app, "open", "Abrir FenixHub", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
 
-                // Start discovery immediately with loaded identity
-                discovery::start(
-                    app_handle.clone(),
-                    mdns.clone(),
-                    identity.clone(),
-                    state.peer_content.clone(),
-                );
+            if let Some(tray) = app.tray_by_id("main") {
+                tray.set_menu(Some(menu))?;
 
-                *tauri::async_runtime::block_on(state.device_type.write()) = device_type;
-                *tauri::async_runtime::block_on(state.identity.write()) = Some(identity);
-                tracing::info!("Identity loaded from disk, discovery started");
-            } else {
-                tracing::info!("No saved identity — waiting for first-run setup");
+                tray.on_menu_event(|app, event| match event.id().as_ref() {
+                    "open" => {
+                        let _ = windowing::show_or_create_hub_window(app);
+                    }
+                    "quit" => {
+                        QUIT_REQUESTED.store(true, Ordering::Release);
+                        app.exit(0);
+                    }
+                    _ => {}
+                });
+
+                tray.on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let _ = windowing::show_or_create_hub_window(tray.app_handle());
+                    }
+                });
+            }
+
+            // Identity is loaded synchronously in HubState::new() before any
+            // window is created, so get_identity() always sees a consistent state.
+            // Here we just need to start discovery if an identity was found.
+            if let Ok(guard) = state.identity.try_read() {
+                if let Some(ref identity) = *guard {
+                    discovery::start(
+                        app_handle.clone(),
+                        mdns.clone(),
+                        identity.clone(),
+                        state.peer_content.clone(),
+                    );
+                    tracing::info!("Identity loaded from disk, discovery started");
+                } else {
+                    tracing::info!("No saved identity — waiting for first-run setup");
+                }
             }
 
             Ok(())
@@ -70,12 +118,17 @@ pub fn run() {
             commands::get_peers,
             commands::write_local_to_clipboard,
             commands::prepare_local_drag,
+            commands::resize_hub,
+            commands::close_hub_window,
         ])
         .build(tauri::generate_context!())
         .expect("error while building FenixHub")
         .run(|_app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
+                // Only keep alive when NOT explicitly quitting via tray menu
+                if !QUIT_REQUESTED.load(Ordering::Acquire) {
+                    api.prevent_exit();
+                }
             }
         });
 }

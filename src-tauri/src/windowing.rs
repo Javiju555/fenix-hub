@@ -8,7 +8,6 @@ use tauri::{
 use fenix_hub_daemon::mdns::unannounce_content;
 
 use crate::state::HubState;
-use crate::temp_store;
 
 const HUB_WINDOW_LABEL: &str = "hub";
 const KEEPALIVE_WINDOW_LABEL: &str = "daemon-keepalive";
@@ -23,16 +22,16 @@ pub fn ensure_keepalive_window(app: &AppHandle) -> Result<()> {
         KEEPALIVE_WINDOW_LABEL,
         WebviewUrl::External("about:blank".parse()?),
     )
-        .title("")
-        .inner_size(1.0, 1.0)
-        .min_inner_size(1.0, 1.0)
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .visible(false)
-        .skip_taskbar(true)
-        .focusable(false)
-        .build()?;
+    .title("")
+    .inner_size(1.0, 1.0)
+    .min_inner_size(1.0, 1.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .visible(false)
+    .skip_taskbar(true)
+    .focusable(false)
+    .build()?;
 
     Ok(())
 }
@@ -71,17 +70,13 @@ pub fn attach_hub_window_handlers(window: &WebviewWindow, app: &AppHandle) {
 
 pub fn show_or_create_hub_window(app: &AppHandle) -> Result<()> {
     if let Some(window) = app.get_webview_window(HUB_WINDOW_LABEL) {
-        window.show()?;
-        window.unminimize()?;
-        window.set_focus()?;
+        reveal_hub_window(&window)?;
         let _ = window.emit("hub-activate", ());
         return Ok(());
     }
 
     let window = create_hub_window(app)?;
-    window.show()?;
-    window.unminimize()?;
-    window.set_focus()?;
+    reveal_hub_window(&window)?;
     Ok(())
 }
 
@@ -100,6 +95,39 @@ fn create_hub_window(app: &AppHandle) -> Result<WebviewWindow> {
     Ok(window)
 }
 
+fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
+    let _ = window.unminimize();
+    position_hub_window_top(window);
+    window.show()?;
+    window.set_focus()?;
+    Ok(())
+}
+
+/// Position the hub window at the top-center of the primary monitor.
+pub(crate) fn position_hub_window_top(window: &WebviewWindow) {
+    if let Ok(Some(monitor)) = window.primary_monitor() {
+        let screen_w = monitor.size().width as i32;
+        let scale = monitor.scale_factor();
+        // Prefer measured physical width, but hidden windows may still report 0 on some backends.
+        let win_w = window
+            .outer_size()
+            .ok()
+            .map(|s| s.width as i32)
+            .filter(|width| *width > 0)
+            .or_else(|| {
+                window
+                    .inner_size()
+                    .ok()
+                    .map(|s| s.width as i32)
+                    .filter(|width| *width > 0)
+            })
+            .unwrap_or((820.0 * scale) as i32);
+        let x = (screen_w - win_w) / 2;
+        let y = (8.0 * scale) as i32; // 8 logical px from top
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+}
+
 async fn close_hub_ui_state(state: &HubState) -> Result<()> {
     let announcements: Vec<(String, String)> =
         state.active_announcements.write().await.drain().collect();
@@ -112,9 +140,6 @@ async fn close_hub_ui_state(state: &HubState) -> Result<()> {
     }
     *state.server_port.write().await = None;
 
-    state.local_content.write().await.clear();
-    temp_store::clear_all()?;
-
-    tracing::info!("Hub UI closed: local clipboard cleared, server stopped");
+    tracing::info!("Hub UI closed: server stopped, announcements removed");
     Ok(())
 }
