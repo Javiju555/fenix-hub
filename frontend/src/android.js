@@ -1,7 +1,8 @@
 import './android.css';
 const IS_TAURI = '__TAURI_INTERNALS__' in window;
 const IS_NATIVE_ANDROID = 'FenixHubBridge' in window;
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 10000;
+const LOGO_SRC = './logo-mark.png';
 let nativeBridgeReady = false;
 let nativeRequestId = 0;
 let pollHandle = null;
@@ -51,6 +52,46 @@ let peerContent = [];
 let publishedIds = new Set();
 let onlineDevices = [];
 let activeTab = 'local';
+function localFingerprint(item) {
+    return [
+        item.id,
+        item.content_type,
+        item.preview,
+        item.size_bytes,
+        item.created_at,
+        item.file_name ?? '',
+        item.mime_type ?? '',
+        item.is_published ? '1' : '0',
+    ].join('|');
+}
+function peerFingerprint(item) {
+    return [
+        item.group_id,
+        item.content_id,
+        item.device_name,
+        item.preview,
+        item.content_type,
+        item.size_bytes,
+        item.created_at,
+        item.port,
+        item.file_name ?? '',
+        item.mime_type ?? '',
+        JSON.stringify(item.send_mode),
+    ].join('|');
+}
+function stateFingerprint(local, peers) {
+    const localPart = local.map(localFingerprint).join('||');
+    const peerPart = peers.map(peerFingerprint).join('||');
+    return `${localPart}###${peerPart}`;
+}
+function upsertPeerAnnouncement(announcement) {
+    const existing = peerContent.find(item => item.content_id === announcement.content_id);
+    if (existing && peerFingerprint(existing) === peerFingerprint(announcement)) {
+        return false;
+    }
+    peerContent = [announcement, ...peerContent.filter(item => item.content_id !== announcement.content_id)];
+    return true;
+}
 export async function initAndroid() {
     document.body.classList.add('android-mode');
     ensureNativeBridge();
@@ -254,18 +295,22 @@ function setupEventListeners() {
     listenersRegistered = true;
     listen('peer-content-available', ({ payload }) => {
         const announcement = payload.announcement;
-        peerContent = [announcement, ...peerContent.filter(item => item.content_id !== announcement.content_id)];
+        if (!upsertPeerAnnouncement(announcement))
+            return;
         syncDerivedState();
         updateUI();
     });
     listen('peer-content-gone', ({ payload }) => {
+        if (!peerContent.some(item => item.content_id === payload.content_id))
+            return;
         peerContent = peerContent.filter(item => item.content_id !== payload.content_id);
         syncDerivedState();
         updateUI();
     });
     listen('direct-notify-received', ({ payload }) => {
         const announcement = payload.announcement;
-        peerContent = [announcement, ...peerContent.filter(item => item.content_id !== announcement.content_id)];
+        if (!upsertPeerAnnouncement(announcement) && activeTab === 'red')
+            return;
         activeTab = 'red';
         syncDerivedState();
         updateUI();
@@ -288,8 +333,12 @@ function setupEventListeners() {
 }
 async function refreshState() {
     try {
+        const before = stateFingerprint(localContent, peerContent);
         await loadContent();
-        updateUI();
+        const after = stateFingerprint(localContent, peerContent);
+        if (before !== after) {
+            updateUI();
+        }
     }
     catch (error) {
         console.error(error);
@@ -302,12 +351,18 @@ function syncDerivedState() {
 function renderSetup() {
     document.getElementById('app').innerHTML = `
     <div class="android-setup">
-      <div class="logo-wrapper">${iconHub(48)}</div>
-      <h1>FenixHub</h1>
-      <p>Conecta tus dispositivos Fenix sin cuentas, sin nube y sin fricción.</p>
-      <input type="password" id="passphrase" placeholder="Frase de acceso de red" autocomplete="off" />
-      <input type="text" id="device-name" placeholder="Nombre de este móvil" value="${escapeAttribute(identity?.device_name || '')}" />
-      <button id="setup-btn">Activar Hub</button>
+      <div class="a-setup-brand">
+        <div class="logo-wrapper">${iconHub(56)}</div>
+        <span class="a-kicker">LOCAL TRANSFER</span>
+        <h1>FenixHub</h1>
+        <p>Comparte texto, imagenes y archivos del movil al resto de tus equipos sin cuenta y sin nube.</p>
+      </div>
+      <div class="a-setup-panel">
+        <input type="password" id="passphrase" placeholder="Frase de acceso de red" autocomplete="off" />
+        <input type="text" id="device-name" placeholder="Nombre de este movil" value="${escapeAttribute(identity?.device_name || '')}" />
+        <button id="setup-btn">Activar Hub</button>
+        <div class="a-setup-note">Usa la misma frase en todos tus dispositivos para entrar en la misma red efimera.</div>
+      </div>
     </div>`;
     document.getElementById('setup-btn').addEventListener('click', async () => {
         const passphrase = document.getElementById('passphrase').value.trim();
@@ -335,18 +390,43 @@ function renderSetup() {
     });
 }
 function renderApp() {
+    const deviceName = escapeHtml(identity?.device_name || 'Mi movil');
+    const groupLabel = escapeHtml(shortGroupLabel(identity?.group_id));
     document.getElementById('app').innerHTML = `
     <div class="android-layout">
-      <header class="a-header">
-        <div class="a-header-title">${iconHub(28)} FenixHub</div>
-        <div class="a-header-right">
+      <header class="a-hero">
+        <div class="a-brand-card">
+          <div class="a-brand-mark">${iconHub(52)}</div>
+          <div class="a-brand-copy">
+            <span class="a-kicker">LOCAL TRANSFER</span>
+            <div class="a-brand-row">
+              <h1>FenixHub</h1>
+              <div class="a-status-pill">
+                <div class="a-status-dot scanning" id="status-dot"></div>
+                <span id="status-text">Buscando</span>
+              </div>
+            </div>
+            <p>${deviceName} · ${groupLabel}</p>
+          </div>
+        </div>
+        <div class="a-hero-actions">
           <div class="a-header-actions">
-            <button class="a-chip-btn" id="btn-clipboard">${iconClipboard(16)} Portapapeles</button>
+            <button class="a-chip-btn accent" id="btn-clipboard">${iconClipboard(16)} Capturar</button>
             <button class="a-chip-btn" id="btn-overlay">${iconOverlay(16)} Overlay</button>
           </div>
-          <div class="a-status-pill">
-            <div class="a-status-dot scanning" id="status-dot"></div>
-            <span id="status-text">Buscando</span>
+        </div>
+        <div class="a-stat-strip">
+          <div class="a-stat-card">
+            <span>Local</span>
+            <strong id="stat-local">0</strong>
+          </div>
+          <div class="a-stat-card">
+            <span>Peers</span>
+            <strong id="stat-peers">0</strong>
+          </div>
+          <div class="a-stat-card">
+            <span>Live</span>
+            <strong id="stat-live">0</strong>
           </div>
         </div>
       </header>
@@ -400,10 +480,19 @@ function switchTab(tab) {
 function updateUI() {
     const localBadge = document.getElementById('badge-local');
     const peerBadge = document.getElementById('badge-red');
+    const localStat = document.getElementById('stat-local');
+    const peerStat = document.getElementById('stat-peers');
+    const liveStat = document.getElementById('stat-live');
     if (localBadge)
         localBadge.textContent = String(localContent.length);
     if (peerBadge)
         peerBadge.textContent = String(peerContent.length);
+    if (localStat)
+        localStat.textContent = String(localContent.length);
+    if (peerStat)
+        peerStat.textContent = String(onlineDevices.length);
+    if (liveStat)
+        liveStat.textContent = String(publishedIds.size);
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
     if (statusDot && statusText) {
@@ -427,24 +516,33 @@ function updateUI() {
     }
 }
 function renderLocalContent(area) {
+    const header = `
+    <section class="a-pane-head">
+      <div>
+        <span class="a-pane-kicker">Hub local</span>
+        <h2>Contenido listo para salir</h2>
+      </div>
+      <p>${publishedIds.size > 0 ? `${publishedIds.size} emisiones activas ahora mismo.` : 'Pega, importa o comparte desde cualquier app para llenar tu buffer local.'}</p>
+    </section>
+  `;
     if (localContent.length === 0) {
-        area.innerHTML = `<div class="a-empty">${iconInbox(48)}<p>Tu hub local está vacío.</p></div>`;
+        area.innerHTML = `${header}<div class="a-empty">${iconInbox(48)}<p>Tu hub local esta vacio.</p></div>`;
         return;
     }
-    area.innerHTML = localContent
+    area.innerHTML = `${header}<div class="a-card-stack">${localContent
         .map(item => {
         const isLive = publishedIds.has(item.id);
         const media = renderMediaPreview(item);
         const directAction = onlineDevices.length > 0
-            ? `<button class="a-btn a-btn-secondary" onclick="window.androidActions.chooseDirect('${item.id}')">Enviar...</button>`
+            ? `<button class="a-btn a-btn-secondary" onclick="window.androidActions.chooseDirect('${item.id}')">Mandar a...</button>`
             : '';
         const actions = isLive
             ? `
-            <button class="a-btn a-btn-danger" onclick="window.androidActions.stop('${item.id}')">Parar emisión</button>
+            <button class="a-btn a-btn-danger" onclick="window.androidActions.stop('${item.id}')">Parar live</button>
             <button class="a-btn a-btn-secondary" onclick="window.androidActions.copy('${item.id}')">Copiar</button>
           `
             : `
-            <button class="a-btn a-btn-primary" onclick="window.androidActions.broadcast('${item.id}')">Emitir</button>
+            <button class="a-btn a-btn-primary" onclick="window.androidActions.broadcast('${item.id}')">Lanzar</button>
             ${directAction}
             <button class="a-btn a-btn-secondary" onclick="window.androidActions.copy('${item.id}')">Copiar</button>
           `;
@@ -453,37 +551,50 @@ function renderLocalContent(area) {
           ${media}
           <button class="a-btn-delete-float" onclick="window.androidActions.remove('${item.id}')">${iconX(16)}</button>
           <div class="a-card-body">
-            <div class="a-card-header">
-              <div class="a-type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
-              <div class="a-card-text">
-                <div class="a-card-preview">${escapeHtml(item.file_name || item.preview)}</div>
-                <div class="a-card-meta">${humanSize(item.size_bytes)}${isLive ? ' · <span class="a-live-pill">LIVE</span>' : ''}</div>
-              </div>
+            <div class="a-card-eyebrow">
+              <span class="a-type-pill ${item.content_type}">${escapeHtml(contentTypeLabel(item.content_type))}</span>
+              ${isLive ? '<span class="a-live-pill">LIVE</span>' : '<span class="a-meta-pill">READY</span>'}
+            </div>
+            <div class="a-card-preview">${escapeHtml(item.file_name || item.preview)}</div>
+            <div class="a-card-meta">
+              <span>${humanSize(item.size_bytes)}</span>
+              <span>${formatRelativeTime(item.created_at)}</span>
             </div>
             <div class="a-card-actions">${actions}</div>
           </div>
         </div>`;
     })
-        .join('');
+        .join('')}</div>`;
 }
 function renderPeerContent(area) {
+    const header = `
+    <section class="a-pane-head">
+      <div>
+        <span class="a-pane-kicker">Red</span>
+        <h2>Transmisiones detectadas</h2>
+      </div>
+      <p>${onlineDevices.length > 0 ? `${onlineDevices.length} dispositivos anunciando contenido cerca de ti.` : 'En cuanto otro equipo publique algo, aparecera aqui.'}</p>
+    </section>
+  `;
     if (peerContent.length === 0) {
-        area.innerHTML = `<div class="a-empty">${iconWifi(48)}<p>Buscando dispositivos cercanos...</p></div>`;
+        area.innerHTML = `${header}<div class="a-empty">${iconWifi(48)}<p>Buscando dispositivos cercanos...</p></div>`;
         return;
     }
-    area.innerHTML = peerContent
+    area.innerHTML = `${header}<div class="a-card-stack">${peerContent
         .map(item => {
         const media = renderPeerMediaPreview(item);
         return `
         <div class="a-card peer" data-id="${item.content_id}">
           ${media}
           <div class="a-card-body">
-            <div class="a-card-header">
-              <div class="a-type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
-              <div class="a-card-text">
-                <div class="a-card-preview">${escapeHtml(item.file_name || item.preview)}</div>
-                <div class="a-card-meta"><span class="a-peer-pill">${escapeHtml(item.device_name)}</span> · ${humanSize(item.size_bytes)}</div>
-              </div>
+            <div class="a-card-eyebrow">
+              <span class="a-type-pill ${item.content_type}">${escapeHtml(contentTypeLabel(item.content_type))}</span>
+              <span class="a-peer-pill">${escapeHtml(item.device_name)}</span>
+            </div>
+            <div class="a-card-preview">${escapeHtml(item.file_name || item.preview)}</div>
+            <div class="a-card-meta">
+              <span>${humanSize(item.size_bytes)}</span>
+              <span>${formatRelativeTime(item.created_at)}</span>
             </div>
             <div class="a-card-actions">
               <button class="a-btn a-btn-success" id="btn-pull-${item.content_id}" onclick="window.androidActions.receive('${item.content_id}')">Guardar en local</button>
@@ -491,19 +602,28 @@ function renderPeerContent(area) {
           </div>
         </div>`;
     })
-        .join('');
+        .join('')}</div>`;
 }
 function renderMediaPreview(item) {
     if (item.content_type === 'image' && item.preview.startsWith('data:image')) {
-        return `<img class="a-card-img" src="${item.preview}" alt="" />`;
+        return `<div class="a-media a-media-image"><img class="a-card-img" src="${item.preview}" alt="" /></div>`;
     }
-    return '';
+    return renderMediaShell(item.content_type, item.file_name || item.preview);
 }
 function renderPeerMediaPreview(item) {
     if (item.content_type === 'image' && item.preview.startsWith('data:image')) {
-        return `<img class="a-card-img" src="${item.preview}" alt="" />`;
+        return `<div class="a-media a-media-image"><img class="a-card-img" src="${item.preview}" alt="" /></div>`;
     }
-    return '';
+    return renderMediaShell(item.content_type, item.file_name || item.preview);
+}
+function renderMediaShell(type, label) {
+    return `
+    <div class="a-media a-media-${type}">
+      <div class="a-media-icon">${typeIcon(type)}</div>
+      <div class="a-media-copy">${escapeHtml(contentTypeLabel(type))}</div>
+      <div class="a-media-subcopy">${escapeHtml(compactLabel(label))}</div>
+    </div>
+  `;
 }
 function openAddSheet() {
     if (document.getElementById('a-sheet-backdrop'))
@@ -832,9 +952,41 @@ function humanSize(bytes) {
         return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / 1048576).toFixed(1)} MB`;
 }
+function formatRelativeTime(timestamp) {
+    const normalized = timestamp < 1000000000000 ? timestamp * 1000 : timestamp;
+    const diffMs = Math.max(0, Date.now() - normalized);
+    const diffMinutes = Math.floor(diffMs / 60000);
+    if (diffMinutes < 1)
+        return 'ahora';
+    if (diffMinutes < 60)
+        return `hace ${diffMinutes} min`;
+    const diffHours = Math.floor(diffMinutes / 60);
+    if (diffHours < 24)
+        return `hace ${diffHours} h`;
+    const diffDays = Math.floor(diffHours / 24);
+    return `hace ${diffDays} d`;
+}
+function contentTypeLabel(type) {
+    if (type === 'text')
+        return 'Texto';
+    if (type === 'image')
+        return 'Imagen';
+    return 'Archivo';
+}
+function compactLabel(value) {
+    const sanitized = value.trim();
+    if (sanitized.length <= 34)
+        return sanitized;
+    return `${sanitized.slice(0, 31)}...`;
+}
+function shortGroupLabel(groupId) {
+    if (!groupId)
+        return 'red privada';
+    return `grupo ${groupId.slice(0, 8)}`;
+}
 const svg = (size, viewBox, path, extra = 'stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"') => `<svg width="${size}" height="${size}" viewBox="${viewBox}" fill="none" ${extra}>${path}</svg>`;
 function iconHub(size) {
-    return svg(size, '0 0 20 20', '<polygon points="10,2 18,6.5 18,13.5 10,18 2,13.5 2,6.5" stroke-width="1.6"/><circle cx="10" cy="10" r="2.5" stroke-width="1.6"/>');
+    return `<img src="${LOGO_SRC}" alt="FenixHub" width="${size}" height="${size}" style="display:block;object-fit:contain;" />`;
 }
 function iconInbox(size) {
     return svg(size, '0 0 16 16', '<rect x="1.5" y="1.5" width="13" height="13" rx="2" stroke-width="1.7"/><polyline points="1.5,10 4.5,10 5.5,12.5 10.5,12.5 11.5,10 14.5,10" stroke-width="1.7"/>');

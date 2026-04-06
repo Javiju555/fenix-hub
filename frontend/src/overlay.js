@@ -1,7 +1,8 @@
 import './overlay.css';
 const IS_TAURI = '__TAURI_INTERNALS__' in window;
 const IS_NATIVE_ANDROID = 'FenixHubBridge' in window;
-const POLL_INTERVAL_MS = 1500;
+const POLL_INTERVAL_MS = 8000;
+const LOGO_SRC = './logo-mark.png';
 let nativeBridgeReady = false;
 let nativeRequestId = 0;
 let pollHandle = null;
@@ -13,6 +14,47 @@ let onlineDevices = [];
 let activeTab = 'local';
 let selectedLocalId = null;
 let selectedPeerId = null;
+let overlayMinimized = false;
+function localFingerprint(item) {
+    return [
+        item.id,
+        item.content_type,
+        item.preview,
+        item.size_bytes,
+        item.created_at,
+        item.file_name ?? '',
+        item.mime_type ?? '',
+        item.is_published ? '1' : '0',
+    ].join('|');
+}
+function peerFingerprint(item) {
+    return [
+        item.group_id,
+        item.content_id,
+        item.device_name,
+        item.preview,
+        item.content_type,
+        item.size_bytes,
+        item.created_at,
+        item.port,
+        item.file_name ?? '',
+        item.mime_type ?? '',
+        JSON.stringify(item.send_mode),
+    ].join('|');
+}
+function stateFingerprint(local, peers) {
+    const localPart = local.map(localFingerprint).join('||');
+    const peerPart = peers.map(peerFingerprint).join('||');
+    return `${localPart}###${peerPart}`;
+}
+function upsertPeerAnnouncement(announcement) {
+    const existing = peerContent.find(item => item.content_id === announcement.content_id);
+    if (existing && peerFingerprint(existing) === peerFingerprint(announcement)) {
+        return false;
+    }
+    peerContent = [announcement, ...peerContent.filter(item => item.content_id !== announcement.content_id)];
+    return true;
+}
 let mockLocal = [
     {
         id: 'local-1',
@@ -54,6 +96,10 @@ export async function initOverlay() {
     ensureNativeBridge();
     window.__fenixOverlayRefresh = async () => {
         await refreshState();
+    };
+    window.__fenixOverlaySetMinimized = (minimized) => {
+        overlayMinimized = minimized;
+        render();
     };
     await loadState();
     render();
@@ -171,6 +217,14 @@ async function invokeMock(cmd, args) {
             return undefined;
         case 'open_full_app':
             return undefined;
+        case 'minimize_overlay':
+            overlayMinimized = true;
+            return true;
+        case 'expand_overlay':
+            overlayMinimized = false;
+            return true;
+        case 'close_overlay':
+            return true;
         default:
             return undefined;
     }
@@ -188,11 +242,14 @@ function setupListeners() {
     listenersBound = true;
     listen('peer-content-available', ({ payload }) => {
         const announcement = payload.announcement;
-        peerContent = [announcement, ...peerContent.filter(item => item.content_id !== announcement.content_id)];
+        if (!upsertPeerAnnouncement(announcement))
+            return;
         syncOnlineDevices();
         update();
     });
     listen('peer-content-gone', ({ payload }) => {
+        if (!peerContent.some(item => item.content_id === payload.content_id))
+            return;
         peerContent = peerContent.filter(item => item.content_id !== payload.content_id);
         if (selectedPeerId === payload.content_id) {
             selectedPeerId = null;
@@ -223,8 +280,12 @@ async function loadState() {
 }
 async function refreshState() {
     try {
+        const before = stateFingerprint(localContent, peerContent);
         await loadState();
-        update();
+        const after = stateFingerprint(localContent, peerContent);
+        if (before !== after) {
+            update();
+        }
     }
     catch (error) {
         console.error(error);
@@ -234,15 +295,44 @@ function syncOnlineDevices() {
     onlineDevices = [...new Set(peerContent.map(item => item.device_name))];
 }
 function render() {
+    if (overlayMinimized) {
+        document.getElementById('app').innerHTML = `
+      <div class="overlay-mini-shell">
+        <button class="overlay-mini-main" id="overlay-mini-main" title="Restaurar FenixHub">
+          <img class="overlay-mini-logo" src="${LOGO_SRC}" alt="FenixHub" />
+        </button>
+        <button class="overlay-mini-close" id="overlay-mini-close" title="Cerrar overlay">${iconX(11)}</button>
+      </div>
+    `;
+        document.getElementById('overlay-mini-main').addEventListener('click', async () => {
+            await invoke('expand_overlay');
+            overlayMinimized = false;
+            render();
+        });
+        document.getElementById('overlay-mini-close').addEventListener('click', async () => {
+            await invoke('close_overlay');
+        });
+        return;
+    }
     document.getElementById('app').innerHTML = `
     <div class="overlay-shell">
       <header class="overlay-header">
-        <div class="overlay-tabs">
+        <div class="overlay-brand">
+          <img class="overlay-logo" src="${LOGO_SRC}" alt="FenixHub" />
+          <span>FenixHub</span>
+        </div>
+        <div class="overlay-window-actions">
+          <button class="overlay-control" id="overlay-minimize" title="Minimizar">${iconMinus(14)}</button>
+          <button class="overlay-control danger" id="overlay-close" title="Cerrar">${iconX(14)}</button>
+        </div>
+      </header>
+      <div class="overlay-tabs-row">
+        <div class="overlay-tab-group">
           <button class="overlay-tab ${activeTab === 'local' ? 'active' : ''}" data-tab="local">Local</button>
           <button class="overlay-tab ${activeTab === 'red' ? 'active' : ''}" data-tab="red">Red</button>
         </div>
         <button class="overlay-expand" id="overlay-expand">${iconExpand(16)} Abrir</button>
-      </header>
+      </div>
       <section class="overlay-stack" id="overlay-stack"></section>
       <footer class="overlay-actions" id="overlay-actions"></footer>
     </div>
@@ -259,9 +349,19 @@ function render() {
     document.getElementById('overlay-expand').addEventListener('click', async () => {
         await invoke('open_full_app');
     });
+    document.getElementById('overlay-minimize').addEventListener('click', async () => {
+        await invoke('minimize_overlay');
+        overlayMinimized = true;
+        render();
+    });
+    document.getElementById('overlay-close').addEventListener('click', async () => {
+        await invoke('close_overlay');
+    });
     update();
 }
 function update() {
+    if (overlayMinimized)
+        return;
     document.querySelectorAll('.overlay-tab').forEach(tab => {
         tab.classList.toggle('active', tab.dataset.tab === activeTab);
     });
@@ -341,6 +441,9 @@ function renderActions() {
         <button class="overlay-action danger" id="act-delete">${iconTrash(18)} Borrar</button>
         <button class="overlay-action" id="act-paste">${iconClipboard(18)} Pegar</button>
       </div>
+      <div class="overlay-close-row">
+        <button class="overlay-action subtle" id="act-close-overlay">${iconX(18)} Cerrar overlay</button>
+      </div>
     `;
         document.getElementById('act-send').addEventListener('click', () => {
             void sendLocalTargets();
@@ -365,6 +468,9 @@ function renderActions() {
         <button class="overlay-action" id="act-copy">${iconCopy(18)} Copiar</button>
         <button class="overlay-action" id="act-open">${iconExpand(18)} Abrir</button>
       </div>
+      <div class="overlay-close-row">
+        <button class="overlay-action subtle" id="act-close-overlay">${iconX(18)} Cerrar overlay</button>
+      </div>
     `;
         document.getElementById('act-download').addEventListener('click', () => {
             void downloadPeerTargets();
@@ -379,6 +485,9 @@ function renderActions() {
             await invoke('open_full_app');
         });
     }
+    document.getElementById('act-close-overlay')?.addEventListener('click', async () => {
+        await invoke('close_overlay');
+    });
 }
 function getLocalTargets() {
     if (selectedLocalId) {
@@ -653,5 +762,11 @@ function iconCopy(size = 18) {
 }
 function iconExpand(size = 18) {
     return icon('<path d="M7 5H5v2"/><path d="M13 5h2v2"/><path d="M5 13v2h2"/><path d="M15 13v2h-2"/><path d="M5 5l4 4"/><path d="M15 5l-4 4"/><path d="M5 15l4-4"/><path d="M15 15l-4-4"/>', size);
+}
+function iconMinus(size = 18) {
+    return icon('<path d="M4 10h12"/>', size);
+}
+function iconX(size = 18) {
+    return icon('<path d="M5 5l10 10"/><path d="M15 5L5 15"/>', size);
 }
 initOverlay();
