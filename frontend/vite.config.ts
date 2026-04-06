@@ -2,9 +2,12 @@ import { defineConfig } from 'vite';
 import { resolve } from 'node:path';
 
 export default defineConfig({
+  // Required for Android WebViewAssetLoader: keeps asset URLs relative
+  // when loading from https://appassets.androidplatform.net/assets/*.html
+  base: './',
   clearScreen: false,
   server: {
-    port: 1435,
+    port: 1421,
     strictPort: true,
     watch: {
       ignored: ['**/src-tauri/**'],

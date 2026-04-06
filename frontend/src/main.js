@@ -14,23 +14,17 @@ function listen(event, cb) {
         return tauriListen(event, cb);
     return Promise.resolve(() => { });
 }
-async function getAppWindow() {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window');
-    return getCurrentWindow();
-}
 async function setWindowSize(w, h) {
     if (!IS_TAURI)
         return;
-    const { LogicalSize } = await import('@tauri-apps/api/dpi');
-    const win = await getAppWindow();
-    // Set min size first so GTK doesn't clamp our target size
-    await win.setMinSize(new LogicalSize(W_PILL, H_PILL));
-    await win.setSize(new LogicalSize(w, h));
+    // Use Rust command — bypasses `resizable: false` JS restriction on Windows
+    await invoke('resize_hub', { width: w, height: h });
 }
 async function closeApp() {
     if (!IS_TAURI)
         return;
-    (await getAppWindow()).close();
+    // Use Rust command for reliable cleanup + destroy
+    await invoke('close_hub_window');
 }
 // ── Mock backend ──────────────────────────────────────────────────────────────
 const MOCK_LOCAL = [
@@ -49,7 +43,7 @@ let mockId = 100;
 async function mockInvoke(cmd, args) {
     const a = args;
     switch (cmd) {
-        case 'get_identity': return { device_name: 'Arch Desktop', group_id: 'demo', configured: true };
+        case 'get_identity': return { device_name: 'Arch Desktop', group_id: 'demo', configured: true, device_type: 'desktop' };
         case 'get_local_content': return [...mockLocal];
         case 'get_peers': return [...mockPeers];
         case 'add_text_content': {
@@ -91,7 +85,7 @@ async function mockInvoke(cmd, args) {
             return { id, content_type: 'text', preview: '', size_bytes: 0, created_at: 0 };
         }
         case 'setup_identity':
-            return { device_name: a?.args?.device_name ?? 'Device', group_id: 'demo', configured: true };
+            return { device_name: a?.args?.device_name ?? 'Device', group_id: 'demo', configured: true, device_type: a?.args?.device_type ?? 'desktop' };
         default: return undefined;
     }
 }
@@ -103,8 +97,17 @@ let publishedIds = new Set();
 let onlineDevices = [];
 let activeTab = 'local';
 let collapsed = false;
+let selectedDeviceType = 'desktop';
+const dragPayloadCache = new Map();
+const DEVICE_TYPES = [
+    { id: 'desktop', label: 'Desktop', icon: () => svg(18, '0 0 20 18', '<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>') },
+    { id: 'laptop', label: 'Laptop', icon: () => svg(18, '0 0 20 18', '<rect x="2" y="2" width="16" height="11" rx="1.5" stroke-width="1.5"/><path d="M0,16 Q10,14 20,16" stroke-width="1.5" fill="none"/>') },
+    { id: 'phone', label: 'Android', icon: () => svg(18, '0 0 14 20', '<rect x="1" y="1" width="12" height="18" rx="3" stroke-width="1.5"/><line x1="5.5" y1="16.5" x2="8.5" y2="16.5" stroke-width="1.5"/>') },
+    { id: 'tablet', label: 'Tablet', icon: () => svg(18, '0 0 16 20', '<rect x="1" y="1" width="14" height="18" rx="2.5" stroke-width="1.5"/><line x1="6" y1="16.5" x2="10" y2="16.5" stroke-width="1.5"/>') },
+    { id: 'server', label: 'Servidor', icon: () => svg(18, '0 0 20 18', '<rect x="1" y="1" width="18" height="7" rx="1.5" stroke-width="1.5"/><rect x="1" y="10" width="18" height="7" rx="1.5" stroke-width="1.5"/><circle cx="4.5" cy="4.5" r="1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="13.5" r="1" fill="currentColor" stroke="none"/>') },
+];
 const W = 820, H = 185;
-const W_PILL = 280, H_PILL = 34;
+const W_PILL = 280, H_PILL = 48;
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
     identity = await invoke('get_identity');
@@ -160,16 +163,29 @@ function renderSetup() {
     document.getElementById('app').innerHTML = `
     <div class="hub-setup">
       <div class="setup-row">
-        <div class="setup-logo">${iconHub(20)}</div>
+        <div class="setup-logo">${iconHub(24)}</div>
         <h1>FenixHub</h1>
         <p>Portapapeles efímero · sin cuenta · sin nube</p>
       </div>
+      <div class="device-type-row">
+        ${DEVICE_TYPES.map(dt => `
+          <button class="device-type-btn${dt.id === selectedDeviceType ? ' active' : ''}" data-dtype="${dt.id}" title="${dt.label}">
+            ${dt.icon()}<span>${dt.label}</span>
+          </button>`).join('')}
+      </div>
       <div class="setup-fields">
-        <input type="password" id="passphrase" placeholder="Frase de acceso (igual en todos los dispositivos)" autocomplete="off" />
-        <input type="text"     id="device-name" placeholder="Nombre del dispositivo" style="max-width:190px" />
+        <input type="text"     id="device-name" placeholder="Nombre de este dispositivo" style="max-width:190px" autocomplete="off" />
+        <input type="password" id="passphrase"   placeholder="Nombre del grupo (igual en todos)" autocomplete="off" />
         <button id="setup-btn">${iconCheckmark(11)} Activar</button>
       </div>
     </div>`;
+    // Device type picker
+    document.querySelectorAll('.device-type-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            selectedDeviceType = btn.dataset.dtype;
+            document.querySelectorAll('.device-type-btn').forEach(b => b.classList.toggle('active', b.dataset.dtype === selectedDeviceType));
+        });
+    });
     const submit = async () => {
         const passphrase = document.getElementById('passphrase').value.trim();
         const deviceName = document.getElementById('device-name').value.trim();
@@ -178,7 +194,9 @@ function renderSetup() {
         const btn = document.getElementById('setup-btn');
         btn.disabled = true;
         btn.textContent = 'Activando…';
-        identity = await invoke('setup_identity', { args: { passphrase, device_name: deviceName } });
+        identity = await invoke('setup_identity', {
+            args: { passphrase, device_name: deviceName, device_type: selectedDeviceType },
+        });
         await loadContent();
         renderHub();
         setupEventListeners();
@@ -196,8 +214,11 @@ function renderHub() {
     document.getElementById('app').innerHTML = `
     <div class="hub" id="hub-root">
       <header class="hub-header" id="hub-header">
-        <div class="hub-logo">${iconHub(15)}</div>
+        <div class="hub-logo">${iconHub(18)}</div>
         <span class="hub-title">FenixHub</span>
+        <span class="hub-device-label" title="Dispositivo: ${escapeHtml(identity?.device_name ?? '')}">
+          ${deviceTypeIcon(identity?.device_type ?? 'desktop', 13)}
+        </span>
 
         <div class="hub-tabs" id="hub-tabs">
           <button class="tab active" data-tab="local">${iconInbox(10)} Local <span class="badge" id="count-local">0</span></button>
@@ -207,12 +228,24 @@ function renderHub() {
         <div class="hub-status">
           <div class="status-dot scanning" id="status-dot"></div>
           <span id="status-text">Buscando…</span>
+          <span class="enc-badge" title="Cifrado AES-256-GCM extremo a extremo activo">${iconLock(9)}</span>
+        </div>
+
+        <div class="hub-collapsed-bar" id="hub-collapsed-bar" title="Mostrar FenixHub">
+          <span class="hub-pull-grip" aria-hidden="true"></span>
+          <span class="hub-collapsed-copy">
+            <span class="hub-collapsed-label">${iconChevronDown(10)} Abrir</span>
+            <span class="hub-collapsed-counts">
+              <span class="hub-collapsed-pill">${iconInbox(9)} <span id="count-local-mini">0</span></span>
+              <span class="hub-collapsed-pill">${iconWifi(9)} <span id="count-red-mini">0</span></span>
+            </span>
+          </span>
         </div>
 
         <div class="hub-actions">
           <button class="btn-icon" id="btn-share-all" title="Compartir todo con todos">${iconBroadcast(13)}</button>
           <button class="btn-icon" id="btn-collapse"  title="Minimizar a notch">${iconMinus(13)}</button>
-          <button class="btn-icon danger" id="btn-close" title="Cerrar">${iconX(12)}</button>
+          <button class="btn-icon danger" id="btn-close" title="Ocultar al tray">${iconX(12)}</button>
         </div>
       </header>
 
@@ -248,7 +281,7 @@ function renderHub() {
     });
     // Drag-to-hub
     const hub = document.getElementById('hub-root');
-    hub.addEventListener('dragover', (e) => { e.preventDefault(); hub.classList.add('drag-over'); });
+    hub.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; hub.classList.add('drag-over'); });
     hub.addEventListener('dragleave', (e) => {
         if (!e.relatedTarget?.closest('#hub-root'))
             hub.classList.remove('drag-over');
@@ -318,31 +351,25 @@ function renderHub() {
 async function collapse() {
     collapsed = true;
     const hub = document.getElementById('hub-root');
-    const header = document.getElementById('hub-header');
-    document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
-    header.style.borderBottom = 'none';
-    // Shrink the hub div and body so the glass pill is visible
-    hub.style.height = H_PILL + 'px';
-    hub.style.borderRadius = '19px';
+    hub.classList.add('collapsed');
+    document.body.classList.add('is-collapsed');
+    document.body.style.width = W_PILL + 'px';
     document.body.style.height = H_PILL + 'px';
     document.getElementById('btn-collapse').innerHTML = iconChevronDown(13);
+    document.getElementById('btn-collapse').title = 'Mostrar FenixHub';
     await setWindowSize(W_PILL, H_PILL);
 }
 async function expand() {
     collapsed = false;
     const hub = document.getElementById('hub-root');
-    const header = document.getElementById('hub-header');
-    // Restore size before showing content
-    hub.style.height = H + 'px';
-    hub.style.borderRadius = '';
+    hub.classList.remove('collapsed');
+    document.body.classList.remove('is-collapsed');
+    document.body.style.width = W + 'px';
     document.body.style.height = H + 'px';
     await setWindowSize(W, H);
-    setTimeout(() => {
-        header.style.borderBottom = '';
-        document.querySelectorAll('.tab-panel').forEach(p => p.style.display = '');
-        switchTab(activeTab);
-    }, 60);
+    switchTab(activeTab);
     document.getElementById('btn-collapse').innerHTML = iconMinus(13);
+    document.getElementById('btn-collapse').title = 'Minimizar a notch';
 }
 function switchTab(tab) {
     activeTab = tab;
@@ -352,10 +379,16 @@ function switchTab(tab) {
 function updateHeader() {
     const lc = document.getElementById('count-local');
     const rc = document.getElementById('count-red');
+    const lcMini = document.getElementById('count-local-mini');
+    const rcMini = document.getElementById('count-red-mini');
     if (lc)
         lc.textContent = String(localContent.length);
     if (rc)
         rc.textContent = String(peerContent.length);
+    if (lcMini)
+        lcMini.textContent = String(localContent.length);
+    if (rcMini)
+        rcMini.textContent = String(peerContent.length);
     const dot = document.getElementById('status-dot');
     const txt = document.getElementById('status-text');
     if (!dot || !txt)
@@ -373,6 +406,12 @@ function updateHeader() {
 function renderLocalContent() {
     const container = document.getElementById('panel-local');
     updateHeader();
+    const validIds = new Set(localContent.map(item => item.id));
+    for (const id of dragPayloadCache.keys()) {
+        if (!validIds.has(id)) {
+            dragPayloadCache.delete(id);
+        }
+    }
     if (localContent.length === 0) {
         container.innerHTML = `
       <div class="empty-state">
@@ -389,7 +428,7 @@ function renderLocalContent() {
                 `<button class="btn-broadcast" data-id="${item.id}" data-action="broadcast">${iconBroadcast(9)} Todos</button>`,
                 ...onlineDevices.map(d => `<button class="btn-direct" data-id="${item.id}" data-action="direct" data-device="${escapeHtml(d)}">${iconDevice(9)} ${escapeHtml(d)}</button>`)
             ].join('');
-        const isImg = item.preview.startsWith('data:image');
+        const isImg = item.content_type === 'image' && item.preview.startsWith('data:image');
         const topContent = isImg
             ? `<img class="card-thumb" src="${item.preview}" />`
             : `<div class="card-top">
@@ -398,12 +437,21 @@ function renderLocalContent() {
              <div class="card-preview">${escapeHtml(item.file_name || item.preview)}</div>
            </div>
          </div>`;
+        const liveTag = pub ? ' · <span style="color:var(--accent)">live</span>' : '';
+        // For image cards: merge size + actions into one compact row (no separate meta row)
+        const metaRow = isImg ? '' : `<div class="card-meta">${humanSize(item.size_bytes)}${liveTag}</div>`;
+        const actionsRow = isImg
+            ? `<div class="card-actions card-actions-img">
+           <span class="card-size-inline">${humanSize(item.size_bytes)}${liveTag}</span>
+           ${actionBtns}
+         </div>`
+            : `<div class="card-actions">${actionBtns}</div>`;
         return `
-    <div class="content-card${pub ? ' broadcasting' : ''}" data-id="${item.id}" draggable="true">
+    <div class="content-card${pub ? ' broadcasting' : ''}${isImg ? ' image-card' : ''}" data-id="${item.id}" draggable="true">
       ${topContent}
-      <div class="card-meta">${humanSize(item.size_bytes)}${pub ? ' · <span style="color:var(--accent)">live</span>' : ''}</div>
-      <div class="card-actions">${actionBtns}</div>
-      <button class="btn-delete" data-id="${item.id}">${iconX(8)}</button>
+      ${metaRow}
+      ${actionsRow}
+      <button class="btn-delete" data-id="${item.id}" title="Quitar del hub">${iconX(8)}</button>
     </div>`;
     }).join('')}</div>`;
     container.querySelectorAll('[data-action]').forEach(btn => {
@@ -455,7 +503,17 @@ function renderLocalContent() {
         });
     });
     container.querySelectorAll('.content-card').forEach(card => {
-        card.addEventListener('dragstart', async (event) => {
+        const id = card.dataset.id;
+        if (id) {
+            card.addEventListener('pointerdown', () => {
+                void warmupDragPayload(id);
+            }, { passive: true });
+            card.addEventListener('mouseenter', () => {
+                void warmupDragPayload(id);
+            });
+        }
+        // dragstart MUST be synchronous — any await empties dataTransfer before the OS reads it
+        card.addEventListener('dragstart', (event) => {
             const id = card.dataset.id;
             const item = localContent.find(entry => entry.id === id);
             if (!id || !item)
@@ -464,16 +522,25 @@ function renderLocalContent() {
             if (!dataTransfer)
                 return;
             dataTransfer.effectAllowed = 'copy';
-            if (IS_TAURI) {
-                const payload = await invoke('prepare_local_drag', { id }).catch(() => null);
-                if (payload?.text)
-                    dataTransfer.setData('text/plain', payload.text);
-                if (payload?.uri_list)
-                    dataTransfer.setData('text/uri-list', payload.uri_list);
+            const cached = dragPayloadCache.get(id);
+            if (item.content_type === 'text') {
+                // data_text has the full text; preview is truncated at 80 chars
+                dataTransfer.setData('text/plain', cached?.text || item.data_text || item.preview);
             }
             else {
-                const fallbackText = item.transfer_path || item.file_name || item.preview;
-                dataTransfer.setData('text/plain', fallbackText);
+                const uriList = cached?.uri_list || (item.transfer_path ? fileUriFromPath(item.transfer_path) : null);
+                if (uriList) {
+                    const fallbackText = cached?.text || item.transfer_path || item.file_name || item.preview;
+                    const mime = item.mime_type || 'application/octet-stream';
+                    const name = item.file_name || 'fenixhub-item';
+                    dataTransfer.setData('text/plain', fallbackText);
+                    dataTransfer.setData('text/uri-list', uriList);
+                    // Helps native Windows targets that expect explicit URL download payload.
+                    dataTransfer.setData('DownloadURL', `${mime}:${name}:${uriList}`);
+                    return;
+                }
+                // Normalize Windows backslashes for file URI
+                dataTransfer.setData('text/plain', item.file_name || item.preview);
             }
         });
     });
@@ -514,19 +581,27 @@ function renderPeerContent() {
             const id = btn.dataset.id;
             btn.disabled = true;
             btn.textContent = 'Recibiendo…';
-            const received = await invoke('pull_peer_content', { content_id: id });
-            localContent = [received, ...localContent];
-            peerContent = peerContent.filter(i => i.content_id !== id);
-            updateHeader();
-            renderPeerContent();
-            renderLocalContent();
+            try {
+                const received = await invoke('pull_peer_content', { content_id: id });
+                localContent = [received, ...localContent];
+                // Don't remove from peerContent — peer still has it published
+                updateHeader();
+                renderPeerContent();
+                renderLocalContent();
+            }
+            catch (e) {
+                console.error('pull_peer_content failed:', e);
+                btn.disabled = false;
+                btn.textContent = `Error: ${e}`;
+            }
         });
     });
 }
 // ── Icons ─────────────────────────────────────────────────────────────────────
 const svg = (s, vb, path, extra = 'stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"') => `<svg width="${s}" height="${s}" viewBox="${vb}" fill="none" ${extra}>${path}</svg>`;
+const LOGO_SRC = './logo-mark.png';
 function iconHub(s) {
-    return svg(s, '0 0 20 20', '<polygon points="10,2 18,6.5 18,13.5 10,18 2,13.5 2,6.5" stroke-width="1.6"/><circle cx="10" cy="10" r="2.5" stroke-width="1.6"/>');
+    return `<img src="${LOGO_SRC}" alt="FenixHub" width="${s}" height="${s}" style="display:block;object-fit:contain;" />`;
 }
 function iconCheckmark(s) {
     return svg(s, '0 0 16 16', '<polyline points="2.5,8 6.5,12 13.5,4" stroke-width="2.2"/>');
@@ -555,6 +630,21 @@ function iconMinus(s) {
 function iconChevronDown(s) {
     return svg(s, '0 0 14 14', '<polyline points="2,4.5 7,9.5 12,4.5" stroke-width="2"/>');
 }
+function iconLock(s) {
+    return svg(s, '0 0 14 14', '<rect x="2" y="6" width="10" height="7" rx="1.5" stroke-width="1.6"/><path d="M4,6 V4 a4,4 0 0 1 6,0 V6" stroke-width="1.6" fill="none"/>');
+}
+function deviceTypeIcon(type, s) {
+    const dt = DEVICE_TYPES.find(d => d.id === type) ?? DEVICE_TYPES[0];
+    // Re-render with custom size
+    switch (type) {
+        case 'laptop': return svg(s, '0 0 20 18', '<rect x="2" y="2" width="16" height="11" rx="1.5" stroke-width="1.5"/><path d="M0,16 Q10,14 20,16" stroke-width="1.5" fill="none"/>');
+        case 'phone': return svg(s, '0 0 14 20', '<rect x="1" y="1" width="12" height="18" rx="3" stroke-width="1.5"/><line x1="5.5" y1="16.5" x2="8.5" y2="16.5" stroke-width="1.5"/>');
+        case 'tablet': return svg(s, '0 0 16 20', '<rect x="1" y="1" width="14" height="18" rx="2.5" stroke-width="1.5"/><line x1="6" y1="16.5" x2="10" y2="16.5" stroke-width="1.5"/>');
+        case 'server': return svg(s, '0 0 20 18', '<rect x="1" y="1" width="18" height="7" rx="1.5" stroke-width="1.5"/><rect x="1" y="10" width="18" height="7" rx="1.5" stroke-width="1.5"/>');
+        default: return svg(s, '0 0 20 18', '<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>');
+    }
+    return dt.icon();
+}
 function iconInboxLarge() {
     return svg(36, '0 0 24 24', '<rect x="2" y="2" width="20" height="20" rx="3" stroke-width="1.2"/><polyline points="2,15 7,15 8.5,19 15.5,19 17,15 22,15" stroke-width="1.2"/>');
 }
@@ -568,6 +658,21 @@ function typeIcon(type) {
         return svg(14, '0 0 16 16', '<rect x="2" y="3" width="12" height="10" rx="1.5" stroke-width="1.8"/><circle cx="6" cy="6.5" r="1" stroke-width="1.8"/><polyline points="2,11 5.5,8 7.5,10 10,7.5 14,11" stroke-width="1.8"/>');
     return svg(14, '0 0 16 16', '<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.8"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.8"/>');
 }
+function fileUriFromPath(path) {
+    const fwdPath = path.replace(/\\/g, '/');
+    return fwdPath.startsWith('/') ? `file://${fwdPath}` : `file:///${fwdPath}`;
+}
+async function warmupDragPayload(id) {
+    if (!IS_TAURI || dragPayloadCache.has(id))
+        return;
+    try {
+        const payload = await invoke('prepare_local_drag', { id });
+        dragPayloadCache.set(id, payload);
+    }
+    catch {
+        // Drag has a sync fallback path; cache warm-up is best-effort.
+    }
+}
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function escapeHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function humanSize(b) {
@@ -577,7 +682,16 @@ function humanSize(b) {
         return `${(b / 1024).toFixed(1)} KB`;
     return `${(b / 1048576).toFixed(1)} MB`;
 }
+const WARN_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB — mostrar aviso
+const MAX_SIZE_BYTES = 500 * 1024 * 1024; // 500 MB — límite práctico (cifrado en RAM)
 async function addBrowserFileToHub(file) {
+    if (file.size > MAX_SIZE_BYTES) {
+        throw new Error(`El archivo "${file.name}" supera el límite de 500 MB para transferencia cifrada en RAM.`);
+    }
+    if (file.size > WARN_SIZE_BYTES) {
+        // Aviso no bloqueante — el usuario puede continuar
+        showSizeWarning(file.name, file.size);
+    }
     const bytesBase64 = await fileToBase64(file);
     const preview = file.type.startsWith('image/') ? await imageFileToPreview(file) : undefined;
     return invoke('add_binary_content', {
@@ -588,6 +702,17 @@ async function addBrowserFileToHub(file) {
             preview: preview || null,
         },
     });
+}
+function showSizeWarning(name, size) {
+    const existing = document.getElementById('size-warn');
+    if (existing)
+        existing.remove();
+    const el = document.createElement('div');
+    el.id = 'size-warn';
+    el.className = 'size-warn';
+    el.innerHTML = `⚠ <strong>${escapeHtml(name)}</strong> (${humanSize(size)}) — archivo grande, puede tardar. <button onclick="this.parentElement.remove()">×</button>`;
+    document.getElementById('panel-local')?.prepend(el);
+    setTimeout(() => el.remove(), 8000);
 }
 async function fileToBase64(file) {
     const buffer = await file.arrayBuffer();
