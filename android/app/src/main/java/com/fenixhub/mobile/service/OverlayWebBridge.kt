@@ -128,9 +128,10 @@ class OverlayWebBridge(
 
         if (uri != null && !clip.description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) {
             val item = withContext(Dispatchers.IO) {
-                localContentFactory.fromUri(uri)
+                localContentFactory.fromUri(uri, deferLargeImagePreview = true)
             } ?: error("No se pudo leer el contenido del portapapeles")
             repository.addLocalContent(item)
+            scheduleDeferredPreviewRefresh(item)
             Log.i(TAG, "Imported clipboard URI into overlay hub: $uri")
             return localContentJson(item)
         }
@@ -189,11 +190,11 @@ class OverlayWebBridge(
 
         val pulled = httpClient.pullContent(peer, settings)
             .getOrElse { throw IllegalStateException("No se pudo recibir el contenido") }
-        val received = withContext(Dispatchers.IO) {
-            receivedContentHandler.handle(peer, pulled)
+        val item = withContext(Dispatchers.IO) {
+            receivedContentHandler.createLocalContent(peer, pulled)
         }
-        repository.addLocalContent(received.item)
-        return localContentJson(received.item)
+        repository.addLocalContent(item)
+        return localContentJson(item)
     }
 
     private suspend fun copyPeerContent(args: JSONObject?): String {
@@ -205,11 +206,10 @@ class OverlayWebBridge(
 
         val pulled = httpClient.pullContent(peer, settings)
             .getOrElse { throw IllegalStateException("No se pudo recibir el contenido") }
-        val received = withContext(Dispatchers.IO) {
-            receivedContentHandler.handle(peer, pulled)
+        return withContext(Dispatchers.IO) {
+            val item = receivedContentHandler.createLocalContent(peer, pulled)
+            receivedContentHandler.copyToSystemClipboard(item)
         }
-        repository.addLocalContent(received.item)
-        return received.message
     }
 
     private fun ignorePeerContent(args: JSONObject?) {
@@ -268,6 +268,24 @@ class OverlayWebBridge(
     private fun clipboardPrimaryClip(): ClipData? {
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         return clipboard.primaryClip
+    }
+
+    private fun scheduleDeferredPreviewRefresh(item: LocalContent) {
+        if (item.contentType != com.fenixhub.mobile.model.HubContentType.IMAGE ||
+            item.preview.startsWith("data:image")
+        ) {
+            return
+        }
+
+        scope.launch(Dispatchers.IO) {
+            val refreshed = localContentFactory.refreshDeferredImagePreview(item) ?: return@launch
+            if (refreshed.preview == item.preview) {
+                return@launch
+            }
+
+            repository.addLocalContent(refreshed)
+            dispatch("window.__fenixExternalRefresh && window.__fenixExternalRefresh();")
+        }
     }
 
     private fun nullable(value: String?): Any = value ?: JSONObject.NULL

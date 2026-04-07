@@ -115,11 +115,15 @@ pub fn run() {
             commands::publish_content,
             commands::stop_server,
             commands::pull_peer_content,
+            commands::copy_peer_content,
+            commands::save_peer_content_as,
+            commands::save_local_content_as,
             commands::get_peers,
             commands::write_local_to_clipboard,
             commands::prepare_local_drag,
             commands::resize_hub,
             commands::close_hub_window,
+            commands::add_file_by_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while building FenixHub")

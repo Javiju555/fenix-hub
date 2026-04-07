@@ -14,6 +14,12 @@ function listen(event, cb) {
         return tauriListen(event, cb);
     return Promise.resolve(() => { });
 }
+function peerCommandArgs(contentId) {
+    return {
+        contentId,
+        content_id: contentId,
+    };
+}
 async function setWindowSize(w, h) {
     if (!IS_TAURI)
         return;
@@ -80,10 +86,22 @@ async function mockInvoke(cmd, args) {
             mockPublished.clear();
             return undefined;
         case 'pull_peer_content': {
-            const id = a?.content_id;
-            mockPeers = mockPeers.filter(p => p.content_id !== id);
-            return { id, content_type: 'text', preview: '', size_bytes: 0, created_at: 0 };
+            const peer = mockPeers.find(p => p.content_id === a?.content_id);
+            const item = {
+                id: String(mockId++),
+                content_type: peer?.content_type ?? 'text',
+                preview: peer?.preview ?? '',
+                size_bytes: peer?.size_bytes ?? 0,
+                created_at: Date.now() / 1000,
+                file_name: peer?.file_name ?? null,
+                mime_type: peer?.mime_type ?? null,
+            };
+            mockLocal = [item, ...mockLocal];
+            return item;
         }
+        case 'copy_peer_content': return undefined;
+        case 'save_peer_content_as': return { saved: true, path: 'C:\\temp\\fenixhub-mock.bin' };
+        case 'save_local_content_as': return { saved: true, path: 'C:\\temp\\fenixhub-local-mock.bin' };
         case 'setup_identity':
             return { device_name: a?.args?.device_name ?? 'Device', group_id: 'demo', configured: true, device_type: a?.args?.device_type ?? 'desktop' };
         default: return undefined;
@@ -98,6 +116,7 @@ let onlineDevices = [];
 let activeTab = 'local';
 let collapsed = false;
 let selectedDeviceType = 'desktop';
+const receivedPeerLocalIds = new Map();
 const dragPayloadCache = new Map();
 const DEVICE_TYPES = [
     { id: 'desktop', label: 'Desktop', icon: () => svg(18, '0 0 20 18', '<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>') },
@@ -107,9 +126,11 @@ const DEVICE_TYPES = [
     { id: 'server', label: 'Servidor', icon: () => svg(18, '0 0 20 18', '<rect x="1" y="1" width="18" height="7" rx="1.5" stroke-width="1.5"/><rect x="1" y="10" width="18" height="7" rx="1.5" stroke-width="1.5"/><circle cx="4.5" cy="4.5" r="1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="13.5" r="1" fill="currentColor" stroke="none"/>') },
 ];
 const W = 820, H = 185;
-const W_PILL = 280, H_PILL = 48;
+const W_PILL = 280, H_PILL = 34;
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
+    // Block browser context menu — this is a native-style app, not a webpage
+    document.addEventListener('contextmenu', e => e.preventDefault());
     identity = await invoke('get_identity');
     if (!identity.configured) {
         renderSetup();
@@ -125,6 +146,7 @@ async function loadContent() {
         invoke('get_peers'),
     ]);
     onlineDevices = [...new Set(peerContent.map(p => p.device_name))];
+    pruneReceivedPeers();
 }
 // ── Tauri events ──────────────────────────────────────────────────────────────
 function setupEventListeners() {
@@ -137,12 +159,14 @@ function setupEventListeners() {
         peerContent = [...peerContent.filter(p => p.content_id !== ann.content_id), ann];
         if (!onlineDevices.includes(ann.device_name))
             onlineDevices = [...onlineDevices, ann.device_name];
+        pruneReceivedPeers();
         updateHeader();
         if (activeTab === 'red')
             renderPeerContent();
     });
     listen('peer-content-gone', ({ payload }) => {
         peerContent = peerContent.filter(p => p.content_id !== payload.content_id);
+        receivedPeerLocalIds.delete(payload.content_id);
         if (!peerContent.some(p => p.device_name === payload.device_name))
             onlineDevices = onlineDevices.filter(d => d !== payload.device_name);
         updateHeader();
@@ -350,31 +374,34 @@ function renderHub() {
 }
 async function collapse() {
     collapsed = true;
-    const hub = document.getElementById('hub-root');
-    hub.classList.add('collapsed');
-    document.body.classList.add('is-collapsed');
-    document.body.style.width = W_PILL + 'px';
-    document.body.style.height = H_PILL + 'px';
+    document.getElementById('hub-root').classList.add('collapsed');
     document.getElementById('btn-collapse').innerHTML = iconChevronDown(13);
     document.getElementById('btn-collapse').title = 'Mostrar FenixHub';
+    // Resize window FIRST, then let CSS transition finish
     await setWindowSize(W_PILL, H_PILL);
 }
 async function expand() {
     collapsed = false;
-    const hub = document.getElementById('hub-root');
-    hub.classList.remove('collapsed');
-    document.body.classList.remove('is-collapsed');
-    document.body.style.width = W + 'px';
-    document.body.style.height = H + 'px';
+    // Grow the window before revealing content so layout doesn't flash
     await setWindowSize(W, H);
-    switchTab(activeTab);
+    document.getElementById('hub-root').classList.remove('collapsed');
     document.getElementById('btn-collapse').innerHTML = iconMinus(13);
     document.getElementById('btn-collapse').title = 'Minimizar a notch';
+    switchTab(activeTab);
+}
+function renderTab(tab) {
+    if (tab === 'local') {
+        renderLocalContent();
+    }
+    else {
+        renderPeerContent();
+    }
 }
 function switchTab(tab) {
     activeTab = tab;
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tab}`));
+    renderTab(tab);
 }
 function updateHeader() {
     const lc = document.getElementById('count-local');
@@ -401,6 +428,24 @@ function updateHeader() {
         dot.className = 'status-dot scanning';
         txt.textContent = 'Buscando…';
     }
+}
+function pruneReceivedPeers() {
+    const livePeerIds = new Set(peerContent.map(item => item.content_id));
+    for (const [peerId, localId] of [...receivedPeerLocalIds.entries()]) {
+        if (!livePeerIds.has(peerId) || !localContent.some(item => item.id === localId)) {
+            receivedPeerLocalIds.delete(peerId);
+        }
+    }
+}
+function getReceivedLocalId(peerId) {
+    const localId = receivedPeerLocalIds.get(peerId);
+    if (!localId)
+        return null;
+    if (!localContent.some(item => item.id === localId)) {
+        receivedPeerLocalIds.delete(peerId);
+        return null;
+    }
+    return localId;
 }
 // ── Local panel ───────────────────────────────────────────────────────────────
 function renderLocalContent() {
@@ -430,7 +475,8 @@ function renderLocalContent() {
             ].join('');
         const isImg = item.content_type === 'image' && item.preview.startsWith('data:image');
         const topContent = isImg
-            ? `<img class="card-thumb" src="${item.preview}" />`
+            ? `<img class="card-thumb" src="${item.preview}" />
+         <div class="card-image-caption">${escapeHtml(item.file_name || 'imagen recibida')}</div>`
             : `<div class="card-top">
            <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
            <div class="card-body">
@@ -447,10 +493,12 @@ function renderLocalContent() {
          </div>`
             : `<div class="card-actions">${actionBtns}</div>`;
         return `
-    <div class="content-card${pub ? ' broadcasting' : ''}${isImg ? ' image-card' : ''}" data-id="${item.id}" draggable="true">
-      ${topContent}
-      ${metaRow}
-      ${actionsRow}
+    <div class="card-wrap">
+      <div class="content-card${pub ? ' broadcasting' : ''}${isImg ? ' image-card' : ''}" data-id="${item.id}" draggable="true">
+        ${topContent}
+        ${metaRow}
+        ${actionsRow}
+      </div>
       <button class="btn-delete" data-id="${item.id}" title="Quitar del hub">${iconX(8)}</button>
     </div>`;
     }).join('')}</div>`;
@@ -478,13 +526,18 @@ function renderLocalContent() {
             const id = btn.dataset.id;
             await invoke('remove_content', { id });
             publishedIds.delete(id);
+            for (const [peerId, localId] of [...receivedPeerLocalIds.entries()]) {
+                if (localId === id) {
+                    receivedPeerLocalIds.delete(peerId);
+                }
+            }
             localContent = localContent.filter(i => i.id !== id);
             updateHeader();
             renderLocalContent();
         });
     });
-    // Click on card body/thumb → copy to local clipboard
-    container.querySelectorAll('.card-body, .card-thumb').forEach(el => {
+    // Click on card body/thumb/caption → copy to local clipboard
+    container.querySelectorAll('.card-body, .card-thumb, .card-image-caption').forEach(el => {
         el.style.cursor = 'pointer';
         el.addEventListener('click', async () => {
             const card = el.closest('.content-card');
@@ -522,25 +575,27 @@ function renderLocalContent() {
             if (!dataTransfer)
                 return;
             dataTransfer.effectAllowed = 'copy';
-            const cached = dragPayloadCache.get(id);
             if (item.content_type === 'text') {
-                // data_text has the full text; preview is truncated at 80 chars
-                dataTransfer.setData('text/plain', cached?.text || item.data_text || item.preview);
+                const text = item.data_text || item.preview;
+                dataTransfer.setData('text/plain', text);
+                // Silently copy to clipboard so Ctrl+V always works as fallback
+                if (IS_TAURI)
+                    invoke('write_local_to_clipboard', { id }).catch(() => { });
+            }
+            else if (item.transfer_path) {
+                const fwdPath = item.transfer_path.replace(/\\/g, '/');
+                const uri = fwdPath.startsWith('/') ? `file://${fwdPath}` : `file:///${fwdPath}`;
+                dataTransfer.setData('text/plain', item.transfer_path);
+                dataTransfer.setData('text/uri-list', uri);
             }
             else {
-                const uriList = cached?.uri_list || (item.transfer_path ? fileUriFromPath(item.transfer_path) : null);
-                if (uriList) {
-                    const fallbackText = cached?.text || item.transfer_path || item.file_name || item.preview;
-                    const mime = item.mime_type || 'application/octet-stream';
-                    const name = item.file_name || 'fenixhub-item';
-                    dataTransfer.setData('text/plain', fallbackText);
-                    dataTransfer.setData('text/uri-list', uriList);
-                    // Helps native Windows targets that expect explicit URL download payload.
-                    dataTransfer.setData('DownloadURL', `${mime}:${name}:${uriList}`);
-                    return;
-                }
-                // Normalize Windows backslashes for file URI
                 dataTransfer.setData('text/plain', item.file_name || item.preview);
+            }
+        });
+        // If WebView2 couldn't complete the native drop (forbidden cursor), show hint
+        card.addEventListener('dragend', (event) => {
+            if (event.dataTransfer?.dropEffect === 'none') {
+                showDragFallbackHint();
             }
         });
     });
@@ -549,6 +604,7 @@ function renderLocalContent() {
 function renderPeerContent() {
     const container = document.getElementById('panel-red');
     updateHeader();
+    pruneReceivedPeers();
     if (peerContent.length === 0) {
         container.innerHTML = `
       <div class="empty-state">
@@ -558,6 +614,8 @@ function renderPeerContent() {
         return;
     }
     container.innerHTML = `<div class="card-grid">${peerContent.map(item => {
+        const receivedLocalId = getReceivedLocalId(item.content_id);
+        const received = receivedLocalId !== null;
         const isImg = item.preview.startsWith('data:image');
         const topContent = isImg
             ? `<img class="card-thumb" src="${item.preview}" />`
@@ -568,34 +626,110 @@ function renderPeerContent() {
            </div>
          </div>`;
         return `
-    <div class="content-card peer-card">
+    <div class="content-card peer-card${received ? ' peer-received' : ''}">
       ${topContent}
-      <div class="card-meta card-device">${iconDevice(9)} ${escapeHtml(item.device_name)} · ${humanSize(item.size_bytes)}</div>
+      <div class="card-meta card-device">
+        ${iconDevice(9)} ${escapeHtml(item.device_name)} · ${humanSize(item.size_bytes)}
+        ${received ? '<span class="peer-state-badge">recibido</span>' : ''}
+      </div>
       <div class="card-actions">
-        <button class="btn-receive" data-id="${item.content_id}">${iconDownload(9)} Recibir</button>
+        <button class="btn-receive${received ? ' received' : ''}" data-peer-action="receive" data-id="${item.content_id}" ${received ? 'disabled' : ''}>${iconDownload(9)} ${received ? 'Recibido' : 'Recibir'}</button>
+        <button class="btn-peer-secondary" data-peer-action="copy" data-id="${item.content_id}" title="${received ? 'Copiar al portapapeles' : 'Recibe primero para copiar'}" ${received ? '' : 'disabled'}>${iconCopy(9)} Copiar</button>
+        <button class="btn-peer-secondary" data-peer-action="save" data-id="${item.content_id}" title="${received ? 'Guardar como' : 'Recibe primero para guardar'}" ${received ? '' : 'disabled'}>${iconSave(9)} Guardar</button>
       </div>
     </div>`;
     }).join('')}</div>`;
-    container.querySelectorAll('.btn-receive').forEach(btn => {
+    container.querySelectorAll('[data-peer-action]').forEach(btn => {
         btn.addEventListener('click', async () => {
             const id = btn.dataset.id;
+            const action = btn.dataset.peerAction;
+            const previousMarkup = btn.innerHTML;
             btn.disabled = true;
-            btn.textContent = 'Recibiendo…';
             try {
-                const received = await invoke('pull_peer_content', { content_id: id });
-                localContent = [received, ...localContent];
-                // Don't remove from peerContent — peer still has it published
-                updateHeader();
-                renderPeerContent();
-                renderLocalContent();
+                if (action === 'receive') {
+                    btn.textContent = 'Recibiendo…';
+                    const received = await invoke('pull_peer_content', peerCommandArgs(id));
+                    receivedPeerLocalIds.set(id, received.id);
+                    localContent = [received, ...localContent.filter(item => item.id !== received.id)];
+                    updateHeader();
+                    renderPeerContent();
+                    renderLocalContent();
+                    void autoCopyReceivedPeer(id, received.id);
+                    return;
+                }
+                if (action === 'copy') {
+                    const localId = getReceivedLocalId(id);
+                    if (!localId) {
+                        renderPeerContent();
+                        return;
+                    }
+                    btn.textContent = 'Copiando…';
+                    await invoke('write_local_to_clipboard', { id: localId });
+                    flashPeerAction(btn, 'Copiado');
+                    return;
+                }
+                const localId = getReceivedLocalId(id);
+                if (!localId) {
+                    renderPeerContent();
+                    return;
+                }
+                btn.textContent = 'Guardando…';
+                const result = await invoke('save_local_content_as', { id: localId });
+                if (result.saved) {
+                    flashPeerAction(btn, 'Guardado');
+                }
+                else {
+                    btn.disabled = false;
+                    btn.innerHTML = previousMarkup;
+                }
             }
             catch (e) {
-                console.error('pull_peer_content failed:', e);
+                console.error(`peer action ${action} failed:`, e);
                 btn.disabled = false;
-                btn.textContent = `Error: ${e}`;
+                btn.textContent = 'Error';
+                window.setTimeout(() => {
+                    if (!btn.isConnected)
+                        return;
+                    btn.innerHTML = previousMarkup;
+                    btn.disabled = false;
+                }, 1400);
             }
         });
     });
+}
+async function autoCopyReceivedPeer(peerId, localId) {
+    const copyButton = document.querySelector(`[data-peer-action="copy"][data-id="${peerId}"]`);
+    if (copyButton) {
+        copyButton.disabled = true;
+        copyButton.textContent = 'Copiando…';
+    }
+    try {
+        await invoke('write_local_to_clipboard', { id: localId });
+        if (copyButton && copyButton.isConnected) {
+            copyButton.textContent = 'Auto-copiado';
+        }
+    }
+    catch (error) {
+        console.error('auto copy after receive failed:', error);
+        if (copyButton && copyButton.isConnected) {
+            copyButton.textContent = 'Copiar';
+            copyButton.disabled = false;
+        }
+        return;
+    }
+    window.setTimeout(() => {
+        if (activeTab === 'red') {
+            renderPeerContent();
+        }
+    }, 900);
+}
+function flashPeerAction(button, label) {
+    button.textContent = label;
+    window.setTimeout(() => {
+        if (!button.isConnected)
+            return;
+        renderPeerContent();
+    }, 900);
 }
 // ── Icons ─────────────────────────────────────────────────────────────────────
 const svg = (s, vb, path, extra = 'stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"') => `<svg width="${s}" height="${s}" viewBox="${vb}" fill="none" ${extra}>${path}</svg>`;
@@ -620,6 +754,12 @@ function iconX(s) {
 }
 function iconDownload(s) {
     return svg(s, '0 0 16 16', '<polyline points="4,7 8,11 12,7" stroke-width="1.8"/><line x1="8" y1="3" x2="8" y2="11" stroke-width="1.8"/><line x1="2" y1="13" x2="14" y2="13" stroke-width="1.8"/>');
+}
+function iconCopy(s) {
+    return svg(s, '0 0 16 16', '<rect x="5" y="3" width="8" height="10" rx="1.6" stroke-width="1.6"/><path d="M3.5,11.5 H3 a1.5,1.5 0 0 1 -1.5,-1.5 V4.5 A1.5,1.5 0 0 1 3,3 h5" stroke-width="1.6"/>');
+}
+function iconSave(s) {
+    return svg(s, '0 0 16 16', '<path d="M3,2.5 H11.5 L13.5,4.5 V13.5 H2.5 V3 A0.5,0.5 0 0 1 3,2.5 Z" stroke-width="1.6"/><rect x="5" y="9" width="6" height="3.5" rx="0.8" stroke-width="1.4"/><path d="M5,2.8 V6.3 H10.5 V2.8" stroke-width="1.4"/>');
 }
 function iconDevice(s) {
     return svg(s, '0 0 14 14', '<rect x="1" y="2" width="12" height="9" rx="1.5" stroke-width="1.6"/><line x1="4" y1="13" x2="10" y2="13" stroke-width="1.6"/>');
@@ -658,10 +798,6 @@ function typeIcon(type) {
         return svg(14, '0 0 16 16', '<rect x="2" y="3" width="12" height="10" rx="1.5" stroke-width="1.8"/><circle cx="6" cy="6.5" r="1" stroke-width="1.8"/><polyline points="2,11 5.5,8 7.5,10 10,7.5 14,11" stroke-width="1.8"/>');
     return svg(14, '0 0 16 16', '<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.8"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.8"/>');
 }
-function fileUriFromPath(path) {
-    const fwdPath = path.replace(/\\/g, '/');
-    return fwdPath.startsWith('/') ? `file://${fwdPath}` : `file:///${fwdPath}`;
-}
 async function warmupDragPayload(id) {
     if (!IS_TAURI || dragPayloadCache.has(id))
         return;
@@ -689,9 +825,15 @@ async function addBrowserFileToHub(file) {
         throw new Error(`El archivo "${file.name}" supera el límite de 500 MB para transferencia cifrada en RAM.`);
     }
     if (file.size > WARN_SIZE_BYTES) {
-        // Aviso no bloqueante — el usuario puede continuar
         showSizeWarning(file.name, file.size);
     }
+    // Tauri exposes the real filesystem path on File objects from drag & drop.
+    // Use it to let Rust read the bytes directly — no base64, no RAM double.
+    const nativePath = IS_TAURI ? file.path : undefined;
+    if (nativePath) {
+        return invoke('add_file_by_path', { path: nativePath });
+    }
+    // Fallback: clipboard images and browser-only mode use base64
     const bytesBase64 = await fileToBase64(file);
     const preview = file.type.startsWith('image/') ? await imageFileToPreview(file) : undefined;
     return invoke('add_binary_content', {
@@ -702,6 +844,17 @@ async function addBrowserFileToHub(file) {
             preview: preview || null,
         },
     });
+}
+function showDragFallbackHint() {
+    const existing = document.getElementById('drag-hint');
+    if (existing)
+        return;
+    const el = document.createElement('div');
+    el.id = 'drag-hint';
+    el.className = 'size-warn';
+    el.innerHTML = `Ya en portapapeles — usa <kbd>Ctrl+V</kbd> para pegar &nbsp;<button onclick="this.parentElement.remove()">×</button>`;
+    document.getElementById('panel-local')?.prepend(el);
+    setTimeout(() => el.remove(), 4000);
 }
 function showSizeWarning(name, size) {
     const existing = document.getElementById('size-warn');

@@ -29,7 +29,9 @@
       "Bash(powershell -Command \"Test-NetConnection -ComputerName 192.168.1.128 -Port 45107 -InformationLevel Quiet\")",
       "Bash(cargo build:*)",
       "Bash(ls e:/fenix-hub/*.png e:/fenix-hub/*.ico e:/fenix-hub/*.icns)",
-      "Bash(bunx tauri:*)"
+      "Bash(bunx tauri:*)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(cargo fix:*)"
     ]
   }
 }
