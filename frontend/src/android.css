@@ -44,6 +44,9 @@ body.android-mode {
   display: flex;
   flex-direction: column;
   -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
   overscroll-behavior: none;
 }
 
@@ -52,6 +55,13 @@ button,
 input,
 textarea {
   font-family: inherit;
+}
+
+input,
+textarea {
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 #app {
@@ -205,16 +215,16 @@ textarea {
 .a-hero {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 18px 18px 10px;
+  gap: 10px;
+  padding: 14px 14px 6px;
 }
 
 .a-brand-card {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 14px;
+  gap: 12px;
   align-items: center;
-  padding: 16px;
+  padding: 14px;
   border-radius: var(--radius-xl);
   background: var(--panel-strong);
   border: 1px solid var(--border);
@@ -226,34 +236,35 @@ textarea {
 }
 
 .a-brand-mark {
-  width: 72px;
-  height: 72px;
+  width: 64px;
+  height: 64px;
 }
 
 .a-brand-copy {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .a-brand-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
 .a-brand-row h1 {
-  font-size: 28px;
+  font-size: 24px;
   font-weight: 760;
   letter-spacing: -0.05em;
 }
 
 .a-brand-copy p {
   color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .a-hero-actions {
@@ -262,6 +273,7 @@ textarea {
 
 .a-header-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   width: 100%;
 }
@@ -272,8 +284,8 @@ textarea {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 46px;
-  padding: 12px 16px;
+  min-height: 42px;
+  padding: 10px 14px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.06);
   color: var(--text);
@@ -292,8 +304,8 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 34px;
-  padding: 7px 12px;
+  min-height: 32px;
+  padding: 6px 11px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--border);
@@ -339,9 +351,9 @@ textarea {
 .a-stat-card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 14px 16px;
-  border-radius: 22px;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--border);
 }
@@ -355,7 +367,7 @@ textarea {
 }
 
 .a-stat-card strong {
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 760;
   letter-spacing: -0.05em;
 }
@@ -364,17 +376,17 @@ textarea {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px 18px 116px;
+  padding: 2px 14px 110px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
 .a-pane-head {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 4px 2px 2px;
+  gap: 5px;
+  padding: 2px 2px 0;
 }
 
 .a-pane-kicker {
@@ -386,15 +398,15 @@ textarea {
 }
 
 .a-pane-head h2 {
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 740;
   letter-spacing: -0.04em;
 }
 
 .a-pane-head p {
   color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.42;
 }
 
 .a-card-stack {
@@ -408,9 +420,9 @@ textarea {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  min-height: 240px;
-  padding: 24px;
+  gap: 14px;
+  min-height: 190px;
+  padding: 20px;
   border-radius: var(--radius-xl);
   background: rgba(255, 255, 255, 0.04);
   border: 1px dashed rgba(255, 255, 255, 0.12);
@@ -518,13 +530,26 @@ textarea {
 }
 
 .a-media-image {
-  min-height: 170px;
-  padding: 0;
-  background: rgba(0, 0, 0, 0.26);
+  min-height: 0;
+  padding: 10px;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at top, rgba(94, 140, 244, 0.14), transparent 40%),
+    rgba(5, 7, 14, 0.84);
 }
 
 .a-media-image::after {
   display: none;
+}
+
+.a-media-image-local {
+  padding: 10px;
+}
+
+.a-media-image-peer {
+  min-height: 120px;
+  padding: 14px;
 }
 
 .a-media-file {
@@ -569,11 +594,25 @@ textarea {
 }
 
 .a-card-img {
-  width: 100%;
-  height: 100%;
-  min-height: 170px;
-  object-fit: cover;
   display: block;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.a-card-img-local {
+  width: 100%;
+  height: auto;
+  max-height: min(52vh, 460px);
+  border-radius: 20px;
+  object-fit: contain;
+}
+
+.a-card-img-peer {
+  width: auto;
+  height: auto;
+  max-width: min(100%, 180px);
+  max-height: 180px;
+  border-radius: 16px;
+  object-fit: contain;
 }
 
 .a-btn-delete-float {
@@ -595,8 +634,8 @@ textarea {
 .a-card-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 18px;
+  gap: 10px;
+  padding: 14px;
 }
 
 .a-card-eyebrow {
@@ -654,7 +693,7 @@ textarea {
 }
 
 .a-card-preview {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1.28;
   letter-spacing: -0.02em;
@@ -687,8 +726,8 @@ textarea {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 46px;
-  padding: 12px 16px;
+  min-height: 42px;
+  padding: 10px 14px;
   border-radius: 16px;
   font-size: 13px;
   font-weight: 700;
@@ -719,9 +758,9 @@ textarea {
 
 .a-bottom-nav {
   position: absolute;
-  left: 18px;
-  right: 18px;
-  bottom: 16px;
+  left: 14px;
+  right: 14px;
+  bottom: 14px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
@@ -740,8 +779,8 @@ textarea {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 50px;
-  padding: 12px 16px;
+  min-height: 46px;
+  padding: 10px 14px;
   border-radius: 999px;
   background: transparent;
   color: var(--text-dim);
@@ -771,10 +810,10 @@ textarea {
 
 .a-fab {
   position: absolute;
-  right: 22px;
-  bottom: 102px;
-  width: 62px;
-  height: 62px;
+  right: 18px;
+  bottom: 94px;
+  width: 58px;
+  height: 58px;
   display: grid;
   place-items: center;
   border-radius: 999px;
@@ -890,7 +929,7 @@ textarea {
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 390px) {
   .a-brand-row {
     flex-direction: column;
     align-items: flex-start;

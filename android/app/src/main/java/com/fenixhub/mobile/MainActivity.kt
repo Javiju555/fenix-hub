@@ -21,6 +21,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewAssetLoader
+import com.fenixhub.mobile.model.HubContentType
+import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.service.FenixHubService
 import com.fenixhub.mobile.web.AndroidHubBridge
 import kotlinx.coroutines.CompletableDeferred
@@ -36,12 +38,21 @@ class MainActivity : ComponentActivity() {
     private lateinit var bridge: AndroidHubBridge
 
     private var pendingFilePicker: CompletableDeferred<Uri?>? = null
+    private var pendingCreateDocument: CompletableDeferred<Uri?>? = null
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri: Uri? ->
         pendingFilePicker?.takeIf { it.isActive }?.complete(uri)
         pendingFilePicker = null
+    }
+
+    private val createDocumentLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val uri = result.data?.data
+        pendingCreateDocument?.takeIf { it.isActive }?.complete(uri)
+        pendingCreateDocument = null
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,6 +70,7 @@ class MainActivity : ComponentActivity() {
             activity = this,
             container = container,
             launchFilePicker = ::launchFilePicker,
+            launchCreateDocument = ::launchCreateDocument,
             readClipboardText = ::clipboardText,
             openOverlayPermissionSettings = ::openOverlayPermissionSettings,
         )
@@ -94,6 +106,8 @@ class MainActivity : ComponentActivity() {
         }
         pendingFilePicker?.takeIf { it.isActive }?.complete(null)
         pendingFilePicker = null
+        pendingCreateDocument?.takeIf { it.isActive }?.complete(null)
+        pendingCreateDocument = null
         super.onDestroy()
     }
 
@@ -219,6 +233,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private suspend fun launchCreateDocument(fileName: String, mimeType: String): Uri? {
+        if (pendingCreateDocument?.isActive == true) {
+            error("Ya hay un selector de guardado abierto")
+        }
+        val deferred = CompletableDeferred<Uri?>()
+        pendingCreateDocument = deferred
+        withContext(Dispatchers.Main.immediate) {
+            createDocumentLauncher.launch(
+                Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = mimeType
+                    putExtra(Intent.EXTRA_TITLE, fileName)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                },
+            )
+        }
+        return try {
+            deferred.await()
+        } finally {
+            if (pendingCreateDocument === deferred) {
+                pendingCreateDocument = null
+            }
+        }
+    }
+
     private fun notifyFrontendRefresh() {
         if (!::webView.isInitialized) return
         webView.post {
@@ -255,7 +295,13 @@ class MainActivity : ComponentActivity() {
 
     private fun extractSharedPayload(intent: Intent): SharedPayload? {
         val action = intent.action ?: return null
-        if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return null
+        if (
+            action != Intent.ACTION_SEND &&
+            action != Intent.ACTION_SEND_MULTIPLE &&
+            action != Intent.ACTION_PROCESS_TEXT
+        ) {
+            return null
+        }
 
         val texts = linkedSetOf<String>()
         val uriStrings = linkedSetOf<String>()
@@ -271,6 +317,10 @@ class MainActivity : ComponentActivity() {
             if (uri != null) {
                 uriStrings += uri.toString()
             }
+        }
+
+        if (action == Intent.ACTION_PROCESS_TEXT) {
+            addText(intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT))
         }
 
         addText(intent.getStringExtra(Intent.EXTRA_TEXT))
@@ -311,12 +361,33 @@ class MainActivity : ComponentActivity() {
             }
 
             payload.uris.forEach { uri ->
-                container.localContentFactory.fromUri(uri)
+                container.localContentFactory.fromUri(uri, deferLargeImagePreview = true)
                     ?.also(container.contentRepository::addLocalContent)
-                    ?.let { importedCount += 1 }
+                    ?.let { item ->
+                        importedCount += 1
+                        scheduleDeferredPreviewRefresh(item)
+                    }
             }
 
             importedCount
+        }
+    }
+
+    private fun scheduleDeferredPreviewRefresh(item: LocalContent) {
+        if (item.contentType != HubContentType.IMAGE || item.preview.startsWith("data:image")) {
+            return
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val refreshed = container.localContentFactory.refreshDeferredImagePreview(item) ?: return@launch
+            if (refreshed.preview == item.preview) {
+                return@launch
+            }
+
+            container.contentRepository.addLocalContent(refreshed)
+            withContext(Dispatchers.Main.immediate) {
+                notifyFrontendRefresh()
+            }
         }
     }
 
@@ -326,6 +397,7 @@ class MainActivity : ComponentActivity() {
         intent.clipData = null
         intent.removeExtra(Intent.EXTRA_TEXT)
         intent.removeExtra(Intent.EXTRA_HTML_TEXT)
+        intent.removeExtra(Intent.EXTRA_PROCESS_TEXT)
         intent.removeExtra(Intent.EXTRA_STREAM)
     }
 

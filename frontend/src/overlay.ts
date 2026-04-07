@@ -145,6 +145,7 @@ let mockPeers: PeerAnnouncement[] = [
 
 export async function initOverlay() {
   document.body.classList.add('overlay-mode');
+  document.addEventListener('contextmenu', event => event.preventDefault());
   ensureNativeBridge();
   window.__fenixOverlayRefresh = async () => {
     await refreshState();

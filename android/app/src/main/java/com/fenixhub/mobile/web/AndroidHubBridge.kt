@@ -6,6 +6,7 @@ import android.provider.Settings
 import android.util.Log
 import android.util.Base64
 import android.webkit.JavascriptInterface
+import android.webkit.MimeTypeMap
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
@@ -14,11 +15,13 @@ import com.fenixhub.mobile.model.Announcement
 import com.fenixhub.mobile.model.HubContentType
 import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.model.PeerContent
+import com.fenixhub.mobile.model.PulledContent
 import com.fenixhub.mobile.model.SendMode
 import com.fenixhub.mobile.service.FenixHubService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -26,6 +29,7 @@ class AndroidHubBridge(
     private val activity: ComponentActivity,
     private val container: AppContainer,
     private val launchFilePicker: suspend () -> Uri?,
+    private val launchCreateDocument: suspend (fileName: String, mimeType: String) -> Uri?,
     private val readClipboardText: () -> String?,
     private val openOverlayPermissionSettings: () -> Unit,
 ) {
@@ -56,7 +60,9 @@ class AndroidHubBridge(
     suspend fun importPickedFile(): LocalContent? {
         val uri = launchFilePicker() ?: return null
         return withContext(Dispatchers.IO) {
-            container.localContentFactory.fromUri(uri)?.also(container.contentRepository::addLocalContent)
+            container.localContentFactory.fromUri(uri, deferLargeImagePreview = true)
+                ?.also(container.contentRepository::addLocalContent)
+                ?.also(::scheduleDeferredPreviewRefresh)
         }
     }
 
@@ -75,6 +81,8 @@ class AndroidHubBridge(
             "add_binary_content" -> addBinaryContent(requirePayloadArgs(args)).toString()
             "pick_file" -> importPickedFile()?.let(::localContentJson)?.toString() ?: "null"
             "copy_local_content" -> JSONObject.quote(copyLocalContent(args))
+            "copy_peer_content" -> JSONObject.quote(copyPeerContent(args))
+            "save_peer_content_as" -> savePeerContentAs(args)?.let(JSONObject::quote) ?: "null"
             "remove_content" -> {
                 removeContent(args)
                 "null"
@@ -149,9 +157,10 @@ class AndroidHubBridge(
 
         val uri = clipboardPrimaryUri() ?: error("El portapapeles no contiene texto ni archivo")
         val item = withContext(Dispatchers.IO) {
-            container.localContentFactory.fromUri(uri)
+            container.localContentFactory.fromUri(uri, deferLargeImagePreview = true)
         } ?: error("No se pudo importar el archivo del portapapeles")
         container.contentRepository.addLocalContent(item)
+        scheduleDeferredPreviewRefresh(item)
         Log.i(TAG, "Imported clipboard URI into main hub: $uri")
         return localContentJson(item)
     }
@@ -208,19 +217,39 @@ class AndroidHubBridge(
     }
 
     private suspend fun pullPeerContent(args: JSONObject?): JSONObject {
-        val contentId = args?.optString("content_id").orEmpty()
-        require(contentId.isNotBlank()) { "Peer invalido" }
-        val peer = container.contentRepository.getPeer(contentId) ?: error("Peer no encontrado")
-        val settings = container.settingsStore.current()
-        require(settings.configured) { "Configura FenixHub antes de recibir contenido" }
-
-        val pulled = container.httpClient.pullContent(peer, settings)
-            .getOrElse { throw IllegalStateException("No se pudo recibir el contenido") }
+        val transfer = resolvePeerTransfer(args)
         val received = withContext(Dispatchers.IO) {
-            container.receivedContentHandler.handle(peer, pulled)
+            container.receivedContentHandler.createLocalContent(transfer.peer, transfer.pulled)
         }
-        container.contentRepository.addLocalContent(received.item)
-        return localContentJson(received.item)
+        container.contentRepository.addLocalContent(received)
+        return localContentJson(received)
+    }
+
+    private suspend fun copyPeerContent(args: JSONObject?): String {
+        val transfer = resolvePeerTransfer(args)
+        return withContext(Dispatchers.IO) {
+            val item = container.receivedContentHandler.createLocalContent(transfer.peer, transfer.pulled)
+            container.receivedContentHandler.copyToSystemClipboard(item)
+        }
+    }
+
+    private suspend fun savePeerContentAs(args: JSONObject?): String? {
+        val transfer = resolvePeerTransfer(args)
+        val fileName = exportFileName(transfer.peer, transfer.pulled)
+        val mimeType = exportMimeType(transfer.peer, transfer.pulled)
+        val targetUri = launchCreateDocument(fileName, mimeType) ?: return null
+
+        withContext(Dispatchers.IO) {
+            activity.contentResolver.openOutputStream(targetUri)?.use { output ->
+                output.write(transfer.pulled.bytes)
+            } ?: error("No se pudo abrir el destino de guardado")
+        }
+
+        return when (transfer.peer.announcement.contentType) {
+            HubContentType.TEXT -> "Texto guardado en el destino elegido"
+            HubContentType.IMAGE -> "Imagen guardada en el destino elegido"
+            HubContentType.FILE -> "Archivo guardado en el destino elegido"
+        }
     }
 
     private suspend fun openOverlay(): Boolean {
@@ -283,12 +312,74 @@ class AndroidHubBridge(
         return args?.optJSONObject("args") ?: args ?: JSONObject()
     }
 
+    private suspend fun resolvePeerTransfer(args: JSONObject?): PeerTransfer {
+        val contentId = args?.optString("content_id").orEmpty()
+        require(contentId.isNotBlank()) { "Peer invalido" }
+        val peer = container.contentRepository.getPeer(contentId) ?: error("Peer no encontrado")
+        val settings = container.settingsStore.current()
+        require(settings.configured) { "Configura FenixHub antes de recibir contenido" }
+
+        val pulled = container.httpClient.pullContent(peer, settings)
+            .getOrElse { throw IllegalStateException("No se pudo recibir el contenido") }
+        return PeerTransfer(peer = peer, pulled = pulled)
+    }
+
+    private fun exportFileName(peer: PeerContent, pulled: PulledContent): String {
+        val preferredName = pulled.fileName?.takeIf(String::isNotBlank)
+            ?: peer.announcement.fileName?.takeIf(String::isNotBlank)
+        if (preferredName != null) {
+            return sanitizeExportFileName(preferredName)
+        }
+
+        val baseName = "fenixhub-${UUID.randomUUID().toString().take(8)}"
+        val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(exportMimeType(peer, pulled))
+            ?: when (peer.announcement.contentType) {
+                HubContentType.TEXT -> "txt"
+                HubContentType.IMAGE -> "jpg"
+                HubContentType.FILE -> "bin"
+            }
+        return "$baseName.$extension"
+    }
+
+    private fun exportMimeType(peer: PeerContent, pulled: PulledContent): String {
+        val rawMimeType = pulled.mimeType?.takeIf(String::isNotBlank)
+            ?: peer.announcement.mimeType?.takeIf(String::isNotBlank)
+            ?: when (peer.announcement.contentType) {
+                HubContentType.TEXT -> "text/plain"
+                HubContentType.IMAGE -> "image/jpeg"
+                HubContentType.FILE -> "application/octet-stream"
+            }
+        return rawMimeType.substringBefore(';').trim()
+    }
+
+    private fun sanitizeExportFileName(fileName: String): String {
+        return fileName.map { ch ->
+            if (ch in charArrayOf('/', '\\', ':', '*', '?', '"', '<', '>', '|')) '_' else ch
+        }.joinToString("").ifBlank { "fenixhub-item" }
+    }
+
     private fun clipboardPrimaryUri(): Uri? {
         val clipboard = activity.getSystemService(ClipboardManager::class.java)
         val clip = clipboard.primaryClip ?: return null
         if (clip.itemCount == 0) return null
         val item = clip.getItemAt(0)
         return item.uri ?: item.intent?.data
+    }
+
+    private fun scheduleDeferredPreviewRefresh(item: LocalContent) {
+        if (item.contentType != HubContentType.IMAGE || item.preview.startsWith("data:image")) {
+            return
+        }
+
+        activity.lifecycleScope.launch(Dispatchers.IO) {
+            val refreshed = container.localContentFactory.refreshDeferredImagePreview(item) ?: return@launch
+            if (refreshed.preview == item.preview) {
+                return@launch
+            }
+
+            container.contentRepository.addLocalContent(refreshed)
+            dispatch("window.__fenixExternalRefresh && window.__fenixExternalRefresh();")
+        }
     }
 
     private fun nullable(value: String?): Any = value ?: JSONObject.NULL
@@ -309,6 +400,11 @@ class AndroidHubBridge(
             currentWebView.evaluateJavascript(script, null)
         }
     }
+
+    private data class PeerTransfer(
+        val peer: PeerContent,
+        val pulled: PulledContent,
+    )
 
     private companion object {
         const val TAG = "FenixHubAndroidBridge"

@@ -47,7 +47,7 @@ class TempClipboardStore(private val context: Context) {
         return item
     }
 
-    fun createFromUri(uri: Uri): LocalContent? {
+    fun createFromUri(uri: Uri, deferLargeImagePreview: Boolean = false): LocalContent? {
         val resolver = context.contentResolver
         val fileName = queryDisplayName(resolver, uri) ?: "fenixhub-${System.currentTimeMillis()}"
         val mimeType = resolver.getType(uri) ?: inferMimeType(uri, resolver) ?: "application/octet-stream"
@@ -62,6 +62,7 @@ class TempClipboardStore(private val context: Context) {
             bytes = bytes,
             mimeType = mimeType,
             fileName = fileName,
+            deferImagePreview = deferLargeImagePreview && contentType == HubContentType.IMAGE && bytes.size >= DEFERRED_IMAGE_PREVIEW_THRESHOLD_BYTES,
         )
     }
 
@@ -101,12 +102,13 @@ class TempClipboardStore(private val context: Context) {
         mimeType: String,
         fileName: String? = null,
         previewOverride: String? = null,
+        deferImagePreview: Boolean = false,
     ): LocalContent {
         val resolvedFileName = fileName ?: defaultFileName(contentType, mimeType, contentId)
         val payloadFile = writePayload(contentId, resolvedFileName, bytes)
         val preview = previewOverride ?: when (contentType) {
             HubContentType.TEXT -> bytes.toString(Charsets.UTF_8).take(80)
-            HubContentType.IMAGE -> PreviewUtils.imagePreviewDataUrl(bytes)
+            HubContentType.IMAGE -> if (deferImagePreview) resolvedFileName else PreviewUtils.imagePreviewDataUrl(bytes, mimeType)
             HubContentType.FILE -> resolvedFileName
         }
         val item = LocalContent(
@@ -121,6 +123,22 @@ class TempClipboardStore(private val context: Context) {
         )
         writeMeta(item)
         return item
+    }
+
+    fun refreshDeferredImagePreview(item: LocalContent): LocalContent? {
+        if (item.contentType != HubContentType.IMAGE || item.preview.startsWith("data:image")) {
+            return item
+        }
+
+        val bytes = runCatching { File(item.cachePath).readBytes() }.getOrNull() ?: return null
+        val preview = PreviewUtils.imagePreviewDataUrl(bytes, item.mimeType)
+        if (preview == item.preview) {
+            return item
+        }
+
+        val updated = item.copy(preview = preview)
+        writeMeta(updated)
+        return updated
     }
 
     private fun writePayload(contentId: String, fileName: String, bytes: ByteArray): File {
@@ -177,5 +195,9 @@ class TempClipboardStore(private val context: Context) {
         return fileName.map { ch ->
             if (ch in charArrayOf('/', '\\', ':', '*', '?', '"', '<', '>', '|')) '_' else ch
         }.joinToString("").ifBlank { "fenixhub-item" }
+    }
+
+    private companion object {
+        const val DEFERRED_IMAGE_PREVIEW_THRESHOLD_BYTES = 4 * 1024 * 1024
     }
 }
