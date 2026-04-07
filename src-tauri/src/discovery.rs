@@ -51,8 +51,14 @@ pub fn start(
                 set.insert(ip);
             }
         }
+        // Always include the LAN IP from network helper as extra safety net
+        if let Some(lan) = crate::network::local_ipv4() {
+            set.insert(IpAddr::V4(lan));
+        }
+        tracing::debug!("Self-filter IPs: {:?}", set);
         set
     };
+    let own_device_name = identity.device_name.clone();
 
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
@@ -61,8 +67,9 @@ pub fn start(
                     announcement,
                     peer_ip,
                 } => {
-                    // Skip self — mDNS multicast reaches ourselves too
-                    if local_ips.contains(&peer_ip) {
+                    // Skip self — filter by both IP and device name
+                    if local_ips.contains(&peer_ip) || announcement.device_name == own_device_name {
+                        tracing::debug!("Skipping own announcement for {}", announcement.content_id);
                         continue;
                     }
                     let id = announcement.content_id.clone();
@@ -106,7 +113,7 @@ pub fn start(
                     announcement,
                     peer_ip,
                 } => {
-                    if local_ips.contains(&peer_ip) {
+                    if local_ips.contains(&peer_ip) || announcement.device_name == own_device_name {
                         continue;
                     }
                     let id = announcement.content_id.clone();

@@ -57,11 +57,8 @@ body {
 }
 
 .hub.collapsed {
-  height: 48px;
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-  border-bottom-left-radius: 18px;
-  border-bottom-right-radius: 18px;
+  height: 34px;
+  border-radius: 17px;
   background:
     radial-gradient(circle at 50% -20%, rgba(94, 140, 244, 0.22), transparent 42%),
     linear-gradient(180deg, rgba(15, 20, 40, 0.96) 0%, rgba(8, 13, 30, 0.98) 100%);
@@ -129,6 +126,11 @@ body {
   background: transparent; color: var(--amber); padding: 0; width: 16px; height: 16px;
   font-size: 13px; font-weight: 700; border: none; border-radius: 3px;
   flex-shrink: 0; line-height: 1;
+}
+.size-warn kbd {
+  background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px; padding: 1px 4px; font-size: 10px; font-family: inherit;
+  color: var(--text); white-space: nowrap;
 }
 
 .setup-fields { display: flex; gap: 7px; width: 100%; }
@@ -330,10 +332,10 @@ button:active { opacity: 0.65; }
 .btn-icon.danger:hover { background: var(--danger-dim); color: var(--danger); }
 
 .hub.collapsed .hub-header {
-  height: 48px;
-  align-items: flex-end;
-  gap: 8px;
-  padding: 0 10px 6px;
+  height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
   border-bottom-color: transparent;
 }
 
@@ -390,8 +392,8 @@ button:active { opacity: 0.65; }
 .tab-panel {
   flex: 1;
   overflow-x: auto;
-  overflow-y: hidden;
-  padding: 8px 11px;
+  overflow-y: visible; /* allow X badges to overflow upward */
+  padding: 2px 11px 8px; /* less top padding — card-grid has its own */
   min-height: 0;
   display: none;
 }
@@ -402,11 +404,12 @@ button:active { opacity: 0.65; }
 .card-grid {
   display: flex;
   flex-direction: row;
-  gap: 6px;
+  gap: 14px; /* extra room for X badge overflow */
   flex-wrap: nowrap;
   align-items: flex-start;
   min-width: min-content;
   width: 100%;
+  padding-top: 8px; /* room for X badge at the top */
 }
 
 /* ── Content card ─────────────────────────────────────────────────────────── */
@@ -425,15 +428,7 @@ button:active { opacity: 0.65; }
   flex-shrink: 0;
   position: relative;
   transition: background 0.12s, border-color 0.12s;
-  overflow: visible; /* allow X badge to sit on the border */
-}
-/* Clip visual content to the card shape while allowing the X badge to overflow */
-.content-card::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: var(--r);
-  pointer-events: none;
+  overflow: hidden;
 }
 .content-card::before {
   content: '';
@@ -446,6 +441,11 @@ button:active { opacity: 0.65; }
 .content-card.broadcasting::before { background: var(--accent); }
 .content-card.peer-card    { border-color: rgba(78,203,113,0.22); background: rgba(78,203,113,0.04); }
 .content-card.peer-card::before    { background: var(--green); }
+.content-card.peer-card.peer-received {
+  border-color: rgba(94,140,244,0.34);
+  background: rgba(94,140,244,0.07);
+}
+.content-card.peer-card.peer-received::before { background: var(--accent); }
 .content-card:hover { background: var(--surface-hover); border-color: rgba(255,255,255,0.15); }
 
 /* card top row: icon + content */
@@ -489,6 +489,16 @@ button:active { opacity: 0.65; }
   cursor: pointer;
 }
 
+.card-image-caption {
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
 .card-body {
   display: flex;
   flex-direction: column;
@@ -514,7 +524,20 @@ button:active { opacity: 0.65; }
   display: flex; align-items: center; gap: 3px;
   white-space: nowrap; overflow: hidden;
 }
-.card-device { display: flex; align-items: center; gap: 3px; }
+.card-device { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+
+.peer-state-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(94,140,244,0.16);
+  border: 1px solid rgba(94,140,244,0.24);
+  color: var(--accent);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
 
 /* card actions — bottom row */
 .card-actions {
@@ -538,20 +561,27 @@ button:active { opacity: 0.65; }
   min-width: 0;
 }
 
-/* X badge sits exactly on the top-right corner of the card border */
+/* card-wrap: positions relative so X badge can overflow the card */
+.card-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+/* X badge on the top-right corner of the card border */
 .btn-delete {
   position: absolute;
-  top: -8px; right: -8px;
+  top: -7px; right: -7px;
   background: rgba(18, 22, 40, 0.96);
   border: 1.5px solid var(--border);
   color: var(--text-dim);
-  padding: 0; width: 18px; height: 18px; border-radius: 50%;
+  padding: 0; width: 17px; height: 17px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   opacity: 0; transition: opacity 0.12s, border-color 0.12s, color 0.12s;
   z-index: 5;
+  cursor: pointer;
 }
-.content-card:hover .btn-delete { opacity: 1; }
-.image-card .btn-delete { opacity: 0.65; }
+.card-wrap:hover .btn-delete { opacity: 1; }
+.card-wrap:has(.image-card) .btn-delete { opacity: 0.65; }
 .btn-delete:hover { border-color: var(--danger); color: var(--danger); opacity: 1 !important; }
 
 .btn-broadcast {
@@ -587,6 +617,35 @@ button:active { opacity: 0.65; }
   font-size: 10px; font-weight: 500; justify-content: center;
 }
 .btn-receive:hover { background: rgba(78,203,113,0.18); opacity: 1; }
+.btn-receive.received {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--border-accent);
+}
+.btn-receive:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.btn-peer-secondary {
+  background: rgba(255,255,255,0.04);
+  color: var(--text-mid);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 500;
+  justify-content: center;
+}
+.btn-peer-secondary:hover {
+  background: rgba(255,255,255,0.08);
+  color: var(--text);
+  opacity: 1;
+}
+.btn-peer-secondary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 
 /* ── Empty state ──────────────────────────────────────────────────────────── */
 

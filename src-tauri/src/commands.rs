@@ -165,6 +165,17 @@ pub async fn add_text_content(
     text: String,
     state: State<'_, HubState>,
 ) -> Result<ContentItemDto, String> {
+    // Deduplicate: return existing item if identical text is already in the hub
+    {
+        let content = state.local_content.read().await;
+        for existing in content.values() {
+            if let ContentData::Text(ref t) = existing.data {
+                if t == &text {
+                    return Ok(ContentItemDto::from(existing));
+                }
+            }
+        }
+    }
     let item = ContentItem::from_text(text);
     if let ContentData::Text(ref t) = item.data {
         temp_store::write_text_content(&item.id, t).ok();
@@ -285,7 +296,7 @@ pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> R
         group_id: identity.group_id(),
         content_id: item.id.clone(),
         device_name: identity.device_name.clone(),
-        preview: item.preview.clone(),
+        preview: preview_for_announcement(item),
         content_type: item.content_type.clone(),
         size_bytes: item.size_bytes,
         file_name: item.file_name.clone(),
@@ -401,54 +412,14 @@ pub async fn get_peers(state: State<'_, HubState>) -> Result<Vec<Announcement>, 
     Ok(peers.values().map(|(a, _)| a.clone()).collect())
 }
 
-/// Pull content from a peer via HTTP and write it to the system clipboard.
+/// Pull content from a peer via HTTP and store it in the local hub history.
 #[tauri::command]
 pub async fn pull_peer_content(
     content_id: String,
     state: State<'_, HubState>,
 ) -> Result<ContentItemDto, String> {
-    let peers = state.peer_content.read().await;
-    let (announcement, peer_ip) = peers.get(&content_id).ok_or("Peer content not found")?;
-    let announcement = announcement.clone();
-    let peer_ip = *peer_ip;
-    drop(peers);
-
-    let identity = state
-        .identity
-        .read()
-        .await
-        .clone()
-        .ok_or("Identity not configured")?;
-
-    let pulled =
-        fenix_hub_core::client::pull_content(peer_ip, announcement.port, &content_id, &identity)
-            .await
-            .map_err(|e| e.to_string())?;
-
-    let item = match announcement.content_type {
-        fenix_hub_core::content::ContentType::Text => {
-            let text = String::from_utf8(pulled.bytes).map_err(|e| e.to_string())?;
-            ContentItem::from_text(text)
-        }
-        fenix_hub_core::content::ContentType::Image => create_temp_binary_item(
-            pulled.bytes,
-            fenix_hub_core::content::ContentType::Image,
-            pulled.file_name.or_else(|| announcement.file_name.clone()),
-            pulled.mime_type.or_else(|| announcement.mime_type.clone()),
-            Some(announcement.preview.clone()),
-        )
-        .map_err(|e| e.to_string())?,
-        fenix_hub_core::content::ContentType::File => create_temp_binary_item(
-            pulled.bytes,
-            fenix_hub_core::content::ContentType::File,
-            pulled.file_name.or_else(|| announcement.file_name.clone()),
-            pulled.mime_type.or_else(|| announcement.mime_type.clone()),
-            Some(announcement.preview.clone()),
-        )
-        .map_err(|e| e.to_string())?,
-    };
-
-    write_item_to_clipboard(&item).map_err(|e| e.to_string())?;
+    let (announcement, peer_ip, pulled) = fetch_peer_payload(&content_id, &state).await?;
+    let item = build_peer_item(&announcement, pulled)?;
 
     // Persist pulled item to disk history
     match &item.data {
@@ -479,10 +450,236 @@ pub async fn pull_peer_content(
     Ok(dto)
 }
 
+#[tauri::command]
+pub async fn copy_peer_content(
+    content_id: String,
+    state: State<'_, HubState>,
+) -> Result<(), String> {
+    let (announcement, peer_ip, pulled) = fetch_peer_payload(&content_id, &state).await?;
+    let item = build_peer_item(&announcement, pulled)?;
+    write_item_to_clipboard(&item).map_err(|e| e.to_string())?;
+    tracing::info!(
+        "Copied {} from {} ({}) to clipboard",
+        content_id,
+        announcement.device_name,
+        peer_ip
+    );
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct SaveContentResult {
+    pub saved: bool,
+    pub path: Option<String>,
+}
+
+#[tauri::command]
+pub async fn save_peer_content_as(
+    content_id: String,
+    state: State<'_, HubState>,
+) -> Result<SaveContentResult, String> {
+    let (announcement, peer_ip, pulled) = fetch_peer_payload(&content_id, &state).await?;
+    let suggested_name = suggested_peer_file_name(&announcement, &pulled);
+
+    let Some(target_path) = rfd::FileDialog::new()
+        .set_file_name(&suggested_name)
+        .save_file()
+    else {
+        return Ok(SaveContentResult {
+            saved: false,
+            path: None,
+        });
+    };
+
+    std::fs::write(&target_path, &pulled.bytes).map_err(|e| e.to_string())?;
+
+    tracing::info!(
+        "Saved {} from {} ({}) to {}",
+        content_id,
+        announcement.device_name,
+        peer_ip,
+        target_path.display()
+    );
+
+    Ok(SaveContentResult {
+        saved: true,
+        path: Some(target_path.to_string_lossy().to_string()),
+    })
+}
+
+#[tauri::command]
+pub async fn save_local_content_as(
+    id: String,
+    state: State<'_, HubState>,
+) -> Result<SaveContentResult, String> {
+    let content = state.local_content.read().await;
+    let item = content.get(&id).ok_or("Content not found")?;
+    let suggested_name = item
+        .file_name
+        .clone()
+        .unwrap_or_else(|| default_file_name(item.content_type.clone(), item.mime_type.as_deref(), &item.id));
+
+    let Some(target_path) = rfd::FileDialog::new()
+        .set_file_name(&suggested_name)
+        .save_file()
+    else {
+        return Ok(SaveContentResult {
+            saved: false,
+            path: None,
+        });
+    };
+
+    save_item_to_path(item, &target_path).map_err(|e| e.to_string())?;
+    tracing::info!("Saved local item {} to {}", id, target_path.display());
+
+    Ok(SaveContentResult {
+        saved: true,
+        path: Some(target_path.to_string_lossy().to_string()),
+    })
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+async fn fetch_peer_payload(
+    content_id: &str,
+    state: &State<'_, HubState>,
+) -> Result<
+    (
+        Announcement,
+        std::net::IpAddr,
+        fenix_hub_core::client::PulledContent,
+    ),
+    String,
+> {
+    let peers = state.peer_content.read().await;
+    let (announcement, peer_ip) = peers.get(content_id).ok_or("Peer content not found")?;
+    let announcement = announcement.clone();
+    let peer_ip = *peer_ip;
+    drop(peers);
+
+    let identity = state
+        .identity
+        .read()
+        .await
+        .clone()
+        .ok_or("Identity not configured")?;
+
+    let pulled =
+        fenix_hub_core::client::pull_content(peer_ip, announcement.port, content_id, &identity)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    Ok((announcement, peer_ip, pulled))
+}
+
+fn build_peer_item(
+    announcement: &Announcement,
+    pulled: fenix_hub_core::client::PulledContent,
+) -> Result<ContentItem, String> {
+    match announcement.content_type {
+        fenix_hub_core::content::ContentType::Text => {
+            let text = String::from_utf8(pulled.bytes).map_err(|e| e.to_string())?;
+            Ok(ContentItem::from_text(text))
+        }
+        fenix_hub_core::content::ContentType::Image => {
+            let preview = image_preview_data_url(&pulled.bytes, 96, 72)
+                .or_else(|| announcement_preview_data_url(&announcement.preview));
+            create_temp_binary_item(
+                pulled.bytes,
+            fenix_hub_core::content::ContentType::Image,
+            pulled.file_name.or_else(|| announcement.file_name.clone()),
+            pulled.mime_type.or_else(|| announcement.mime_type.clone()),
+                preview.or_else(|| Some(announcement.preview.clone())),
+            )
+            .map_err(|e| e.to_string())
+        }
+        fenix_hub_core::content::ContentType::File => create_temp_binary_item(
+            pulled.bytes,
+            fenix_hub_core::content::ContentType::File,
+            pulled.file_name.or_else(|| announcement.file_name.clone()),
+            pulled.mime_type.or_else(|| announcement.mime_type.clone()),
+            Some(announcement.preview.clone()),
+        )
+        .map_err(|e| e.to_string()),
+    }
+}
+
+fn suggested_peer_file_name(
+    announcement: &Announcement,
+    pulled: &fenix_hub_core::client::PulledContent,
+) -> String {
+    pulled
+        .file_name
+        .clone()
+        .or_else(|| announcement.file_name.clone())
+        .unwrap_or_else(|| {
+            default_file_name(
+                announcement.content_type.clone(),
+                pulled
+                    .mime_type
+                    .as_deref()
+                    .or(announcement.mime_type.as_deref()),
+                &announcement.content_id,
+            )
+        })
+}
+
+fn preview_for_announcement(item: &ContentItem) -> String {
+    if item.content_type != fenix_hub_core::content::ContentType::Image {
+        return item.preview.clone();
+    }
+
+    image_bytes_from_item(item)
+        .and_then(|bytes| image_preview_data_url(&bytes, 36, 28))
+        .unwrap_or_else(|| item.preview.clone())
+}
+
+fn announcement_preview_data_url(preview: &str) -> Option<String> {
+    preview
+        .starts_with("data:image")
+        .then(|| preview.to_string())
+}
+
+fn image_bytes_from_item(item: &ContentItem) -> Option<Vec<u8>> {
+    match &item.data {
+        ContentData::FilePath(path) => std::fs::read(path).ok(),
+        ContentData::Bytes(bytes) => Some(bytes.clone()),
+        _ => None,
+    }
+}
+
+fn image_preview_data_url(bytes: &[u8], max_edge: u32, quality: u8) -> Option<String> {
+    let image = image::load_from_memory(bytes).ok()?;
+    let thumb = image.thumbnail(max_edge, max_edge).to_rgb8();
+    let mut encoded = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, quality);
+    encoder.encode_image(&thumb).ok()?;
+    Some(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(encoded)
+    ))
+}
 
 fn local_ipv4() -> Option<std::net::Ipv4Addr> {
     crate::network::local_ipv4()
+}
+
+fn save_item_to_path(item: &ContentItem, path: &std::path::Path) -> anyhow::Result<()> {
+    match &item.data {
+        ContentData::Text(text) => {
+            std::fs::write(path, text.as_bytes())?;
+        }
+        ContentData::FilePath(source) => {
+            std::fs::copy(source, path)?;
+        }
+        ContentData::Bytes(bytes) => {
+            std::fs::write(path, bytes)?;
+        }
+        ContentData::Empty => {
+            std::fs::write(path, [])?;
+        }
+    }
+    Ok(())
 }
 
 fn write_item_to_clipboard(item: &ContentItem) -> anyhow::Result<()> {
@@ -595,6 +792,100 @@ async fn evict_fifo(state: &State<'_, HubState>) {
         Err(e) => tracing::warn!("FIFO enforcement failed: {}", e),
         _ => {}
     }
+}
+
+/// Add a file by filesystem path — avoids base64 round-trip for drag & drop from Explorer.
+/// Rust reads the bytes directly; the WebView never sees the raw data.
+#[tauri::command]
+pub async fn add_file_by_path(
+    path: String,
+    state: State<'_, HubState>,
+) -> Result<ContentItemDto, String> {
+    let path = std::path::PathBuf::from(&path);
+    // Deduplicate: same source path already in hub → return existing
+    {
+        let content = state.local_content.read().await;
+        for existing in content.values() {
+            if existing.file_name.as_deref() == path.file_name().and_then(|n| n.to_str()) {
+                if let ContentData::FilePath(ref p) = existing.data {
+                    if p == &path { return Ok(ContentItemDto::from(existing)); }
+                }
+            }
+        }
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("fenixhub-item")
+        .to_string();
+    let mime_type = mime_guess::from_path(&path)
+        .first()
+        .map(|m| m.to_string());
+
+    let is_image = mime_type.as_deref().map_or(false, |m| m.starts_with("image/"));
+    let is_text = is_text_mime(mime_type.as_deref(), &file_name);
+
+    let content_type = if is_image {
+        fenix_hub_core::content::ContentType::Image
+    } else {
+        fenix_hub_core::content::ContentType::File
+    };
+
+    // For text files: read as UTF-8 and use text content path (no temp binary copy needed)
+    if is_text {
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let item = fenix_hub_core::content::ContentItem::from_text(text);
+        // Override preview to show filename too: "script.py · def main()…"
+        let mut item = item;
+        item.file_name = Some(file_name.clone());
+        // "script.py · first line of content…" — keep total under 80 chars
+        let content_preview = item.preview.chars().take(60).collect::<String>();
+        item.preview = format!("{} · {}", file_name, content_preview);
+        temp_store::write_text_content(&item.id, match &item.data {
+            ContentData::Text(t) => t,
+            _ => "",
+        }).ok();
+        temp_store::write_item_meta(&item, "text").ok();
+        let dto = ContentItemDto::from(&item);
+        state.local_content.write().await.insert(item.id.clone(), item);
+        evict_fifo(&state).await;
+        return Ok(dto);
+    }
+
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let item = create_temp_binary_item(bytes, content_type, Some(file_name), mime_type, None)
+        .map_err(|e| e.to_string())?;
+    temp_store::write_item_meta(&item, "bytes").ok();
+    let dto = ContentItemDto::from(&item);
+    state.local_content.write().await.insert(item.id.clone(), item);
+    evict_fifo(&state).await;
+    Ok(dto)
+}
+
+fn is_text_mime(mime: Option<&str>, file_name: &str) -> bool {
+    if let Some(m) = mime {
+        if m.starts_with("text/") {
+            return true;
+        }
+        // application/json, application/xml, application/javascript, etc.
+        if matches!(m, "application/json" | "application/xml" | "application/javascript"
+            | "application/typescript" | "application/toml" | "application/yaml") {
+            return true;
+        }
+    }
+    // Fallback: check extension for common text formats mime_guess might miss
+    let ext = std::path::Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(ext.as_str(),
+        "md" | "txt" | "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "json" | "toml"
+        | "yaml" | "yml" | "xml" | "html" | "css" | "sh" | "bash" | "zsh" | "fish"
+        | "go" | "java" | "c" | "h" | "cpp" | "hpp" | "cs" | "rb" | "php" | "swift"
+        | "kt" | "kts" | "lua" | "vim" | "conf" | "ini" | "env" | "gitignore" | "log"
+        | "csv" | "sql"
+    )
 }
 
 /// Resize the hub window from Rust (bypasses `resizable: false` JS restriction).

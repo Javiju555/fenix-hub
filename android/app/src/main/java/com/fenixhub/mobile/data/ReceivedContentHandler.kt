@@ -19,7 +19,16 @@ class ReceivedContentHandler(
     private val tempStore: TempClipboardStore,
 ) {
     fun handle(peer: PeerContent, pulledContent: PulledContent): ReceiveResult {
-        val item = when (peer.announcement.contentType) {
+        val item = createLocalContent(peer, pulledContent)
+
+        return ReceiveResult(
+            item = item,
+            message = copyToSystemClipboard(item),
+        )
+    }
+
+    fun createLocalContent(peer: PeerContent, pulledContent: PulledContent): LocalContent {
+        return when (peer.announcement.contentType) {
             HubContentType.TEXT -> {
                 val text = pulledContent.bytes.toString(Charsets.UTF_8)
                 tempStore.createTextContent(text)
@@ -32,7 +41,6 @@ class ReceivedContentHandler(
                     contentType = HubContentType.IMAGE,
                     mimeType = mimeType,
                     fileName = pulledContent.fileName ?: peer.announcement.fileName,
-                    previewOverride = peer.announcement.preview,
                 )
             }
 
@@ -45,11 +53,6 @@ class ReceivedContentHandler(
                 )
             }
         }
-
-        return ReceiveResult(
-            item = item,
-            message = copyToSystemClipboard(item),
-        )
     }
 
     fun copyToSystemClipboard(item: LocalContent): String {
