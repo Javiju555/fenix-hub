@@ -94,6 +94,7 @@ function upsertPeerAnnouncement(announcement) {
 }
 export async function initAndroid() {
     document.body.classList.add('android-mode');
+    document.addEventListener('contextmenu', event => event.preventDefault());
     ensureNativeBridge();
     window.__fenixExternalRefresh = async () => {
         await refreshState();
@@ -228,6 +229,10 @@ async function invokeMock(cmd, args) {
         }
         case 'copy_local_content':
             return 'Contenido copiado al portapapeles';
+        case 'copy_peer_content':
+            return 'Contenido remoto copiado al portapapeles';
+        case 'save_peer_content_as':
+            return 'Contenido guardado en el destino elegido';
         case 'remove_content':
             mockLocal = mockLocal.filter(item => item.id !== a?.id);
             mockPublished.delete(a?.id);
@@ -522,7 +527,7 @@ function renderLocalContent(area) {
         <span class="a-pane-kicker">Hub local</span>
         <h2>Contenido listo para salir</h2>
       </div>
-      <p>${publishedIds.size > 0 ? `${publishedIds.size} emisiones activas ahora mismo.` : 'Pega, importa o comparte desde cualquier app para llenar tu buffer local.'}</p>
+      <p>${publishedIds.size > 0 ? `${publishedIds.size} emisiones activas ahora mismo.` : 'Pega, importa o comparte desde cualquier app para llenar tu buffer temporal dentro de FenixHub.'}</p>
     </section>
   `;
     if (localContent.length === 0) {
@@ -573,7 +578,7 @@ function renderPeerContent(area) {
         <span class="a-pane-kicker">Red</span>
         <h2>Transmisiones detectadas</h2>
       </div>
-      <p>${onlineDevices.length > 0 ? `${onlineDevices.length} dispositivos anunciando contenido cerca de ti.` : 'En cuanto otro equipo publique algo, aparecera aqui.'}</p>
+      <p>${onlineDevices.length > 0 ? `${onlineDevices.length} dispositivos anunciando contenido cerca de ti.` : 'En cuanto otro equipo publique algo, aparecera aqui.'} El contenido recibido entra primero en el hub temporal.</p>
     </section>
   `;
     if (peerContent.length === 0) {
@@ -597,7 +602,7 @@ function renderPeerContent(area) {
               <span>${formatRelativeTime(item.created_at)}</span>
             </div>
             <div class="a-card-actions">
-              <button class="a-btn a-btn-success" id="btn-pull-${item.content_id}" onclick="window.androidActions.receive('${item.content_id}')">Guardar en local</button>
+              <button class="a-btn a-btn-success" id="btn-pull-${item.content_id}" onclick="window.androidActions.receive('${item.content_id}')">Recibir...</button>
             </div>
           </div>
         </div>`;
@@ -606,13 +611,13 @@ function renderPeerContent(area) {
 }
 function renderMediaPreview(item) {
     if (item.content_type === 'image' && item.preview.startsWith('data:image')) {
-        return `<div class="a-media a-media-image"><img class="a-card-img" src="${item.preview}" alt="" /></div>`;
+        return `<div class="a-media a-media-image a-media-image-local"><img class="a-card-img a-card-img-local" src="${item.preview}" alt="" /></div>`;
     }
     return renderMediaShell(item.content_type, item.file_name || item.preview);
 }
 function renderPeerMediaPreview(item) {
     if (item.content_type === 'image' && item.preview.startsWith('data:image')) {
-        return `<div class="a-media a-media-image"><img class="a-card-img" src="${item.preview}" alt="" /></div>`;
+        return `<div class="a-media a-media-image a-media-image-peer"><img class="a-card-img a-card-img-peer" src="${item.preview}" alt="" /></div>`;
     }
     return renderMediaShell(item.content_type, item.file_name || item.preview);
 }
@@ -731,6 +736,38 @@ function openDirectSheet(contentId) {
         });
     });
 }
+function openReceiveSheet(contentId) {
+    const peer = peerContent.find(item => item.content_id === contentId);
+    if (!peer) {
+        showToast('Peer no encontrado');
+        return;
+    }
+    const backdrop = createSheet(`
+    <div class="a-sheet-handle"></div>
+    <div class="a-sheet-title">Recibir contenido</div>
+    <p class="a-sheet-copy">${escapeHtml(peer.file_name || compactLabel(peer.preview))}</p>
+    <button class="a-sheet-btn" data-action="import">${iconInbox(20)} Guardar en hub temporal</button>
+    <button class="a-sheet-btn" data-action="copy">${iconClipboard(20)} ${copyPeerActionLabel(peer.content_type)}</button>
+    <button class="a-sheet-btn" data-action="save-as">${iconFile(20)} ${saveAsPeerActionLabel(peer.content_type)}</button>
+    <button class="a-sheet-btn danger" data-action="cancel">Cancelar</button>
+  `);
+    const close = () => backdrop.remove();
+    backdrop.querySelectorAll('.a-sheet-btn').forEach(button => {
+        button.addEventListener('click', () => {
+            const action = button.dataset.action;
+            close();
+            if (action === 'import') {
+                void importPeerToHub(contentId);
+            }
+            else if (action === 'copy') {
+                void copyPeerToClipboard(contentId);
+            }
+            else if (action === 'save-as') {
+                void savePeerAs(contentId);
+            }
+        });
+    });
+}
 async function pickNativeFile() {
     try {
         const item = await invoke('pick_file');
@@ -761,6 +798,39 @@ async function addBrowserFile(file) {
     updateUI();
     showToast(file.type.startsWith('image/') ? 'Imagen añadida al hub' : 'Archivo añadido al hub');
 }
+async function importPeerToHub(id) {
+    try {
+        const received = await invoke('pull_peer_content', { content_id: id });
+        localContent = [received, ...localContent.filter(item => item.id !== received.id)];
+        syncDerivedState();
+        updateUI();
+        showToast(receiveSuccessMessage(received));
+        await refreshStateIfNative();
+    }
+    catch (error) {
+        showToast(errorMessage(error));
+    }
+}
+async function copyPeerToClipboard(id) {
+    try {
+        const message = await invoke('copy_peer_content', { content_id: id });
+        showToast(message || 'Contenido copiado al portapapeles');
+    }
+    catch (error) {
+        showToast(errorMessage(error));
+    }
+}
+async function savePeerAs(id) {
+    try {
+        const message = await invoke('save_peer_content_as', { content_id: id });
+        if (message) {
+            showToast(message);
+        }
+    }
+    catch (error) {
+        showToast(errorMessage(error));
+    }
+}
 async function fileToBase64(file) {
     const buffer = await file.arrayBuffer();
     let binary = '';
@@ -776,16 +846,15 @@ async function imageFileToPreview(file) {
     if (!bitmap)
         return undefined;
     const canvas = document.createElement('canvas');
-    canvas.width = 72;
-    canvas.height = 72;
+    const maxEdge = 1600;
+    const scale = Math.min(maxEdge / bitmap.width, maxEdge / bitmap.height, 1);
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
     const ctx = canvas.getContext('2d');
     if (!ctx)
         return undefined;
-    const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
-    const width = bitmap.width * scale;
-    const height = bitmap.height * scale;
-    ctx.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
-    return canvas.toDataURL('image/jpeg', 0.58);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/webp', 0.92);
 }
 function createSheet(innerHtml) {
     const backdrop = document.createElement('div');
@@ -866,27 +935,7 @@ window.androidActions = {
         }
     },
     async receive(id) {
-        const button = document.getElementById(`btn-pull-${id}`);
-        if (button) {
-            button.disabled = true;
-            button.textContent = 'Obteniendo...';
-        }
-        try {
-            const received = await invoke('pull_peer_content', { content_id: id });
-            localContent = [received, ...localContent.filter(item => item.id !== received.id)];
-            peerContent = peerContent.filter(item => item.content_id !== id);
-            syncDerivedState();
-            updateUI();
-            showToast('Descarga completada');
-            await refreshStateIfNative();
-        }
-        catch (error) {
-            if (button) {
-                button.disabled = false;
-                button.textContent = 'Guardar en local';
-            }
-            showToast(errorMessage(error));
-        }
+        openReceiveSheet(id);
     },
     async openOverlay() {
         try {
@@ -972,6 +1021,25 @@ function contentTypeLabel(type) {
     if (type === 'image')
         return 'Imagen';
     return 'Archivo';
+}
+function receiveSuccessMessage(item) {
+    if (item.content_type === 'text') {
+        return 'Texto importado al hub temporal';
+    }
+    if (item.content_type === 'image') {
+        return 'Imagen importada al hub temporal';
+    }
+    return 'Archivo importado al hub temporal';
+}
+function copyPeerActionLabel(type) {
+    if (type === 'text')
+        return 'Copiar texto';
+    return 'Copiar al portapapeles';
+}
+function saveAsPeerActionLabel(type) {
+    if (type === 'text')
+        return 'Guardar como TXT...';
+    return 'Guardar como...';
 }
 function compactLabel(value) {
     const sanitized = value.trim();

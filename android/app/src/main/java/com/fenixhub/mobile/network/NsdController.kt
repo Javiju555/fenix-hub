@@ -16,7 +16,9 @@ import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.HubContentType
 import com.fenixhub.mobile.model.SendMode
 import com.fenixhub.mobile.util.AnnouncementCodec
+import com.fenixhub.mobile.util.PreviewUtils
 import com.fenixhub.mobile.util.TxtRecordCodec
+import java.io.File
 
 class NsdController(
     context: Context,
@@ -234,7 +236,7 @@ class NsdController(
             groupId = settings.groupId,
             contentId = item.contentId,
             deviceName = settings.deviceName,
-            preview = item.preview,
+            preview = previewForAnnouncement(item),
             contentType = item.contentType,
             sizeBytes = item.sizeBytes,
             fileName = item.fileName,
@@ -359,5 +361,17 @@ class NsdController(
         const val MAX_ANNOUNCEMENT_FILE_NAME_CHARS = 80
         const val MIN_ANNOUNCEMENT_PREVIEW_CHARS = 24
         const val ANNOUNCEMENT_PREVIEW_TRIM_STEP = 8
+    }
+
+    private fun previewForAnnouncement(item: LocalContent): String {
+        if (item.contentType != HubContentType.IMAGE) {
+            return item.preview
+        }
+
+        return runCatching {
+            PreviewUtils.imageAnnouncementPreviewDataUrl(File(item.cachePath).readBytes())
+        }.getOrElse {
+            item.fileName?.let { fileName -> "Imagen: ${fileName.take(48)}" } ?: "Imagen lista para descargar"
+        }
     }
 }

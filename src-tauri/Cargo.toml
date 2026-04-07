@@ -35,8 +35,12 @@ arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 # Config/data directory resolution (~/.config, %APPDATA%, etc.)
 dirs = "6"
+# MIME type detection from file extension
+mime_guess = "2"
 # Local network interface IP enumeration (for self-peer filtering)
 local-ip-address = "0.6"
+# Native save dialog for peer exports
+rfd = "0.15"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
