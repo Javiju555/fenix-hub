@@ -33,7 +33,7 @@
     },
     "trayIcon": {
       "id": "main",
-      "iconPath": "icons/32x32.png",
+      "iconPath": "icons/logo-mark.png",
       "iconAsTemplate": false,
       "tooltip": "FenixHub — portapapeles efímero"
     }

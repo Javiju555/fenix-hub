@@ -116,7 +116,6 @@ let onlineDevices = [];
 let activeTab = 'local';
 let collapsed = false;
 let selectedDeviceType = 'desktop';
-const receivedPeerLocalIds = new Map();
 const dragPayloadCache = new Map();
 const DEVICE_TYPES = [
     { id: 'desktop', label: 'Desktop', icon: () => svg(18, '0 0 20 18', '<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>') },
@@ -146,7 +145,6 @@ async function loadContent() {
         invoke('get_peers'),
     ]);
     onlineDevices = [...new Set(peerContent.map(p => p.device_name))];
-    pruneReceivedPeers();
 }
 // ── Tauri events ──────────────────────────────────────────────────────────────
 function setupEventListeners() {
@@ -159,14 +157,12 @@ function setupEventListeners() {
         peerContent = [...peerContent.filter(p => p.content_id !== ann.content_id), ann];
         if (!onlineDevices.includes(ann.device_name))
             onlineDevices = [...onlineDevices, ann.device_name];
-        pruneReceivedPeers();
         updateHeader();
         if (activeTab === 'red')
             renderPeerContent();
     });
     listen('peer-content-gone', ({ payload }) => {
         peerContent = peerContent.filter(p => p.content_id !== payload.content_id);
-        receivedPeerLocalIds.delete(payload.content_id);
         if (!peerContent.some(p => p.device_name === payload.device_name))
             onlineDevices = onlineDevices.filter(d => d !== payload.device_name);
         updateHeader();
@@ -429,24 +425,6 @@ function updateHeader() {
         txt.textContent = 'Buscando…';
     }
 }
-function pruneReceivedPeers() {
-    const livePeerIds = new Set(peerContent.map(item => item.content_id));
-    for (const [peerId, localId] of [...receivedPeerLocalIds.entries()]) {
-        if (!livePeerIds.has(peerId) || !localContent.some(item => item.id === localId)) {
-            receivedPeerLocalIds.delete(peerId);
-        }
-    }
-}
-function getReceivedLocalId(peerId) {
-    const localId = receivedPeerLocalIds.get(peerId);
-    if (!localId)
-        return null;
-    if (!localContent.some(item => item.id === localId)) {
-        receivedPeerLocalIds.delete(peerId);
-        return null;
-    }
-    return localId;
-}
 // ── Local panel ───────────────────────────────────────────────────────────────
 function renderLocalContent() {
     const container = document.getElementById('panel-local');
@@ -526,11 +504,6 @@ function renderLocalContent() {
             const id = btn.dataset.id;
             await invoke('remove_content', { id });
             publishedIds.delete(id);
-            for (const [peerId, localId] of [...receivedPeerLocalIds.entries()]) {
-                if (localId === id) {
-                    receivedPeerLocalIds.delete(peerId);
-                }
-            }
             localContent = localContent.filter(i => i.id !== id);
             updateHeader();
             renderLocalContent();
@@ -604,7 +577,6 @@ function renderLocalContent() {
 function renderPeerContent() {
     const container = document.getElementById('panel-red');
     updateHeader();
-    pruneReceivedPeers();
     if (peerContent.length === 0) {
         container.innerHTML = `
       <div class="empty-state">
@@ -614,8 +586,6 @@ function renderPeerContent() {
         return;
     }
     container.innerHTML = `<div class="card-grid">${peerContent.map(item => {
-        const receivedLocalId = getReceivedLocalId(item.content_id);
-        const received = receivedLocalId !== null;
         const isImg = item.preview.startsWith('data:image');
         const topContent = isImg
             ? `<img class="card-thumb" src="${item.preview}" />`
@@ -626,16 +596,14 @@ function renderPeerContent() {
            </div>
          </div>`;
         return `
-    <div class="content-card peer-card${received ? ' peer-received' : ''}">
+    <div class="content-card peer-card">
       ${topContent}
       <div class="card-meta card-device">
         ${iconDevice(9)} ${escapeHtml(item.device_name)} · ${humanSize(item.size_bytes)}
-        ${received ? '<span class="peer-state-badge">recibido</span>' : ''}
       </div>
       <div class="card-actions">
-        <button class="btn-receive${received ? ' received' : ''}" data-peer-action="receive" data-id="${item.content_id}" ${received ? 'disabled' : ''}>${iconDownload(9)} ${received ? 'Recibido' : 'Recibir'}</button>
-        <button class="btn-peer-secondary" data-peer-action="copy" data-id="${item.content_id}" title="${received ? 'Copiar al portapapeles' : 'Recibe primero para copiar'}" ${received ? '' : 'disabled'}>${iconCopy(9)} Copiar</button>
-        <button class="btn-peer-secondary" data-peer-action="save" data-id="${item.content_id}" title="${received ? 'Guardar como' : 'Recibe primero para guardar'}" ${received ? '' : 'disabled'}>${iconSave(9)} Guardar</button>
+        <button class="btn-peer-secondary" data-peer-action="copy" data-id="${item.content_id}">${iconCopy(9)} Copiar</button>
+        <button class="btn-peer-secondary" data-peer-action="save" data-id="${item.content_id}">${iconSave(9)} Guardar</button>
       </div>
     </div>`;
     }).join('')}</div>`;
@@ -646,35 +614,14 @@ function renderPeerContent() {
             const previousMarkup = btn.innerHTML;
             btn.disabled = true;
             try {
-                if (action === 'receive') {
-                    btn.textContent = 'Recibiendo…';
-                    const received = await invoke('pull_peer_content', peerCommandArgs(id));
-                    receivedPeerLocalIds.set(id, received.id);
-                    localContent = [received, ...localContent.filter(item => item.id !== received.id)];
-                    updateHeader();
-                    renderPeerContent();
-                    renderLocalContent();
-                    void autoCopyReceivedPeer(id, received.id);
-                    return;
-                }
                 if (action === 'copy') {
-                    const localId = getReceivedLocalId(id);
-                    if (!localId) {
-                        renderPeerContent();
-                        return;
-                    }
                     btn.textContent = 'Copiando…';
-                    await invoke('write_local_to_clipboard', { id: localId });
+                    await invoke('copy_peer_content', peerCommandArgs(id));
                     flashPeerAction(btn, 'Copiado');
                     return;
                 }
-                const localId = getReceivedLocalId(id);
-                if (!localId) {
-                    renderPeerContent();
-                    return;
-                }
                 btn.textContent = 'Guardando…';
-                const result = await invoke('save_local_content_as', { id: localId });
+                const result = await invoke('save_peer_content_as', peerCommandArgs(id));
                 if (result.saved) {
                     flashPeerAction(btn, 'Guardado');
                 }
@@ -696,32 +643,6 @@ function renderPeerContent() {
             }
         });
     });
-}
-async function autoCopyReceivedPeer(peerId, localId) {
-    const copyButton = document.querySelector(`[data-peer-action="copy"][data-id="${peerId}"]`);
-    if (copyButton) {
-        copyButton.disabled = true;
-        copyButton.textContent = 'Copiando…';
-    }
-    try {
-        await invoke('write_local_to_clipboard', { id: localId });
-        if (copyButton && copyButton.isConnected) {
-            copyButton.textContent = 'Auto-copiado';
-        }
-    }
-    catch (error) {
-        console.error('auto copy after receive failed:', error);
-        if (copyButton && copyButton.isConnected) {
-            copyButton.textContent = 'Copiar';
-            copyButton.disabled = false;
-        }
-        return;
-    }
-    window.setTimeout(() => {
-        if (activeTab === 'red') {
-            renderPeerContent();
-        }
-    }, 900);
 }
 function flashPeerAction(button, label) {
     button.textContent = label;
@@ -751,9 +672,6 @@ function iconBroadcast(s) {
 }
 function iconX(s) {
     return svg(s, '0 0 14 14', '<line x1="2" y1="2" x2="12" y2="12" stroke-width="2"/><line x1="12" y1="2" x2="2" y2="12" stroke-width="2"/>');
-}
-function iconDownload(s) {
-    return svg(s, '0 0 16 16', '<polyline points="4,7 8,11 12,7" stroke-width="1.8"/><line x1="8" y1="3" x2="8" y2="11" stroke-width="1.8"/><line x1="2" y1="13" x2="14" y2="13" stroke-width="1.8"/>');
 }
 function iconCopy(s) {
     return svg(s, '0 0 16 16', '<rect x="5" y="3" width="8" height="10" rx="1.6" stroke-width="1.6"/><path d="M3.5,11.5 H3 a1.5,1.5 0 0 1 -1.5,-1.5 V4.5 A1.5,1.5 0 0 1 3,3 h5" stroke-width="1.6"/>');

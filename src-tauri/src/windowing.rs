@@ -91,41 +91,91 @@ fn create_hub_window(app: &AppHandle) -> Result<WebviewWindow> {
         .ok_or_else(|| anyhow!("Hub window configuration not found"))?;
 
     let window = tauri::WebviewWindowBuilder::from_config(app, &window_config)?.build()?;
+
+    // Mark as a utility window so compositors (GNOME/Mutter, KWin, Hyprland)
+    // float it automatically, respect set_position, and hide it from the taskbar.
+    #[cfg(target_os = "linux")]
+    set_utility_type_hint(&window);
+
     attach_hub_window_handlers(&window, app);
     Ok(window)
 }
 
+#[cfg(target_os = "linux")]
+fn set_utility_type_hint(window: &WebviewWindow) {
+    use gtk::prelude::GtkWindowExt;
+    if let Ok(gtk_win) = window.gtk_window() {
+        gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Utility);
+    }
+}
+
 fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
     let _ = window.unminimize();
+    // Set AOT + position BEFORE show() so the WM receives the position hint
+    // before it runs its placement algorithm.  On GNOME/Mutter this is the only
+    // reliable way — calling set_position after show() races with smart-placement.
+    window.set_always_on_top(true)?;
     position_hub_window_top(window);
     window.show()?;
     window.set_focus()?;
+
+    // Re-apply after the WM finishes its async placement pass.  80 ms is usually
+    // enough for Mutter; 200 ms covers slower compositors.
+    let w = window.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = w.set_always_on_top(true);
+        position_hub_window_top(&w);
+    });
+
     Ok(())
 }
 
 /// Position the hub window at the top-center of the primary monitor.
 pub(crate) fn position_hub_window_top(window: &WebviewWindow) {
-    if let Ok(Some(monitor)) = window.primary_monitor() {
-        let screen_w = monitor.size().width as i32;
-        let scale = monitor.scale_factor();
-        // Prefer measured physical width, but hidden windows may still report 0 on some backends.
-        let win_w = window
-            .outer_size()
-            .ok()
-            .map(|s| s.width as i32)
-            .filter(|width| *width > 0)
-            .or_else(|| {
-                window
-                    .inner_size()
-                    .ok()
-                    .map(|s| s.width as i32)
-                    .filter(|width| *width > 0)
-            })
-            .unwrap_or((820.0 * scale) as i32);
-        let x = (screen_w - win_w) / 2;
-        let y = (8.0 * scale) as i32; // 8 logical px from top
-        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-    }
+    let monitor_result = window.primary_monitor();
+    let monitor = match monitor_result {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            tracing::warn!("position_hub_window_top: primary_monitor() returned None");
+            // Fallback: try any available monitor.
+            match window.available_monitors() {
+                Ok(monitors) if !monitors.is_empty() => monitors.into_iter().next().unwrap(),
+                _ => {
+                    tracing::warn!("position_hub_window_top: no monitors available, skipping");
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("position_hub_window_top: primary_monitor() error: {}", e);
+            return;
+        }
+    };
+
+    let screen_w = monitor.size().width as i32;
+    let scale = monitor.scale_factor();
+    // Prefer measured physical width, but hidden windows may still report 0 on some backends.
+    let win_w = window
+        .outer_size()
+        .ok()
+        .map(|s| s.width as i32)
+        .filter(|width| *width > 0)
+        .or_else(|| {
+            window
+                .inner_size()
+                .ok()
+                .map(|s| s.width as i32)
+                .filter(|width| *width > 0)
+        })
+        .unwrap_or((820.0 * scale) as i32);
+    let x = (screen_w - win_w) / 2;
+    let y = (8.0 * scale) as i32; // 8 logical px from top
+    tracing::debug!(
+        "position_hub_window_top: screen_w={} win_w={} scale={} → x={} y={}",
+        screen_w, win_w, scale, x, y
+    );
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
 async fn close_hub_ui_state(state: &HubState) -> Result<()> {
