@@ -12,7 +12,7 @@ use crate::windowing;
 use fenix_hub_core::identity::GroupIdentity;
 use fenix_hub_core::protocol::Announcement;
 use fenix_hub_daemon::daemon::DaemonEvent;
-use fenix_hub_daemon::mdns::start_discovery;
+use fenix_hub_daemon::mdns::{start_discovery, start_presence_discovery};
 
 /// Tauri event payloads (must be Serialize for emit)
 
@@ -38,9 +38,14 @@ pub fn start(
 ) {
     let (tx, mut rx) = mpsc::channel::<DaemonEvent>(64);
 
-    if let Err(e) = start_discovery(mdns, identity.group_id(), tx) {
+    if let Err(e) = start_discovery(mdns.clone(), identity.group_id(), tx.clone()) {
         tracing::error!("Failed to start mDNS discovery: {}", e);
         return;
+    }
+
+    if let Err(e) = start_presence_discovery(mdns, identity.group_id(), tx) {
+        tracing::warn!("Failed to start presence discovery: {}", e);
+        // non-fatal — content discovery still works
     }
 
     // Collect local IPs once to filter self-announcements.
@@ -130,7 +135,12 @@ pub fn start(
                         },
                     );
                 }
-                _ => {}
+                DaemonEvent::PeerOnline { device_name } => {
+                    let _ = app.emit("peer-online", &device_name);
+                }
+                DaemonEvent::PeerOffline { device_name } => {
+                    let _ = app.emit("peer-offline", &device_name);
+                }
             }
         }
     });
