@@ -91,6 +91,17 @@ pub fn run() {
             // Here we just need to start discovery if an identity was found.
             if let Ok(guard) = state.identity.try_read() {
                 if let Some(ref identity) = *guard {
+                    // Register presence beacon so peers see this device immediately.
+                    if let Some(lan_ip) = network::local_ipv4() {
+                        if let Err(e) = fenix_hub_daemon::mdns::announce_device_presence(
+                            &mdns,
+                            &identity.device_name,
+                            &identity.group_id(),
+                            lan_ip,
+                        ) {
+                            tracing::warn!("Failed to register presence beacon: {e}");
+                        }
+                    }
                     discovery::start(
                         app_handle.clone(),
                         mdns.clone(),

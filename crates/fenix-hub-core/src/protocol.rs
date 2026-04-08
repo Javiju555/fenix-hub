@@ -100,5 +100,9 @@ pub const HMAC_HEADER: &str = "X-FenixHub-Auth";
 /// Absent on legacy peers (protocol_version == 0).
 pub const ENCRYPTED_HEADER: &str = "X-FenixHub-Encrypted";
 
-/// mDNS service type for FenixHub.
+/// mDNS service type for FenixHub content announcements.
 pub const MDNS_SERVICE_TYPE: &str = "_fenixhub._tcp.local.";
+
+/// mDNS service type for device presence beacons (no content).
+/// Announced from daemon start so peers appear in the UI before sharing anything.
+pub const MDNS_PRESENCE_TYPE: &str = "_fenixhub-presence._tcp.local.";
