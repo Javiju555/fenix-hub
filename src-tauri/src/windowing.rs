@@ -124,6 +124,12 @@ fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
     let w = window.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Skip if the user already collapsed the window to pill mode.
+        // Pill physical width is ~560 px; expanded is ~1640 px.
+        let size = w.outer_size().unwrap_or_default();
+        if size.width > 0 && size.width < 800 {
+            return;
+        }
         let _ = w.set_always_on_top(true);
         position_hub_window_top(&w);
     });
@@ -155,20 +161,11 @@ pub(crate) fn position_hub_window_top(window: &WebviewWindow) {
 
     let screen_w = monitor.size().width as i32;
     let scale = monitor.scale_factor();
-    // Prefer measured physical width, but hidden windows may still report 0 on some backends.
-    let win_w = window
-        .outer_size()
-        .ok()
-        .map(|s| s.width as i32)
-        .filter(|width| *width > 0)
-        .or_else(|| {
-            window
-                .inner_size()
-                .ok()
-                .map(|s| s.width as i32)
-                .filter(|width| *width > 0)
-        })
-        .unwrap_or((820.0 * scale) as i32);
+    // Always center using the expanded width (820 logical px).
+    // outer_size() is unreliable during WM placement and returns the pill width
+    // (~560 px physical) when the window is collapsed, which would produce a
+    // wrong x coordinate and cause jarring jumps.
+    let win_w = (820.0 * scale) as i32;
     let x = (screen_w - win_w) / 2;
     let y = (8.0 * scale) as i32; // 8 logical px from top
     tracing::debug!(
