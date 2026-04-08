@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use tokio::sync::mpsc;
 
 use crate::daemon::DaemonEvent;
-use fenix_hub_core::protocol::{Announcement, MDNS_SERVICE_TYPE};
+use fenix_hub_core::protocol::{Announcement, MDNS_PRESENCE_TYPE, MDNS_SERVICE_TYPE};
 
 /// Announces a content item via mDNS. Returns instance_name for later unannounce.
 const TXT_CHUNK_SIZE: usize = 240;
@@ -49,6 +49,197 @@ pub fn unannounce_content(mdns: &ServiceDaemon, instance_name: &str) -> Result<(
     mdns.unregister(instance_name)?;
     tracing::info!("mDNS: removed announcement {}", instance_name);
     Ok(())
+}
+
+/// Announces device presence via a lightweight `_fenixhub-presence._tcp` beacon.
+/// Returns the instance name for later unregistration.
+pub fn announce_device_presence(
+    mdns: &ServiceDaemon,
+    device_name: &str,
+    group_id: &str,
+    local_ip: std::net::Ipv4Addr,
+) -> Result<String> {
+    let slug = device_name.replace(' ', "-").to_lowercase();
+    let instance_name = format!("fenixhub-presence-{slug}");
+    let host = format!("{slug}.local.");
+    let properties = vec![
+        TxtProperty::from(("device_name", device_name)),
+        TxtProperty::from(("group_id", group_id)),
+    ];
+    let service = ServiceInfo::new(
+        MDNS_PRESENCE_TYPE,
+        &instance_name,
+        &host,
+        IpAddr::V4(local_ip),
+        0u16,
+        properties,
+    )?;
+    mdns.register(service)?;
+    tracing::info!("mDNS: presence beacon registered for {device_name}");
+    Ok(instance_name)
+}
+
+/// Starts presence discovery — emits PeerOnline / PeerOffline events.
+pub fn start_presence_discovery(
+    mdns: ServiceDaemon,
+    group_id: String,
+    event_tx: mpsc::Sender<DaemonEvent>,
+) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = mdns;
+        start_presence_discovery_avahi(group_id, event_tx)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        start_presence_discovery_mdns(mdns, group_id, event_tx)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_presence_discovery_mdns(
+    mdns: ServiceDaemon,
+    group_id: String,
+    event_tx: mpsc::Sender<DaemonEvent>,
+) -> Result<()> {
+    let receiver = mdns.browse(MDNS_PRESENCE_TYPE)?;
+    std::thread::spawn(move || {
+        while let Ok(event) = receiver.recv() {
+            match event {
+                ServiceEvent::ServiceResolved(info) => {
+                    let props = info.get_properties();
+                    let Some(device_name) = props
+                        .get("device_name")
+                        .and_then(|v| v.val_str())
+                        .map(|s| s.to_string())
+                    else {
+                        continue;
+                    };
+                    let peer_group = props
+                        .get("group_id")
+                        .and_then(|v| v.val_str())
+                        .unwrap_or("");
+                    if peer_group != group_id {
+                        continue;
+                    }
+                    tracing::info!("mDNS: peer online: {device_name}");
+                    let _ = event_tx.blocking_send(DaemonEvent::PeerOnline { device_name });
+                }
+                ServiceEvent::ServiceRemoved(_, fullname) => {
+                    if let Some(instance) = fullname.split('.').next() {
+                        if let Some(slug) = instance.strip_prefix("fenixhub-presence-") {
+                            tracing::info!("mDNS: peer offline: {slug}");
+                            let _ = event_tx.blocking_send(DaemonEvent::PeerOffline {
+                                device_name: slug.to_string(),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Linux presence discovery via a second avahi-browse on `_fenixhub-presence._tcp`.
+#[cfg(target_os = "linux")]
+fn start_presence_discovery_avahi(
+    group_id: String,
+    event_tx: mpsc::Sender<DaemonEvent>,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    which_avahi_browse()?;
+
+    let svc_type = MDNS_PRESENCE_TYPE
+        .strip_suffix(".local.")
+        .unwrap_or(MDNS_PRESENCE_TYPE);
+
+    std::thread::spawn(move || {
+        let mut child = match Command::new("stdbuf")
+            .args(["-oL", "avahi-browse", "-r", "-p", "--no-db-lookup", svc_type])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("presence avahi-browse spawn failed: {e}");
+                return;
+            }
+        };
+
+        let reader = BufReader::new(child.stdout.take().expect("stdout piped"));
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            let fields: Vec<&str> = line.splitn(10, ';').collect();
+            if fields.len() < 2 {
+                continue;
+            }
+            match fields[0] {
+                "=" if fields.len() >= 9 => {
+                    let instance = fields[3];
+                    if fields[2] == "IPv6" {
+                        continue;
+                    }
+                    let txt_block = if fields.len() >= 10 { fields[9] } else { "" };
+                    let Some((device_name, peer_group)) = parse_presence_txt(txt_block) else {
+                        continue;
+                    };
+                    if peer_group != group_id || seen.contains(&device_name) {
+                        continue;
+                    }
+                    tracing::info!("avahi: peer online: {device_name}");
+                    seen.insert(device_name.clone());
+                    let _ = instance; // instance name tracked via seen set
+                    let _ = event_tx.blocking_send(DaemonEvent::PeerOnline { device_name });
+                }
+                "-" if fields.len() >= 4 => {
+                    let instance = fields[3];
+                    if let Some(slug) = instance.strip_prefix("fenixhub-presence-") {
+                        // Reconstruct device name from slug is lossy; emit slug so frontend
+                        // can match on the set of known online devices.
+                        let device_key = slug.to_string();
+                        if seen.remove(&device_key) {
+                            tracing::info!("avahi: peer offline: {device_key}");
+                            let _ = event_tx.blocking_send(DaemonEvent::PeerOffline {
+                                device_name: device_key,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// Extracts (device_name, group_id) from an avahi-browse -p TXT block for presence records.
+/// Format: `"device_name=Foo Bar" "group_id=<uuid>"`
+#[cfg(target_os = "linux")]
+fn parse_presence_txt(txt_block: &str) -> Option<(String, String)> {
+    let mut device_name = None;
+    let mut group_id = None;
+
+    // Split on '"' boundaries (avahi wraps each property in quotes)
+    for token in txt_block.split('"') {
+        let token = token.trim();
+        if let Some(v) = token.strip_prefix("device_name=") {
+            device_name = Some(v.to_string());
+        } else if let Some(v) = token.strip_prefix("group_id=") {
+            group_id = Some(v.to_string());
+        }
+    }
+    match (device_name, group_id) {
+        (Some(dn), Some(gid)) if !dn.is_empty() && !gid.is_empty() => Some((dn, gid)),
+        _ => None,
+    }
 }
 
 /// Starts the mDNS discovery loop in a background thread.

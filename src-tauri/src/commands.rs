@@ -418,7 +418,7 @@ pub async fn pull_peer_content(
     content_id: String,
     state: State<'_, HubState>,
 ) -> Result<ContentItemDto, String> {
-    let (announcement, peer_ip, pulled) = fetch_peer_payload(&content_id, &state).await?;
+    let (announcement, peer_ip, pulled) = ensure_peer_cached(&content_id, &state).await?;
     let item = build_peer_item(&announcement, pulled)?;
 
     // Persist pulled item to disk history
@@ -455,7 +455,7 @@ pub async fn copy_peer_content(
     content_id: String,
     state: State<'_, HubState>,
 ) -> Result<(), String> {
-    let (announcement, peer_ip, pulled) = fetch_peer_payload(&content_id, &state).await?;
+    let (announcement, peer_ip, pulled) = ensure_peer_cached(&content_id, &state).await?;
     let item = build_peer_item(&announcement, pulled)?;
     write_item_to_clipboard(&item).map_err(|e| e.to_string())?;
     tracing::info!(
@@ -508,19 +508,28 @@ pub async fn save_peer_content_as(
         });
     };
 
-    // Now download and decrypt.
-    let identity = state
-        .identity
-        .read()
-        .await
-        .clone()
-        .ok_or("Identity not configured")?;
-    let pulled =
-        fenix_hub_core::client::pull_content(peer_ip, announcement.port, &content_id, &identity)
+    // Serve from cache when available; otherwise pull directly to the target
+    // without writing to the cache (avoid duplicating large files on disk).
+    let temp_path = peer_received_path(&content_id, &announcement);
+    if temp_path.exists() {
+        std::fs::copy(&temp_path, &target_path).map_err(|e| e.to_string())?;
+    } else {
+        let identity = state
+            .identity
+            .read()
             .await
-            .map_err(|e| e.to_string())?;
-
-    std::fs::write(&target_path, &pulled.bytes).map_err(|e| e.to_string())?;
+            .clone()
+            .ok_or("Identity not configured")?;
+        let pulled = fenix_hub_core::client::pull_content(
+            peer_ip,
+            announcement.port,
+            &content_id,
+            &identity,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        std::fs::write(&target_path, &pulled.bytes).map_err(|e| e.to_string())?;
+    }
 
     tracing::info!(
         "Saved {} from {} ({}) to {}",
@@ -569,23 +578,64 @@ pub async fn save_local_content_as(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async fn fetch_peer_payload(
+/// Returns the temp path where a received peer file is cached.
+/// `~/.cache/fenix-hub/received/<content_id>[.<ext>]`
+fn peer_received_path(content_id: &str, announcement: &Announcement) -> std::path::PathBuf {
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("fenix-hub")
+        .join("received");
+    let _ = std::fs::create_dir_all(&dir);
+
+    // Derive extension from the file name or MIME type.
+    let ext: Option<String> = announcement
+        .file_name
+        .as_deref()
+        .and_then(|n| std::path::Path::new(n).extension())
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            announcement
+                .mime_type
+                .as_deref()
+                .and_then(|m| mime_guess::get_mime_extensions_str(m))
+                .and_then(|exts| exts.first())
+                .map(|s| s.to_string())
+        });
+
+    match ext {
+        Some(e) => dir.join(format!("{content_id}.{e}")),
+        None => dir.join(content_id),
+    }
+}
+
+/// Pull peer content, using the disk cache when available.
+/// On cache miss the content is fetched, decrypted, and written to disk
+/// before being returned — subsequent calls skip the network entirely.
+async fn ensure_peer_cached(
     content_id: &str,
     state: &State<'_, HubState>,
-) -> Result<
-    (
-        Announcement,
-        std::net::IpAddr,
-        fenix_hub_core::client::PulledContent,
-    ),
-    String,
-> {
+) -> Result<(Announcement, std::net::IpAddr, fenix_hub_core::client::PulledContent), String> {
     let peers = state.peer_content.read().await;
     let (announcement, peer_ip) = peers.get(content_id).ok_or("Peer content not found")?;
     let announcement = announcement.clone();
     let peer_ip = *peer_ip;
     drop(peers);
 
+    let temp_path = peer_received_path(content_id, &announcement);
+
+    if temp_path.exists() {
+        tracing::debug!("Cache hit for {content_id}: {:?}", temp_path);
+        let bytes = std::fs::read(&temp_path).map_err(|e| e.to_string())?;
+        let pulled = fenix_hub_core::client::PulledContent {
+            bytes,
+            file_name: announcement.file_name.clone(),
+            mime_type: announcement.mime_type.clone(),
+        };
+        return Ok((announcement, peer_ip, pulled));
+    }
+
+    tracing::debug!("Cache miss for {content_id}, pulling from {peer_ip}");
     let identity = state
         .identity
         .read()
@@ -597,6 +647,12 @@ async fn fetch_peer_payload(
         fenix_hub_core::client::pull_content(peer_ip, announcement.port, content_id, &identity)
             .await
             .map_err(|e| e.to_string())?;
+
+    if let Err(e) = std::fs::write(&temp_path, &pulled.bytes) {
+        tracing::warn!("Failed to cache {content_id} to {:?}: {e}", temp_path);
+    } else {
+        tracing::debug!("Cached {content_id} → {:?}", temp_path);
+    }
 
     Ok((announcement, peer_ip, pulled))
 }
