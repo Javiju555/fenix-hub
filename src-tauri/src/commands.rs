@@ -478,9 +478,26 @@ pub async fn save_peer_content_as(
     content_id: String,
     state: State<'_, HubState>,
 ) -> Result<SaveContentResult, String> {
-    let (announcement, peer_ip, pulled) = fetch_peer_payload(&content_id, &state).await?;
-    let suggested_name = suggested_peer_file_name(&announcement, &pulled);
+    // Read announcement metadata without downloading yet.
+    let (announcement, peer_ip) = {
+        let peers = state.peer_content.read().await;
+        let (ann, ip) = peers.get(&content_id).ok_or("Peer content not found")?;
+        (ann.clone(), *ip)
+    };
 
+    // Suggest a file name from announcement metadata (no download needed).
+    let suggested_name = announcement
+        .file_name
+        .clone()
+        .unwrap_or_else(|| {
+            default_file_name(
+                announcement.content_type.clone(),
+                announcement.mime_type.as_deref(),
+                &announcement.content_id,
+            )
+        });
+
+    // Show save dialog first — if cancelled, skip the download entirely.
     let Some(target_path) = rfd::FileDialog::new()
         .set_file_name(&suggested_name)
         .save_file()
@@ -490,6 +507,18 @@ pub async fn save_peer_content_as(
             path: None,
         });
     };
+
+    // Now download and decrypt.
+    let identity = state
+        .identity
+        .read()
+        .await
+        .clone()
+        .ok_or("Identity not configured")?;
+    let pulled =
+        fenix_hub_core::client::pull_content(peer_ip, announcement.port, &content_id, &identity)
+            .await
+            .map_err(|e| e.to_string())?;
 
     std::fs::write(&target_path, &pulled.bytes).map_err(|e| e.to_string())?;
 
@@ -604,25 +633,6 @@ fn build_peer_item(
     }
 }
 
-fn suggested_peer_file_name(
-    announcement: &Announcement,
-    pulled: &fenix_hub_core::client::PulledContent,
-) -> String {
-    pulled
-        .file_name
-        .clone()
-        .or_else(|| announcement.file_name.clone())
-        .unwrap_or_else(|| {
-            default_file_name(
-                announcement.content_type.clone(),
-                pulled
-                    .mime_type
-                    .as_deref()
-                    .or(announcement.mime_type.as_deref()),
-                &announcement.content_id,
-            )
-        })
-}
 
 fn preview_for_announcement(item: &ContentItem) -> String {
     if item.content_type != fenix_hub_core::content::ContentType::Image {
