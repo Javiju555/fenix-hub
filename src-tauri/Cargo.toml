@@ -42,5 +42,11 @@ local-ip-address = "0.6"
 # Native save dialog for peer exports
 rfd = "0.15"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# GTK is already a transitive dep of Tauri on Linux; we expose it directly
+# to set window type hints (Utility) so compositors float the window and
+# skip the taskbar without needing WM-specific workarounds.
+gtk = { version = "0.18", package = "gtk" }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
