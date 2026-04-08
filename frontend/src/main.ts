@@ -125,7 +125,8 @@ let identity: IdentityInfo | null = null;
 let localContent: ContentItem[] = [];
 let peerContent:  PeerAnnouncement[] = [];
 let publishedIds  = new Set<string>();
-let onlineDevices: string[] = [];
+let onlineDevices: string[] = [];      // devices with active content
+let presenceDevices = new Set<string>(); // devices seen via presence beacon
 let activeTab: 'local' | 'red' = 'local';
 let collapsed = false;
 let selectedDeviceType = 'desktop';
@@ -189,6 +190,21 @@ function setupEventListeners() {
     updateHeader();
     if (collapsed) expand();
     switchTab('red');
+  });
+  listen<string>('peer-online', ({ payload: deviceName }) => {
+    presenceDevices.add(deviceName);
+    if (!onlineDevices.includes(deviceName)) onlineDevices = [...onlineDevices, deviceName];
+    updateHeader();
+    if (activeTab === 'red') renderPeerContent();
+  });
+  listen<string>('peer-offline', ({ payload: deviceName }) => {
+    presenceDevices.delete(deviceName);
+    // Remove from onlineDevices only if they also have no active content
+    if (!peerContent.some(p => p.device_name === deviceName)) {
+      onlineDevices = onlineDevices.filter(d => d !== deviceName);
+    }
+    updateHeader();
+    if (activeTab === 'red') renderPeerContent();
   });
 }
 

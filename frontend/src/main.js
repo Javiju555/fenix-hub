@@ -112,7 +112,8 @@ let identity = null;
 let localContent = [];
 let peerContent = [];
 let publishedIds = new Set();
-let onlineDevices = [];
+let onlineDevices = []; // devices with active content
+let presenceDevices = new Set(); // devices seen via presence beacon
 let activeTab = 'local';
 let collapsed = false;
 let selectedDeviceType = 'desktop';
@@ -176,6 +177,24 @@ function setupEventListeners() {
         if (collapsed)
             expand();
         switchTab('red');
+    });
+    listen('peer-online', ({ payload: deviceName }) => {
+        presenceDevices.add(deviceName);
+        if (!onlineDevices.includes(deviceName))
+            onlineDevices = [...onlineDevices, deviceName];
+        updateHeader();
+        if (activeTab === 'red')
+            renderPeerContent();
+    });
+    listen('peer-offline', ({ payload: deviceName }) => {
+        presenceDevices.delete(deviceName);
+        // Remove from onlineDevices only if they also have no active content
+        if (!peerContent.some(p => p.device_name === deviceName)) {
+            onlineDevices = onlineDevices.filter(d => d !== deviceName);
+        }
+        updateHeader();
+        if (activeTab === 'red')
+            renderPeerContent();
     });
 }
 // ── Setup screen ──────────────────────────────────────────────────────────────
