@@ -5,6 +5,10 @@ dist/
 *.lock
 !bun.lockb
 src-tauri/icons/
+# Personal auth integration — never committed to the public repo.
+# The stub mod.rs IS tracked; only the real implementation is excluded.
+src-tauri/src/personal/impl.rs
+
 android/local.properties
 android/.gradle/
 android/app/build/
