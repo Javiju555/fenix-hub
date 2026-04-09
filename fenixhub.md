@@ -1,0 +1,8 @@
+Fenix hub, un portapaeles compartido open source
+este sistema, multiplataforma por diseño, tiene como objetivo principal permitir el intercambio de información entre dispositivos de manera segura y eficiente.
+
+Cómo funciona?
+Está diseñado como app nativa multplataforma con Tauri, backend en Rust y frontend en TypeScript con Vite. Mientras, android disfruta de una app nativa con todas las funcionalidades y frontend webview también
+Fenix hub permite tanto con drag & drop como con atajos de teclado pegar archivos de forma local, guardados temporalmente en el archivo temporal que éste tiene. comparte, además, el contenido del portapapeles con otros dispositivos que tengan fenix hub instalado y estén en la misma red local, con un sistema de cifrado AES-256-GCM para garantizar la seguridad de la información y pensamiento de hacerlo offline gracias al mismo sistema de android, quick share... con Bluetooth low enegy (BLE) y wifi direct.
+una vez emitido un archivo, los dispositivos con el mismo passphrase de forma automática son notificados y muestran en la interfaz el contenido del archivo, permitiendo descargarlo o copiarlo. "guardar como" manda el archivo directo con el nombre elegido al directorio elegido, mientras que copiar lo almacena en el portapapeles local si es texto sin formato, o en el directorio temporar FIFO (first in first out) si es un archivo, lanzando automáticamente el prompt de copiado de modo que es un copiado estandar.
+fenix hub está disponible de forma directa en windows bajo un instalador custom también, linux y android, sin planes a futuro en mac debido a la necesidad de desarrollo en mac y el coste de la licencia para poder publicar en la app store.

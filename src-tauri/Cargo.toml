@@ -48,11 +48,5 @@ rfd = "0.15"
 # skip the taskbar without needing WM-specific workarounds.
 gtk = { version = "0.18", package = "gtk" }
 
-[features]
-# Personal auth integration (NFC + face via fenix-authd).
-# Only meaningful on Linux; never enabled in public builds.
-# Source lives in src/personal/ which is gitignored.
-personal = []
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
