@@ -5,9 +5,9 @@ dist/
 *.lock
 !bun.lockb
 src-tauri/icons/
-# Personal auth integration — never committed to the public repo.
-# The stub mod.rs IS tracked; only the real implementation is excluded.
-src-tauri/src/personal/impl.rs
+# Personal Android auth integration (NFC/face via fenix-authd).
+# Lives in android/app/src/main/java/personal/ — never committed.
+android/app/src/main/java/personal/
 
 android/local.properties
 android/.gradle/

@@ -2,7 +2,6 @@ mod commands;
 mod discovery;
 mod network;
 mod persist;
-mod personal;
 mod state;
 mod temp_store;
 mod windowing;
