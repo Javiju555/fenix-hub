@@ -1,51 +1,128 @@
-# FenixHub — Pending tasks before public release
+# FenixHub — Pending tasks / design decisions
 
-## MUST do before publishing to anyone else
+## MUST do before public release
 
 ### Auth / identity
-- [ ] **Remove fenix-auth integration** from the app binary.
-  - Currently included for personal use (Javier's setup only).
-  - Must NOT ship to the public under any circumstances — it is a personal auth
-    system and exposes internal infrastructure assumptions.
-  - Kept until Android version is final and the auth flow is no longer needed
-    for daily use. Remove in a dedicated PR before any public release.
+- [ ] **Remove fenix-auth integration** before any public release.
+  - Lives in `src-tauri/src/personal/impl.rs` (gitignored).
+  - Compiled only with `--features personal` on Linux.
+  - When ready: create a new repo via `git filter-repo` to strip all history
+    that ever touched `src/personal/` before publishing.
+  - To build personal APK from Linux: `cargo tauri android build --features personal`
 
-### Settings window
-- [ ] Implement a **standalone Settings window** (separate Tauri window, not modal).
-  - Identity management: list profiles, create, delete, switch active.
-  - "Delete all data" button (wipes `~/.config/fenix-hub/` and cache).
-  - Should exist as a self-contained window in the app even if, on Fenix Desktop,
-    it integrates into the DE settings panel instead of opening standalone.
-  - Must also exist on Android (as a dedicated settings screen/activity).
+### Clean public repo
+- [ ] Run `git filter-repo --path src-tauri/src/personal --invert` (or equivalent)
+  to produce a history-clean public mirror before the first public release.
 
-### Multi-identity / user profiles
-- [ ] Support multiple identities per installation.
-  - Extend `identity.json` to store a map of profiles + an `active` pointer.
-  - UI in the Settings window: profile list, add / delete / rename, switch.
-  - Useful for separating personal and work contexts without reinstalling.
+---
+
+## Protocol: chunked AEAD + streaming (v2 wire format)
+
+Current limitation: AES-256-GCM puts the auth tag at the end → full file in RAM.
+
+**Target wire format ("FNX2"):**
+```
+Header (29 bytes):
+  magic:          4 B  — b"FNX2"
+  base_nonce:    12 B  — random per transfer
+  total_chunks:   4 B  — u32 BE
+  original_size:  8 B  — u64 BE (pre-compression)
+  compression:    1 B  — 0x00 = none, 0x01 = zstd
+
+Per chunk:
+  nonce:         12 B  — base_nonce XOR chunk_index (u64 padded to 12 B)
+  ciphertext: ≤64 KB
+  tag:           16 B  — GCM auth tag
+```
+
+- Receiver verifies each 64 KB chunk independently → can stream directly to disk.
+- `protocol_version` field in the `Announcement` negotiates old vs new format.
+- Old receivers ignore new senders gracefully (they reject unknown protocol_version).
+- Must be implemented in both Rust (desktop) and Kotlin (Android) simultaneously.
+
+---
+
+## Compression (zstd / Meta)
+
+- Add **before** encryption in the FNX2 sender path.
+- Threshold: files > 10 MB get a compression attempt.
+- Skip if MIME type is already compressed:
+  `image/jpeg`, `image/webp`, `video/*`, `application/zip`, `application/x-7z-compressed`, etc.
+- Skip if compressed size ≥ 95 % of original (no gain).
+- `compression` byte in FNX2 header signals receiver whether to decompress.
+- Rust crate: `zstd = "0.13"` (bindings to libzstd).
+
+---
+
+## BLE + WiFi Direct (runtime detection)
+
+Goal: no compile-time feature flags for distribution. Detect at runtime.
+
+```rust
+pub struct TransportCaps {
+    pub lan: bool,         // always true if any network interface available
+    pub ble: bool,         // BlueZ on Linux, WinRT on Windows, system on Android
+    pub wifi_direct: bool, // wpa_supplicant P2P on Linux, WifiP2pManager on Android
+}
+```
+
+- UI hides BLE/WiFi Direct buttons if capability is absent — no error, just absent.
+- Linux: probe BlueZ via D-Bus (`org.bluez`) for BLE; `wpa_supplicant` P2P for WFD.
+- Android: `BluetoothAdapter.isEnabled()` + `WifiP2pManager` availability.
+- Windows: WinRT `BluetoothAdapter.GetDefaultAsync()`.
+
+Priority: BLE first (simpler, useful for discovery range beyond LAN), WiFi Direct second.
+
+---
+
+## Settings window
+
+- Separate Tauri window, label `"settings"`, ~600×450 px, movable, resizable.
+- Not a modal — independent window that can coexist with the hub.
+- Sections:
+  1. **Identidad** — device name, group ID (read-only), copy group ID button.
+  2. **Perfiles** — list of saved identities, switch active, create new, delete.
+  3. **Servicio** — presence beacon on/off, cache size limit, clear cache.
+  4. **Zona de peligro** — "Eliminar sesión" (wipes `~/.config/fenix-hub/`), "Salir del grupo".
+- Android: equivalent settings screen/activity (same Tauri webview or native).
+
+---
+
+## Multi-user / profiles
+
+```json
+{
+  "active": "javier-personal",
+  "identities": {
+    "javier-personal": { "device_name": "...", "group_id": "...", "key_pair": {...} },
+    "javier-trabajo":  { ... }
+  }
+}
+```
+
+- Switching profile restarts discovery with new group_id.
+- Each profile has its own clipboard history in `~/.cache/fenix-hub/<profile>/`.
+
+---
 
 ## Platform completeness
 
 ### Windows
-- [ ] Verify presence beacon (`_fenixhub-presence._tcp`) discovery works on
-  Windows with the mdns-sd path (no avahi dependency).
-- [ ] Test temp file cache path (`dirs::cache_dir()` → `AppData\Local\...`).
-- [ ] Confirm tray icon and window positioning behave correctly in release build.
+- [ ] Verify presence beacon (`_fenixhub-presence._tcp`) with mdns-sd (no avahi).
+- [ ] Test cache path: `dirs::cache_dir()` → `AppData\Local\fenix-hub\`.
+- [ ] Tray icon + AOT window in release build.
 
 ### Android
-- [ ] WiFi Direct support (v2 feature).
-  - Use `WifiP2pManager` for device-to-device transfer without a router.
-  - Relevant for mobile-to-mobile; desktop stays on LAN/Ethernet.
-- [ ] Settings screen (profile management, delete data).
-- [ ] Presence beacon on Android (mDNS via NsdManager or similar).
+- [ ] Presence beacon via `NsdManager` or `jmDNS`.
+- [ ] Settings screen.
+- [ ] WiFi Direct via `WifiP2pManager`.
+- [ ] Personal auth (`--features personal`) for personal APK builds only.
+
+---
 
 ## Nice to have (post v1)
 
-- [ ] Drag & drop from FenixHub window to other apps (expose cached file path
-  to the webview for a native file drag).
-- [ ] "Guardar como" true streaming to disk (requires chunked AEAD protocol
-  change across all platforms — not compatible with current AES-256-GCM
-  single-blob approach).
-- [ ] Configurable max size for auto-cache (default off for files > N MB).
-- [ ] Cross-network relay (STUN/TURN + DTLS) for v2 multi-user discovery
-  beyond the local LAN — simpler than WiFi Direct for desktop.
+- [ ] Drag & drop out of FenixHub to other apps (expose cached file path for native drag).
+- [ ] Configurable cache FIFO size (currently 30 files hardcoded).
+- [ ] Cross-network relay (STUN/TURN + DTLS) for discovery beyond LAN (v2 multi-user).
+- [ ] macOS port (if ever relevant).
