@@ -457,7 +457,12 @@ pub async fn copy_peer_content(
 ) -> Result<(), String> {
     let (announcement, peer_ip, pulled) = ensure_peer_cached(&content_id, &state).await?;
     let item = build_peer_item(&announcement, pulled)?;
-    write_item_to_clipboard(&item).map_err(|e| e.to_string())?;
+    // Image decode (JPEG → RGBA8 ~48 MB for a 3 MP photo) is CPU-bound and
+    // must not block the async executor.  Move it to a blocking thread.
+    tokio::task::spawn_blocking(move || write_item_to_clipboard(&item))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     tracing::info!(
         "Copied {} from {} ({}) to clipboard",
         content_id,
@@ -667,13 +672,16 @@ fn build_peer_item(
             Ok(ContentItem::from_text(text))
         }
         fenix_hub_core::content::ContentType::Image => {
-            let preview = image_preview_data_url(&pulled.bytes, 96, 72)
-                .or_else(|| announcement_preview_data_url(&announcement.preview));
+            // Use the announcement preview (already a base64 thumbnail) to avoid
+            // a full JPEG decode just to build the local preview.  Only fall back
+            // to generating one from bytes if the announcement has no preview.
+            let preview = announcement_preview_data_url(&announcement.preview)
+                .or_else(|| image_preview_data_url(&pulled.bytes, 96, 72));
             create_temp_binary_item(
                 pulled.bytes,
-            fenix_hub_core::content::ContentType::Image,
-            pulled.file_name.or_else(|| announcement.file_name.clone()),
-            pulled.mime_type.or_else(|| announcement.mime_type.clone()),
+                fenix_hub_core::content::ContentType::Image,
+                pulled.file_name.or_else(|| announcement.file_name.clone()),
+                pulled.mime_type.or_else(|| announcement.mime_type.clone()),
                 preview.or_else(|| Some(announcement.preview.clone())),
             )
             .map_err(|e| e.to_string())

@@ -40,7 +40,10 @@ pub async fn pull_content(
     let sig = identity.sign(content_id.as_bytes());
     let sig_hex = hex::encode(&sig);
 
-    let client = reqwest::Client::new();
+    // Reuse a single client across all pulls — avoids a new TCP handshake per call.
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(reqwest::Client::new);
+
     let response = client
         .get(&url)
         .header(HMAC_HEADER, sig_hex)
