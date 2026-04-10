@@ -20,7 +20,19 @@ use crate::content::ContentType;
 use serde::{Deserialize, Serialize};
 
 /// Current protocol version — bumped whenever the wire format changes.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
+
+/// FNX2 chunked AEAD wire format magic.
+pub const FNX2_MAGIC: &[u8; 4] = b"FNX2";
+
+/// FNX2 header size: magic(4) + base_nonce(12) + total_chunks(4) + original_size(8) + compression(1)
+pub const FNX2_HEADER_SIZE: usize = 29;
+
+/// Chunk size for streaming AEAD (64 KB).
+pub const FNX2_CHUNK_SIZE: usize = 64 * 1024;
+
+pub const FNX2_COMPRESSION_NONE: u8 = 0x00;
+pub const FNX2_COMPRESSION_ZSTD: u8 = 0x01;
 
 /// How content is being shared.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
