@@ -1,6 +1,6 @@
 [package]
 name = "fenix-hub-daemon"
-version = "0.1.0"
+version = "0.2.2"
 edition = "2021"
 description = "FenixHub daemon abstraction: platform-specific background process integration"
 

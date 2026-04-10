@@ -12,7 +12,7 @@ use aes_gcm::{
 use anyhow::Result;
 use rand::RngCore;
 
-use crate::protocol::{FNX2_CHUNK_SIZE, FNX2_HEADER_SIZE};
+use crate::protocol::FNX2_HEADER_SIZE;
 
 /// Size of the AES-GCM nonce in bytes (96-bit, as recommended for GCM).
 pub const NONCE_SIZE: usize = 12;
@@ -97,7 +97,6 @@ impl ChunkEncoder {
             cipher,
             base_nonce,
             chunk_index: 0,
-            chunk_buffer: Vec::with_capacity(FNX2_CHUNK_SIZE + 16),
             total_chunks,
             original_size,
             compression,

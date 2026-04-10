@@ -33,7 +33,11 @@ class ContentRepository {
     fun publish(contentId: String, sendMode: SendMode = SendMode.Broadcast) {
         synchronized(localLock) {
             val current = localItems[contentId] ?: return
-            localItems[contentId] = current.copy(isPublished = true, sendMode = sendMode)
+            localItems[contentId] = current.copy(
+                isPublished = true,
+                publishedAt = System.currentTimeMillis(),
+                sendMode = sendMode,
+            )
             mutableSelectedLocalContentId.value = contentId
             emitLocalContentLocked()
         }
@@ -42,7 +46,7 @@ class ContentRepository {
     fun unpublish(contentId: String) {
         synchronized(localLock) {
             val current = localItems[contentId] ?: return
-            localItems[contentId] = current.copy(isPublished = false)
+            localItems[contentId] = current.copy(isPublished = false, publishedAt = null)
             emitLocalContentLocked()
         }
     }
@@ -50,7 +54,7 @@ class ContentRepository {
     fun unpublishAll() {
         synchronized(localLock) {
             if (localItems.isEmpty()) return
-            localItems.replaceAll { _, current -> current.copy(isPublished = false) }
+            localItems.replaceAll { _, current -> current.copy(isPublished = false, publishedAt = null) }
             emitLocalContentLocked()
         }
     }

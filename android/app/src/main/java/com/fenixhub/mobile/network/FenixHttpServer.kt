@@ -13,6 +13,7 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.server.request.receiveText
 import io.ktor.server.request.header
+import io.ktor.server.request.path
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytesWriter
 import io.ktor.server.response.respondText
@@ -31,6 +32,7 @@ import javax.crypto.spec.SecretKeySpec
 import android.util.Log
 import io.netty.channel.ChannelOption
 import org.json.JSONObject
+import kotlin.math.abs
 
 class FenixHttpServer(
     private val settingsStore: SettingsStore,
@@ -41,6 +43,8 @@ class FenixHttpServer(
         private set
 
     private var engine: ApplicationEngine? = null
+    private val replayNonceLock = Any()
+    private val seenReplayNonces = linkedMapOf<String, Long>()
 
     fun startIfNeeded(): Int {
         activePort?.let { return it }
@@ -67,7 +71,12 @@ class FenixHttpServer(
                         return@get
                     }
 
-                    if (!call.isAuthorized(settings, contentId.toByteArray(Charsets.UTF_8))) {
+                    if (!call.isAuthorized(
+                            settings = settings,
+                            method = "GET",
+                            canonicalPath = "/content/$contentId",
+                            bodyBytes = ByteArray(0),
+                        )) {
                         call.respond(HttpStatusCode.Unauthorized)
                         return@get
                     }
@@ -138,6 +147,7 @@ class FenixHttpServer(
                 post("/auth/challenge") {
                     val settings = call.currentSettingsOrRespond() ?: return@post
                     val rawBody = call.receiveText()
+                    val bodyBytes = rawBody.toByteArray(Charsets.UTF_8)
                     val nonce = runCatching {
                         JSONObject(rawBody).optString("nonce").trim()
                     }.getOrNull()
@@ -146,7 +156,12 @@ class FenixHttpServer(
                         return@post
                     }
 
-                    if (!call.isAuthorized(settings, CryptoUtils.authChallengeHeaderMessage(nonce))) {
+                    if (!call.isAuthorized(
+                            settings = settings,
+                            method = "POST",
+                            canonicalPath = "/auth/challenge",
+                            bodyBytes = bodyBytes,
+                        )) {
                         call.respond(HttpStatusCode.Unauthorized)
                         return@post
                     }
@@ -192,21 +207,91 @@ class FenixHttpServer(
 
     private fun io.ktor.server.application.ApplicationCall.isAuthorized(
         settings: AppSettings,
-        message: ByteArray,
+        method: String,
+        canonicalPath: String,
+        bodyBytes: ByteArray,
     ): Boolean {
-        val receivedHeader = request.header(HMAC_HEADER) ?: return false
-        val expected = CryptoUtils.hmacSha256Hex(settings.macKeyBytes(), message)
-        return CryptoUtils.constantTimeEquals(expected, receivedHeader)
+        val receivedSignature = request.header(CryptoUtils.HMAC_HEADER)?.trim() ?: return false
+        val timestampMs = request.header(CryptoUtils.AUTH_TIMESTAMP_HEADER)
+            ?.trim()
+            ?.toLongOrNull()
+            ?: return false
+        val nonceHex = request.header(CryptoUtils.AUTH_NONCE_HEADER)
+            ?.trim()
+            ?.lowercase()
+            ?: return false
+        val bodyHashHeader = request.header(CryptoUtils.AUTH_BODY_SHA256_HEADER)
+            ?.trim()
+            ?.lowercase()
+            ?: return false
+
+        if (!CryptoUtils.isValidAuthNonceHex(nonceHex)) {
+            return false
+        }
+
+        val expectedBodyHash = if (bodyBytes.isEmpty()) {
+            CryptoUtils.EMPTY_BODY_SHA256_HEX
+        } else {
+            CryptoUtils.sha256Hex(bodyBytes)
+        }
+        if (!CryptoUtils.constantTimeEquals(expectedBodyHash, bodyHashHeader)) {
+            return false
+        }
+
+        val nowMs = System.currentTimeMillis()
+        if (abs(nowMs - timestampMs) > CryptoUtils.AUTH_MAX_SKEW_MS) {
+            return false
+        }
+
+        val canonical = CryptoUtils.canonicalAuthMessage(
+            method = method,
+            path = canonicalPath.ifBlank { request.path() },
+            groupId = settings.groupId,
+            timestampMs = timestampMs,
+            nonceHex = nonceHex,
+            bodySha256Hex = bodyHashHeader,
+        )
+        val expectedSignature = CryptoUtils.hmacSha256Hex(settings.macKeyBytes(), canonical)
+        if (!CryptoUtils.constantTimeEquals(expectedSignature, receivedSignature)) {
+            return false
+        }
+
+        return markReplayNonce(nonceHex, nowMs)
+    }
+
+    private fun markReplayNonce(nonceHex: String, nowMs: Long): Boolean {
+        synchronized(replayNonceLock) {
+            val minTimestamp = nowMs - CryptoUtils.AUTH_MAX_SKEW_MS
+            val staleKeys = seenReplayNonces
+                .filterValues { timestamp -> timestamp < minTimestamp }
+                .keys
+                .toList()
+            staleKeys.forEach(seenReplayNonces::remove)
+
+            if (seenReplayNonces.containsKey(nonceHex)) {
+                return false
+            }
+
+            if (seenReplayNonces.size >= MAX_REPLAY_CACHE_ENTRIES) {
+                val firstKey = seenReplayNonces.keys.firstOrNull()
+                if (firstKey != null) {
+                    seenReplayNonces.remove(firstKey)
+                }
+            }
+
+            seenReplayNonces[nonceHex] = nowMs
+            return true
+        }
     }
 
     private companion object {
         const val TAG = "FenixHubServer"
         const val DEFAULT_PORT = 8765
-        const val HMAC_HEADER = "X-FenixHub-Auth"
         const val ENCRYPTED_HEADER = "X-FenixHub-Encrypted"
         const val NONCE_SIZE = 12
         const val GCM_TAG_BITS = 128
         const val CHUNK_SIZE = 256 * 1024  // 256 KB
+        const val MAX_REPLAY_CACHE_ENTRIES = 8_192
         val secureRandom = SecureRandom()
     }
 }

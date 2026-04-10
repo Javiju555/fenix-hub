@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use anyhow::{anyhow, Result};
 use tauri::{
-    AppHandle, Emitter, Manager, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, Manager, WebviewWindow, WindowEvent,
 };
 
 use fenix_hub_daemon::mdns::unannounce_content;
@@ -10,35 +10,51 @@ use fenix_hub_daemon::mdns::unannounce_content;
 use crate::state::HubState;
 
 const HUB_WINDOW_LABEL: &str = "hub";
+const HUB_EXPANDED_WIDTH: f64 = 820.0;
+const HUB_EXPANDED_HEIGHT: f64 = 185.0;
+const HUB_PILL_WIDTH: f64 = 280.0;
+const HUB_PILL_HEIGHT: f64 = 34.0;
+const HUB_SIZE_EPSILON: f64 = 2.0;
 
 pub fn attach_hub_window_handlers(window: &WebviewWindow, app: &AppHandle) {
     app.state::<HubState>()
         .ui_closing
         .store(false, Ordering::Release);
 
+    enforce_hub_window_constraints(window);
+
     let window_ref = window.clone();
     let app_handle = app.clone();
 
     window.on_window_event(move |event| {
-        if let WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
+        match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
 
-            let state = app_handle.state::<HubState>();
-            if state.ui_closing.swap(true, Ordering::AcqRel) {
-                return;
+                let state = app_handle.state::<HubState>();
+                if state.ui_closing.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+
+                let window = window_ref.clone();
+                let app = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<HubState>();
+                    if let Err(error) = close_hub_ui_state(&state).await {
+                        tracing::warn!("Failed to close hub UI cleanly: {}", error);
+                    }
+                    if let Err(error) = window.destroy() {
+                        tracing::warn!("Failed to destroy hub window: {}", error);
+                    }
+                });
             }
-
-            let window = window_ref.clone();
-            let app = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let state = app.state::<HubState>();
-                if let Err(error) = close_hub_ui_state(&state).await {
-                    tracing::warn!("Failed to close hub UI cleanly: {}", error);
-                }
-                if let Err(error) = window.destroy() {
-                    tracing::warn!("Failed to destroy hub window: {}", error);
-                }
-            });
+            WindowEvent::Resized(_) => {
+                enforce_hub_window_constraints(&window_ref);
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                enforce_hub_window_constraints(&window_ref);
+            }
+            _ => {}
         }
     });
 }
@@ -72,6 +88,7 @@ fn create_hub_window(app: &AppHandle) -> Result<WebviewWindow> {
     #[cfg(target_os = "linux")]
     set_utility_type_hint(&window);
 
+    enforce_hub_window_constraints(&window);
     attach_hub_window_handlers(&window, app);
     Ok(window)
 }
@@ -86,11 +103,8 @@ fn set_utility_type_hint(window: &WebviewWindow) {
 
 fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
     let _ = window.unminimize();
-    // Set AOT + position BEFORE show() so the WM receives the position hint
-    // before it runs its placement algorithm.  On GNOME/Mutter this is the only
-    // reliable way — calling set_position after show() races with smart-placement.
-    window.set_always_on_top(true)?;
-    position_hub_window_top(window, 820.0);
+    // Keep the hub as a fixed-size utility surface with only two valid presets.
+    enforce_hub_window_constraints(window);
     window.show()?;
     window.set_focus()?;
 
@@ -104,12 +118,58 @@ fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
             if size.width > 0 && size.width < 800 {
                 return;
             }
-            let _ = w.set_always_on_top(true);
-            position_hub_window_top(&w, 820.0);
+            enforce_hub_window_constraints(&w);
         });
     }
 
     Ok(())
+}
+
+fn nearest_hub_preset(logical_width: f64, logical_height: f64) -> (f64, f64) {
+    let pill_distance =
+        (logical_width - HUB_PILL_WIDTH).abs() + (logical_height - HUB_PILL_HEIGHT).abs();
+    let expanded_distance = (logical_width - HUB_EXPANDED_WIDTH).abs()
+        + (logical_height - HUB_EXPANDED_HEIGHT).abs();
+
+    if pill_distance < expanded_distance {
+        (HUB_PILL_WIDTH, HUB_PILL_HEIGHT)
+    } else {
+        (HUB_EXPANDED_WIDTH, HUB_EXPANDED_HEIGHT)
+    }
+}
+
+fn enforce_hub_window_constraints(window: &WebviewWindow) {
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_resizable(false);
+    let _ = window.set_maximizable(false);
+    let _ = window.set_minimizable(false);
+
+    let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
+    let outer = window.outer_size().ok();
+
+    let (target_w, target_h) = match outer {
+        Some(size) if size.width > 0 && size.height > 0 => {
+            let logical_w = size.width as f64 / scale;
+            let logical_h = size.height as f64 / scale;
+            nearest_hub_preset(logical_w, logical_h)
+        }
+        _ => (HUB_EXPANDED_WIDTH, HUB_EXPANDED_HEIGHT),
+    };
+
+    let needs_resize = match outer {
+        Some(size) if size.width > 0 && size.height > 0 => {
+            let logical_w = size.width as f64 / scale;
+            let logical_h = size.height as f64 / scale;
+            (logical_w - target_w).abs() > HUB_SIZE_EPSILON
+                || (logical_h - target_h).abs() > HUB_SIZE_EPSILON
+        }
+        _ => true,
+    };
+
+    if needs_resize {
+        let _ = window.set_size(tauri::LogicalSize::new(target_w, target_h));
+    }
+    position_hub_window_top(window, target_w);
 }
 
 /// Position the hub window at the top-center of the primary monitor.

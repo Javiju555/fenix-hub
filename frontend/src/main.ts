@@ -53,11 +53,26 @@ let mockLocal = [...MOCK_LOCAL];
 let mockPeers = [...MOCK_PEERS];
 let mockPublished = new Set<string>();
 let mockId = 100;
+let mockIdentity: IdentityInfo = {
+  device_name: 'Arch Desktop',
+  group_id: 'demo',
+  configured: true,
+  device_type: 'desktop',
+};
+let mockProfiles: IdentityProfileInfo[] = [
+  {
+    name: 'personal',
+    device_name: 'Arch Desktop',
+    group_id: 'demo',
+    device_type: 'desktop',
+    active: true,
+  },
+];
 
 async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
   const a = args as Record<string, unknown> | undefined;
   switch (cmd) {
-    case 'get_identity': return { device_name: 'Arch Desktop', group_id: 'demo', configured: true, device_type: 'desktop' } as T;
+    case 'get_identity': return mockIdentity as T;
     case 'get_local_content': return [...mockLocal] as T;
     case 'get_peers': return [...mockPeers] as T;
     case 'add_text_content': {
@@ -105,7 +120,105 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
     case 'save_peer_content_as': return { saved: true, path: 'C:\\temp\\fenixhub-mock.bin' } as T;
     case 'save_local_content_as': return { saved: true, path: 'C:\\temp\\fenixhub-local-mock.bin' } as T;
     case 'setup_identity':
-      return { device_name: (a?.args as { device_name: string })?.device_name ?? 'Device', group_id: 'demo', configured: true, device_type: (a?.args as { device_type?: string })?.device_type ?? 'desktop' } as T;
+      mockIdentity = {
+        device_name: (a?.args as { device_name: string })?.device_name ?? 'Device',
+        group_id: ((a?.args as { passphrase?: string | null })?.passphrase ? `grp-${mockId++}` : mockIdentity.group_id),
+        configured: true,
+        device_type: (a?.args as { device_type?: string })?.device_type ?? 'desktop',
+      };
+      return mockIdentity as T;
+    case 'update_identity': {
+      const payload = (a?.args as { passphrase?: string | null; device_name: string; device_type?: string }) || { device_name: 'Device' };
+      const oldGroup = mockIdentity.group_id;
+      const nextGroup = payload.passphrase ? `grp-${mockId++}` : oldGroup;
+      mockIdentity = {
+        device_name: payload.device_name || mockIdentity.device_name,
+        group_id: nextGroup,
+        configured: true,
+        device_type: payload.device_type ?? mockIdentity.device_type,
+      };
+      return {
+        identity: mockIdentity,
+        group_changed: nextGroup !== oldGroup,
+        requires_restart: nextGroup !== oldGroup,
+      } as T;
+    }
+    case 'delete_identity_only': {
+      mockIdentity = {
+        device_name: '',
+        group_id: '',
+        configured: false,
+        device_type: 'desktop',
+      };
+      return undefined as T;
+    }
+    case 'list_identity_profiles':
+      return { profiles: mockProfiles } as T;
+    case 'save_current_identity_profile': {
+      const payload = (a?.args as { name: string; make_active?: boolean }) || { name: '' };
+      const name = payload.name.trim();
+      if (name) {
+        const existing = mockProfiles.find(p => p.name === name);
+        if (existing) {
+          existing.device_name = mockIdentity.device_name;
+          existing.group_id = mockIdentity.group_id;
+          existing.device_type = mockIdentity.device_type;
+        } else {
+          mockProfiles.push({
+            name,
+            device_name: mockIdentity.device_name,
+            group_id: mockIdentity.group_id,
+            device_type: mockIdentity.device_type,
+            active: false,
+          });
+        }
+        if (payload.make_active) {
+          mockProfiles = mockProfiles.map(profile => ({ ...profile, active: profile.name === name }));
+        }
+      }
+      return { profiles: mockProfiles } as T;
+    }
+    case 'activate_identity_profile': {
+      const name = ((a?.args as { name: string })?.name || '').trim();
+      const selected = mockProfiles.find(profile => profile.name === name);
+      if (selected) {
+        mockProfiles = mockProfiles.map(profile => ({ ...profile, active: profile.name === name }));
+        mockIdentity = {
+          device_name: selected.device_name,
+          group_id: selected.group_id,
+          configured: true,
+          device_type: selected.device_type,
+        };
+      }
+      return {
+        identity: mockIdentity,
+        group_changed: false,
+        requires_restart: true,
+      } as T;
+    }
+    case 'delete_identity_profile': {
+      const name = ((a?.args as { name: string })?.name || '').trim();
+      mockProfiles = mockProfiles.filter(profile => profile.name !== name);
+      if (!mockProfiles.some(profile => profile.active) && mockProfiles.length > 0) {
+        mockProfiles[0].active = true;
+      }
+      return { profiles: mockProfiles } as T;
+    }
+    case 'get_transport_hardware':
+      return {
+        lan: true,
+        lan_ip: '192.168.1.50',
+        ble: true,
+        wifi_direct: true,
+        airdrop_ready: true,
+        flow: 'ble_discovery_then_wifi_direct_transfer',
+        ble_details: { supported: true, enabled: true, adapters: ['Mock BLE Adapter'] },
+        wifi_direct_details: { supported: true, enabled: true, adapters: ['Mock Wi-Fi Adapter'] },
+      } as T;
+    case 'get_transport_capabilities':
+      return { lan: true, ble: false, wifi_direct: false } as T;
+    case 'confirm_reset': return true as T;
+    case 'close_settings': return undefined as T;
     default: return undefined as T;
   }
 }
@@ -118,6 +231,25 @@ interface PeerAnnouncement { group_id: string; content_id: string; device_name: 
 interface PeerContentPayload { announcement: PeerAnnouncement; peer_ip: string; }
 interface DragPayload { text?: string | null; uri_list?: string | null; }
 interface SaveContentResult { saved: boolean; path?: string | null; }
+interface UpdateIdentityResult { identity: IdentityInfo; group_changed: boolean; requires_restart: boolean; }
+interface IdentityProfileInfo { name: string; device_name: string; group_id: string; device_type: string; active: boolean; }
+interface ProfilesPayload { profiles: IdentityProfileInfo[]; }
+interface TransportRadioDetails {
+  supported: boolean;
+  enabled: boolean;
+  adapters: string[];
+  last_error?: string | null;
+}
+interface TransportCapabilities {
+  lan: boolean;
+  ble: boolean;
+  wifi_direct: boolean;
+  lan_ip?: string | null;
+  airdrop_ready?: boolean;
+  flow?: string;
+  ble_details?: TransportRadioDetails;
+  wifi_direct_details?: TransportRadioDetails;
+}
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -146,11 +278,24 @@ const W_PILL = 280, H_PILL = 34;
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
+  document.body.classList.remove('settings-mode');
+
   // Block browser context menu — this is a native-style app, not a webpage
   document.addEventListener('contextmenu', e => e.preventDefault());
+  // Keep hub scale fixed: disable browser/webview zoom shortcuts and gestures.
+  document.addEventListener('wheel', (event) => {
+    if (event.ctrlKey || event.metaKey) event.preventDefault();
+  }, { passive: false });
+  document.addEventListener('keydown', (event) => {
+    if (!(event.ctrlKey || event.metaKey)) return;
+    if (event.key === '+' || event.key === '=' || event.key === '-' || event.key === '0') {
+      event.preventDefault();
+    }
+  });
 
   // Settings window uses the same bundle but a different hash.
   if (window.location.hash === '#settings') {
+    document.body.classList.add('settings-mode');
     await initSettings();
     return;
   }
@@ -165,64 +310,290 @@ async function init() {
 // ── Settings window ───────────────────────────────────────────────────────────
 
 async function initSettings() {
-  identity = await invoke<IdentityInfo>('get_identity');
-  renderSettings();
+  await reloadSettingsView();
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      void invoke('close_settings');
+    }
+  });
 }
 
-function renderSettings() {
+async function reloadSettingsView(feedback?: { message: string; tone: 'ok'|'warn'|'error' }) {
+  identity = await invoke<IdentityInfo>('get_identity');
+  const [profilesPayload, transport] = await Promise.all([
+    invoke<ProfilesPayload>('list_identity_profiles').catch(() => ({ profiles: [] })),
+    loadTransportCapabilities(),
+  ]);
+  renderSettings(profilesPayload.profiles, transport, feedback);
+}
+
+async function loadTransportCapabilities(): Promise<TransportCapabilities> {
+  return invoke<TransportCapabilities>('get_transport_hardware')
+    .catch(() => invoke<TransportCapabilities>('get_transport_capabilities'))
+    .catch(() => ({ lan: true, ble: false, wifi_direct: false }));
+}
+
+function renderSettings(
+  profiles: IdentityProfileInfo[],
+  transport: TransportCapabilities,
+  feedback?: { message: string; tone: 'ok'|'warn'|'error' },
+) {
   const app = document.getElementById('app')!;
+  const selectedType = identity?.device_type || 'desktop';
+  const profileOptions = profiles.map(profile =>
+    `<option value="${escapeHtml(profile.name)}"${profile.active ? ' selected' : ''}>${escapeHtml(profile.name)}${profile.active ? ' · activo' : ''}</option>`
+  ).join('');
+
   app.innerHTML = `
-    <div class="settings-root">
-      <h2>Ajustes de FenixHub</h2>
+    <div class="settings-shell">
+      <header class="settings-titlebar">
+        <div class="settings-titlewrap">
+          <div class="hub-logo" style="color:var(--accent)">${iconHub(15)}</div>
+          <span class="settings-title">Ajustes de FenixHub</span>
+        </div>
+        <button class="btn-icon danger settings-close" id="btn-settings-close" title="Cerrar">${iconX(11)}</button>
+      </header>
 
-      <section class="settings-section">
-        <h3>Identidad</h3>
-        <div class="settings-row">
-          <span class="settings-label">Dispositivo</span>
-          <span class="settings-value">${identity?.device_name ?? '—'}</span>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label">Grupo (ID)</span>
-          <span class="settings-value mono" id="group-id-val">${identity?.group_id?.slice(0, 16) ?? '—'}…</span>
-          <button class="btn-secondary" id="btn-copy-gid">Copiar</button>
-        </div>
-      </section>
+      <div class="settings-body">
+        ${feedback ? `<div class="settings-feedback ${feedback.tone}">${escapeHtml(feedback.message)}</div>` : ''}
 
-      <section class="settings-section">
-        <h3>Caché</h3>
-        <div class="settings-row">
-          <span class="settings-label">Archivos recibidos</span>
-          <span class="settings-value">FIFO 30 archivos en ~/.cache/fenix-hub/received/</span>
-        </div>
-        <div class="settings-row">
-          <button class="btn-secondary" id="btn-clear-cache">Limpiar caché</button>
-        </div>
-      </section>
+        <section class="settings-section">
+          <h3>Identidad</h3>
+          <div class="settings-grid two-col">
+            <label class="settings-field">
+              <span class="settings-label">Nombre del dispositivo</span>
+              <input id="settings-device-name" type="text" value="${escapeHtml(identity?.device_name || '')}" placeholder="Nombre de este dispositivo" />
+            </label>
+            <label class="settings-field">
+              <span class="settings-label">Tipo</span>
+              <select id="settings-device-type" class="settings-select">
+                ${DEVICE_TYPES.map(dt => `<option value="${dt.id}"${dt.id === selectedType ? ' selected' : ''}>${dt.label}</option>`).join('')}
+              </select>
+            </label>
+          </div>
 
-      <section class="settings-section danger">
-        <h3>Zona de peligro</h3>
-        <div class="settings-row">
-          <span class="settings-label">Eliminar todos los datos de FenixHub de este dispositivo</span>
-        </div>
-        <div class="settings-row">
-          <button class="btn-danger" id="btn-reset">Eliminar identidad y datos</button>
-        </div>
-      </section>
+          <div class="settings-row">
+            <span class="settings-label">Grupo (ID)</span>
+            <span class="settings-value mono settings-group-id" id="group-id-val">${identity?.group_id ?? '—'}</span>
+            <button class="btn-secondary" id="btn-copy-gid">Copiar</button>
+          </div>
+
+          <div class="settings-actions">
+            <button class="btn-secondary" id="btn-apply-identity">Guardar nombre/tipo</button>
+          </div>
+
+          <div class="settings-divider"></div>
+
+          <div class="settings-grid one-col">
+            <label class="settings-field">
+              <span class="settings-label">Cambiar identidad (nuevo grupo, mantiene caché)</span>
+              <input id="settings-passphrase" type="password" placeholder="Nueva passphrase del grupo" />
+            </label>
+          </div>
+          <div class="settings-actions">
+            <button class="btn-secondary" id="btn-change-group">Cambiar identidad</button>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Perfiles</h3>
+          <div class="settings-grid two-col">
+            <label class="settings-field">
+              <span class="settings-label">Perfil guardado</span>
+              <select id="settings-profile-select" class="settings-select" ${profiles.length === 0 ? 'disabled' : ''}>
+                ${profileOptions || '<option value="">Sin perfiles</option>'}
+              </select>
+            </label>
+            <label class="settings-field">
+              <span class="settings-label">Guardar perfil actual como</span>
+              <input id="settings-profile-name" type="text" placeholder="ej. trabajo" />
+            </label>
+          </div>
+          <div class="settings-actions split">
+            <button class="btn-secondary" id="btn-save-profile">Guardar perfil</button>
+            <button class="btn-secondary" id="btn-activate-profile" ${profiles.length === 0 ? 'disabled' : ''}>Activar perfil</button>
+            <button class="btn-danger ghost" id="btn-delete-profile" ${profiles.length === 0 ? 'disabled' : ''}>Eliminar perfil</button>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Transporte</h3>
+          <div class="transport-grid">
+            <div class="transport-item">
+              <span>LAN</span>
+              <span class="cap-pill ${transport.lan ? 'ok' : 'off'}">${transport.lan ? 'Disponible' : 'No disponible'}</span>
+            </div>
+            <div class="transport-note">IP actual: ${escapeHtml(transport.lan_ip || 'sin enlace LAN')}</div>
+            <div class="transport-item">
+              <span>Bluetooth LE</span>
+              <span class="cap-pill ${transport.ble ? 'ok' : 'off'}">${transport.ble ? 'Disponible' : 'No disponible'}</span>
+            </div>
+            <div class="transport-note">Adaptadores BLE: ${escapeHtml((transport.ble_details?.adapters || []).join(', ') || 'ninguno detectado')}</div>
+            <div class="transport-item">
+              <span>Wi-Fi Direct</span>
+              <span class="cap-pill ${transport.wifi_direct ? 'ok' : 'off'}">${transport.wifi_direct ? 'Disponible' : 'No disponible'}</span>
+            </div>
+            <div class="transport-note">Adaptadores Wi-Fi: ${escapeHtml((transport.wifi_direct_details?.adapters || []).join(', ') || 'ninguno detectado')}</div>
+            <div class="transport-note">Flujo cercano: ${escapeHtml(transport.flow || 'ble_discovery_then_wifi_direct_transfer')}</div>
+            <div class="transport-note">Modo AirDrop-like: <strong>${transport.airdrop_ready ? 'listo' : 'parcial'}</strong></div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Caché</h3>
+          <div class="settings-row">
+            <span class="settings-label">Archivos recibidos</span>
+            <span class="settings-value">FIFO 25 archivos en caché local</span>
+          </div>
+          <div class="settings-actions">
+            <button class="btn-secondary" id="btn-clear-cache">Limpiar caché</button>
+          </div>
+        </section>
+
+        <section class="settings-section danger">
+          <h3>Zona de peligro</h3>
+          <div class="settings-row danger-row">
+            <span class="settings-label">Eliminar solo identidad y configuración (mantiene caché)</span>
+          </div>
+          <div class="settings-actions split">
+            <button class="btn-danger ghost" id="btn-delete-identity">Eliminar identidad</button>
+          </div>
+          <div class="settings-row danger-row">
+            <span class="settings-label">Eliminar identidad, historial y caché de este dispositivo</span>
+          </div>
+          <div class="settings-actions split">
+            <button class="btn-danger" id="btn-reset">Eliminar todos los datos</button>
+          </div>
+        </section>
+      </div>
     </div>
   `;
+
+  document.getElementById('btn-settings-close')!.addEventListener('click', async () => {
+    await invoke('close_settings');
+  });
 
   document.getElementById('btn-copy-gid')?.addEventListener('click', () => {
     if (identity?.group_id) navigator.clipboard.writeText(identity.group_id);
   });
 
+  document.getElementById('btn-apply-identity')?.addEventListener('click', async () => {
+    if (!identity?.configured) {
+      await reloadSettingsView({
+        message: 'No hay identidad activa. Usa "Cambiar identidad" para crear una nueva.',
+        tone: 'error',
+      });
+      return;
+    }
+
+    const deviceName = (document.getElementById('settings-device-name') as HTMLInputElement).value.trim();
+    const deviceType = (document.getElementById('settings-device-type') as HTMLSelectElement).value;
+    if (!deviceName) {
+      await reloadSettingsView({ message: 'El nombre del dispositivo no puede estar vacío.', tone: 'error' });
+      return;
+    }
+    const result = await invoke<UpdateIdentityResult>('update_identity', {
+      args: {
+        device_name: deviceName,
+        device_type: deviceType,
+        passphrase: null,
+      },
+    });
+    await reloadSettingsView({
+      message: result.group_changed
+        ? 'Identidad actualizada. Reinicia la app para cambiar completamente de grupo.'
+        : 'Nombre y tipo actualizados al instante.',
+      tone: result.group_changed ? 'warn' : 'ok',
+    });
+  });
+
+  document.getElementById('btn-change-group')?.addEventListener('click', async () => {
+    const passphrase = (document.getElementById('settings-passphrase') as HTMLInputElement).value.trim();
+    const deviceName = (document.getElementById('settings-device-name') as HTMLInputElement).value.trim() || identity?.device_name || '';
+    const deviceType = (document.getElementById('settings-device-type') as HTMLSelectElement).value;
+    if (!passphrase) {
+      await reloadSettingsView({ message: 'Introduce una passphrase para cambiar de identidad.', tone: 'error' });
+      return;
+    }
+
+    if (!identity?.configured) {
+      await invoke<IdentityInfo>('setup_identity', {
+        args: {
+          passphrase,
+          device_name: deviceName || 'Dispositivo',
+          device_type: deviceType,
+        },
+      });
+      await reloadSettingsView({ message: 'Identidad creada correctamente.', tone: 'ok' });
+      return;
+    }
+
+    const result = await invoke<UpdateIdentityResult>('update_identity', {
+      args: {
+        passphrase,
+        device_name: deviceName,
+        device_type: deviceType,
+      },
+    });
+
+    await reloadSettingsView({
+      message: result.requires_restart
+        ? 'Identidad cambiada sin borrar caché. Reinicia la app para completar el cambio de grupo.'
+        : 'Identidad cambiada.',
+      tone: result.requires_restart ? 'warn' : 'ok',
+    });
+  });
+
+  document.getElementById('btn-save-profile')?.addEventListener('click', async () => {
+    const name = (document.getElementById('settings-profile-name') as HTMLInputElement).value.trim();
+    if (!name) {
+      await reloadSettingsView({ message: 'Escribe un nombre de perfil.', tone: 'error' });
+      return;
+    }
+    await invoke<ProfilesPayload>('save_current_identity_profile', { args: { name, make_active: false } });
+    await reloadSettingsView({ message: `Perfil "${name}" guardado.`, tone: 'ok' });
+  });
+
+  document.getElementById('btn-activate-profile')?.addEventListener('click', async () => {
+    const select = document.getElementById('settings-profile-select') as HTMLSelectElement | null;
+    const name = select?.value?.trim();
+    if (!name) return;
+    await invoke<UpdateIdentityResult>('activate_identity_profile', { args: { name } });
+    await reloadSettingsView({
+      message: `Perfil "${name}" activado. Reinicia la app para reinicializar discovery con total limpieza.`,
+      tone: 'warn',
+    });
+  });
+
+  document.getElementById('btn-delete-profile')?.addEventListener('click', async () => {
+    const select = document.getElementById('settings-profile-select') as HTMLSelectElement | null;
+    const name = select?.value?.trim();
+    if (!name) return;
+    await invoke<ProfilesPayload>('delete_identity_profile', { args: { name } });
+    await reloadSettingsView({ message: `Perfil "${name}" eliminado.`, tone: 'ok' });
+  });
+
   document.getElementById('btn-clear-cache')?.addEventListener('click', async () => {
     await invoke('clear_received_cache');
-    alert('Caché limpiado.');
+    await reloadSettingsView({ message: 'Caché local limpiada.', tone: 'ok' });
+  });
+
+  document.getElementById('btn-delete-identity')?.addEventListener('click', async () => {
+    await invoke('delete_identity_only');
+    await reloadSettingsView({
+      message: 'Identidad eliminada. La caché local se mantiene intacta.',
+      tone: 'warn',
+    });
   });
 
   document.getElementById('btn-reset')?.addEventListener('click', async () => {
-    if (!confirm('¿Seguro? Se eliminarán la identidad, el historial y la caché de este dispositivo.')) return;
+    const ok = await invoke<boolean>('confirm_reset');
+    if (!ok) return;
     await invoke('reset_all_data');
+    await reloadSettingsView({
+      message: 'Todos los datos locales han sido eliminados.',
+      tone: 'warn',
+    });
   });
 }
 
@@ -300,6 +671,7 @@ function renderSetup() {
         <input type="password" id="passphrase"   placeholder="Nombre del grupo (igual en todos)" autocomplete="off" />
         <button id="setup-btn">${iconCheckmark(11)} Activar</button>
       </div>
+      <p class="setup-error" id="setup-error" aria-live="polite"></p>
     </div>`;
 
   // Device type picker
@@ -316,11 +688,19 @@ function renderSetup() {
     const deviceName = (document.getElementById('device-name') as HTMLInputElement).value.trim();
     if (!passphrase || !deviceName) return;
     const btn = document.getElementById('setup-btn') as HTMLButtonElement;
+    const errorNode = document.getElementById('setup-error') as HTMLParagraphElement;
+    errorNode.textContent = '';
     btn.disabled = true; btn.textContent = 'Activando…';
-    identity = await invoke<IdentityInfo>('setup_identity', {
-      args: { passphrase, device_name: deviceName, device_type: selectedDeviceType },
-    });
-    await loadContent(); renderHub(); setupEventListeners();
+    try {
+      identity = await invoke<IdentityInfo>('setup_identity', {
+        args: { passphrase, device_name: deviceName, device_type: selectedDeviceType },
+      });
+      await loadContent(); renderHub(); setupEventListeners();
+    } catch (error) {
+      btn.disabled = false;
+      btn.innerHTML = `${iconCheckmark(11)} Activar`;
+      errorNode.textContent = error instanceof Error ? error.message : String(error);
+    }
   };
   document.getElementById('setup-btn')!.addEventListener('click', submit);
   document.addEventListener('keydown', function h(e) {
@@ -735,7 +1115,8 @@ function renderPeerContent() {
           if (result?.cached_path) {
             const card = btn.closest('.content-card') as HTMLElement | null;
             if (card && !card.querySelector('.card-thumb')) {
-              const src = `file://${result.cached_path}`;
+              const rawPath = result.cached_path.replace(/\\/g, '/');
+              const src = rawPath.startsWith('/') ? `file://${rawPath}` : `file:///${rawPath}`;
               const top = card.querySelector('.card-top');
               if (top) {
                 const thumb = document.createElement('img');
@@ -753,6 +1134,23 @@ function renderPeerContent() {
         btn.textContent = 'Guardando…';
         const result = await invoke<SaveContentResult>('save_peer_content_as', peerCommandArgs(id));
         if (result.saved) {
+          // Show thumbnail if the saved item is an image (same as copy flow).
+          if (result.path) {
+            const card = btn.closest('.content-card') as HTMLElement | null;
+            const peerItem = peerContent.find(p => p.content_id === id);
+            if (card && peerItem?.content_type === 'image' && !card.querySelector('.card-thumb')) {
+              const rawPath = result.path.replace(/\\/g, '/');
+              const src = rawPath.startsWith('/') ? `file://${rawPath}` : `file:///${rawPath}`;
+              const top = card.querySelector('.card-top');
+              if (top) {
+                const thumb = document.createElement('img');
+                thumb.className = 'card-thumb';
+                thumb.src = src;
+                card.insertBefore(thumb, top);
+                top.remove();
+              }
+            }
+          }
           flashPeerAction(btn, 'Guardado');
         } else {
           btn.disabled = false;
@@ -825,18 +1223,6 @@ function iconChevronDown(s: number) {
 }
 function iconLock(s: number) {
   return svg(s,'0 0 14 14','<rect x="2" y="6" width="10" height="7" rx="1.5" stroke-width="1.6"/><path d="M4,6 V4 a4,4 0 0 1 6,0 V6" stroke-width="1.6" fill="none"/>');
-}
-function deviceTypeIcon(type: string, s: number): string {
-  const dt = DEVICE_TYPES.find(d => d.id === type) ?? DEVICE_TYPES[0];
-  // Re-render with custom size
-  switch (type) {
-    case 'laptop':  return svg(s,'0 0 20 18','<rect x="2" y="2" width="16" height="11" rx="1.5" stroke-width="1.5"/><path d="M0,16 Q10,14 20,16" stroke-width="1.5" fill="none"/>');
-    case 'phone':   return svg(s,'0 0 14 20','<rect x="1" y="1" width="12" height="18" rx="3" stroke-width="1.5"/><line x1="5.5" y1="16.5" x2="8.5" y2="16.5" stroke-width="1.5"/>');
-    case 'tablet':  return svg(s,'0 0 16 20','<rect x="1" y="1" width="14" height="18" rx="2.5" stroke-width="1.5"/><line x1="6" y1="16.5" x2="10" y2="16.5" stroke-width="1.5"/>');
-    case 'server':  return svg(s,'0 0 20 18','<rect x="1" y="1" width="18" height="7" rx="1.5" stroke-width="1.5"/><rect x="1" y="10" width="18" height="7" rx="1.5" stroke-width="1.5"/>');
-    default:        return svg(s,'0 0 20 18','<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>');
-  }
-  return dt.icon();
 }
 function iconInboxLarge() {
   return svg(36,'0 0 24 24','<rect x="2" y="2" width="20" height="20" rx="3" stroke-width="1.2"/><polyline points="2,15 7,15 8.5,19 15.5,19 17,15 22,15" stroke-width="1.2"/>');

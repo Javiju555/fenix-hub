@@ -1,83 +1,90 @@
 # FenixHub
 
-**Un portapapeles compartido. Sin cuenta. Sin nube. Sin dramas.**
+## Una frase
 
-Copias algo en el móvil y aparece en el PC. Arrastras un archivo desde el PC y llega al portátil. Sin cables, sin pasos raros, sin mandar cosas por WhatsApp a ti mismo. Eso es FenixHub.
+FenixHub convierte todos tus dispositivos en un portapapeles compartido, cifrado y sin nube.
 
----
+## Que problema resuelve
 
-## ¿Qué es?
+Si trabajas entre movil, laptop y desktop, acabas copiandote texto por chat, enviandote archivos a ti mismo o usando servicios externos para algo que deberia ser inmediato.
 
-FenixHub es una app open source que convierte todos tus dispositivos en un portapapeles compartido en tiempo real. Texto, imágenes, archivos — lo que sea. Se comparte al instante con cualquier dispositivo que tenga FenixHub instalado y esté en tu red.
+FenixHub elimina eso:
+- Copias en un dispositivo.
+- Aparece en los demas.
+- Lo pegas o lo guardas en segundos.
 
-Sin servidores intermedios. Sin cuenta de ningún tipo. Todo viaja cifrado de extremo a extremo directamente entre tus dispositivos.
+Sin cuenta. Sin servidor central. Sin dependencia de terceros.
 
----
+## Que hace hoy (estado real)
 
-## ¿Cómo funciona?
+### Grupo privado en red local
+- Comparticion de texto, imagenes y archivos entre dispositivos del mismo grupo.
+- Discovery automatico con mDNS.
+- Transferencia de contenido cifrado punto a punto.
 
-Tus dispositivos se descubren solos en la red local usando mDNS (el mismo protocolo que usa AirDrop para encontrarse). Cuando compartes algo, se monta un servidor efímero en tu dispositivo que solo existe mientras dura el intercambio. El contenido viaja cifrado con AES-256-GCM — ni el router lo puede leer.
+### Seguridad activa
+- Cifrado de contenido con AES-256-GCM.
+- Firma canonica de requests (`method/path/group_id/timestamp/nonce/body-hash`).
+- Anti-replay (ventana temporal + nonce unico).
+- `group_id` derivado con HKDF dedicado.
+- Politica minima de passphrase para evitar claves debiles.
 
-Cada grupo de dispositivos comparte una passphrase común que sirve como llave de cifrado. Sin ella, nadie puede ver lo que compartes, aunque esté en la misma red.
+### Robustez de sesion
+- Publicacion efimera con TTL.
+- Auto-stop al detectar cambio de red durante sesion activa.
 
----
+### Cercania tipo AirDrop (base ya integrada)
+- Inventario de hardware por llamada para LAN/BLE/Wi-Fi Direct.
+- Android: discovery por BLE + discovery de peers Wi-Fi Direct + candidatos de handoff.
+- Desktop (Tauri): snapshot de capacidades/adaptadores por llamada.
 
-## ¿Qué puedo compartir?
+Importante: el canal final de transferencia completa sobre Wi-Fi Direct aun esta en roadmap.
 
-- **Texto plano** — se copia directamente al portapapeles del otro dispositivo
-- **Imágenes** — aparecen en la interfaz con preview, listas para copiar o guardar
-- **Archivos** — cualquier tipo, con nombre original, listos para guardar donde quieras
+## Arquitectura resumida
 
----
+- Desktop: Tauri v2 (Rust + frontend web).
+- Android: app nativa con bridge web.
+- Discovery privado: mDNS.
+- Cifrado y protocolo: core Rust + paridad Kotlin.
+- Sin servicios cloud obligatorios.
 
-## Flujo de uso
+## Por que importa
 
-**Compartir:**
-1. Pegas algo en el portapapeles o arrastras un archivo al hub
-2. Se anuncia automáticamente a tus otros dispositivos
-3. Aparece en su interfaz con un botón de "Copiar" y "Guardar"
+- Privacidad: tus datos no pasan por un servidor de terceros.
+- Velocidad: transferencia local directa.
+- Control: codigo abierto, stack auditable.
+- Friccion cero: menos pasos, menos contexto roto.
 
-**Recibir:**
-- **Copiar** → va directo al portapapeles. Si es texto, listo para pegar. Si es un archivo, se guarda en una carpeta temporal FIFO (30 archivos, los más viejos se borran solos) y se copia la ruta.
-- **Guardar** → diálogo nativo del sistema operativo, eliges dónde va, sin pasos extra.
+## Roadmap corto (para release OSS fuerte)
 
----
+1. Canal de transferencia cercano completo sobre Wi-Fi Direct.
+2. Streaming real sin ensamblar payload completo en RAM.
+3. Benchmarks y tuning de velocidad por plataforma.
+4. CI de release + repo publico limpio con historial filtrado.
 
-## Modo público (próximamente)
-
-Además del modo de grupo (solo entre tus dispositivos con la misma passphrase), FenixHub tendrá un modo de transferencia pública entre dispositivos cercanos — como AirDrop pero sin Apple.
-
-Funciona por **Bluetooth Low Energy y WiFi Direct**, sin necesidad de estar en la misma red. Ambos dispositivos activan el modo público, se ven mutuamente, y el receptor acepta o rechaza la transferencia. Sin passphrase compartida — la clave se negocia al momento mediante criptografía asimétrica (X25519). El discovery es cifrado, diseñado para ser difícil de interceptar o suplantar.
-
----
-
-## ¿En qué plataformas funciona?
+## Estado de plataforma
 
 | Plataforma | Estado |
 |---|---|
-| Windows | ✅ Disponible |
-| Linux | ✅ Disponible |
-| Android | ✅ Disponible (app nativa) |
-| macOS | ❌ Sin planes (requiere licencia de Apple) |
+| Windows | operativo |
+| Linux | operativo |
+| Android | operativo |
+| macOS | no priorizado |
 
----
+## Copys listos para publicar
 
-## ¿Por qué no X alternativa?
+### Instagram (corto)
+"Copiar en el movil y pegar en el PC, sin nube y sin cuenta. Eso es FenixHub: portapapeles compartido entre tus dispositivos, cifrado y open source."
 
-- **KDE Connect**: solo entre Linux/Android con KDE, requiere configuración
-- **Snapdrop / PairDrop**: web, sin cifrado E2E real, sin app nativa
-- **AirDrop**: solo Apple
-- **Nearby Share**: requiere cuenta Google, depende de servidores de Google
+### LinkedIn (producto)
+"Estoy construyendo FenixHub: un portapapeles compartido entre dispositivos, sin servidor central y con cifrado end-to-end. Ya funciona en Windows, Linux y Android para texto, imagenes y archivos en red local. Estamos cerrando seguridad, rendimiento y modo de cercania tipo AirDrop para llevarlo a release open source."
 
-FenixHub no depende de ninguna cuenta, ninguna empresa y ningún servidor. El código es abierto. Los datos no salen de tu red.
+### LinkedIn (tecnico)
+"FenixHub ya integra firma canonica de requests, anti-replay, cifrado AES-GCM y base BLE + Wi-Fi Direct para discovery cercano. Siguiente paso: canal final de transferencia Wi-Fi Direct y optimizacion de streaming para reducir RAM en archivos grandes."
 
----
+### X / micro-post
+"FenixHub = portapapeles compartido entre tus dispositivos, sin nube, sin cuenta, cifrado y open source."
 
-## Stack técnico (para los curiosos)
+## Mensaje clave de marca
 
-- **Desktop**: Tauri v2 (Rust + TypeScript/Vite) — app nativa con webview
-- **Android**: app nativa con webview integrada
-- **Transporte**: HTTP efímero sobre red local, TLS en modo público
-- **Cifrado**: AES-256-GCM (simétrico, grupo), X25519 ECDH (modo público)
-- **Discovery**: mDNS (`_fenixhub._tcp`) en modo grupo, BLE + WiFi Direct en modo público
-- **Sin dependencias externas**: cero servidores, cero cuentas, cero telemetría
+Tu contenido, en tus dispositivos, bajo tus reglas.

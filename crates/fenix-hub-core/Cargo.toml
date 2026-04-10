@@ -1,6 +1,6 @@
 [package]
 name = "fenix-hub-core"
-version = "0.1.0"
+version = "0.2.2"
 edition = "2021"
 description = "FenixHub cross-platform core: identity, protocol, content transfer"
 
@@ -23,6 +23,7 @@ hex = { workspace = true }
 aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 rand = { workspace = true }
+zstd = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

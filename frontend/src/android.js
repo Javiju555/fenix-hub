@@ -276,6 +276,30 @@ async function invokeMock(cmd, args) {
                 group_id: 'demo',
                 configured: true,
             };
+        case 'get_transport_hardware':
+            return {
+                ble: {
+                    supported: true,
+                    enabled: true,
+                    permissions_ready: true,
+                    adapter_name: 'Mock BLE',
+                    scanning: true,
+                    advertising: true,
+                    last_error: null,
+                },
+                wifi_direct: {
+                    supported: true,
+                    enabled: true,
+                    permissions_ready: true,
+                    discovering: true,
+                    last_error: null,
+                },
+                airdrop_ready: true,
+                flow: 'ble_discovery_then_wifi_direct_transfer',
+                ble_peers: [],
+                wifi_direct_peers: [],
+                handoff_candidates: [],
+            };
         default:
             return undefined;
     }

@@ -63,8 +63,6 @@ pub fn start(
         tracing::debug!("Self-filter IPs: {:?}", set);
         set
     };
-    let own_device_name = identity.device_name.clone();
-
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
@@ -72,8 +70,8 @@ pub fn start(
                     announcement,
                     peer_ip,
                 } => {
-                    // Skip self — filter by both IP and device name
-                    if local_ips.contains(&peer_ip) || announcement.device_name == own_device_name {
+                    // Skip self — filter by IP only
+                    if local_ips.contains(&peer_ip) {
                         tracing::debug!("Skipping own announcement for {}", announcement.content_id);
                         continue;
                     }
@@ -118,7 +116,7 @@ pub fn start(
                     announcement,
                     peer_ip,
                 } => {
-                    if local_ips.contains(&peer_ip) || announcement.device_name == own_device_name {
+                    if local_ips.contains(&peer_ip) {
                         continue;
                     }
                     let id = announcement.content_id.clone();

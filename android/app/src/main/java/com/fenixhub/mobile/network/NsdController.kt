@@ -368,7 +368,7 @@ class NsdController(
     private companion object {
         const val TAG = "FenixHubNsd"
         const val SERVICE_TYPE = "_fenixhub._tcp."
-        const val PROTOCOL_VERSION = 1
+        const val PROTOCOL_VERSION = 3
         const val DISCOVERY_REFRESH_MS = 15_000L
         const val DISCOVERY_RETRY_MS = 3_000L
         const val PEER_EXPIRY_MS = 45_000L
