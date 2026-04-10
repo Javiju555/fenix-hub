@@ -20,12 +20,18 @@ serde_json = "1"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tokio-stream = "0.1"
+futures-util = "0.3"
 
 # HTTP server (ephemeral content server)
 axum = "0.8"
 
 # HTTP client (pull content from peers)
 reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Byte utilities
+bytes = "1"
 
 # mDNS discovery & announcement
 mdns-sd = "0.13"

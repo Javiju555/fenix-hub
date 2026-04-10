@@ -10,6 +10,9 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use anyhow::Result;
+use rand::RngCore;
+
+use crate::protocol::{FNX2_CHUNK_SIZE, FNX2_HEADER_SIZE};
 
 /// Size of the AES-GCM nonce in bytes (96-bit, as recommended for GCM).
 pub const NONCE_SIZE: usize = 12;
@@ -53,6 +56,135 @@ pub fn decrypt(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
     cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| anyhow::anyhow!("AES-GCM decryption failed: invalid key or corrupted data"))
+}
+
+/// Computes per-chunk nonce: base_nonce XOR chunk_index (padded to 12 bytes).
+fn chunk_nonce(base_nonce: &[u8; 12], chunk_index: u64) -> [u8; 12] {
+    let mut nonce = *base_nonce;
+    let index_bytes = chunk_index.to_be_bytes();
+    for (i, byte) in index_bytes.iter().enumerate() {
+        nonce[4 + i] ^= *byte;
+    }
+    nonce
+}
+
+/// Encrypts data in chunks for streaming AEAD (FNX2 protocol).
+///
+/// Each chunk gets its own nonce derived from base_nonce XOR chunk_index.
+/// This allows independent verification of each chunk.
+///
+/// Returns a writer that accepts plaintext and yields encrypted chunks:
+/// Header: FNX2(4) + base_nonce(12) + total_chunks(4) + original_size(8) + compression(1)
+/// Per chunk: ciphertext + GCM tag
+pub struct ChunkEncoder {
+    cipher: Aes256Gcm,
+    base_nonce: [u8; 12],
+    chunk_index: u32,
+    total_chunks: u32,
+    original_size: u64,
+    compression: u8,
+    header_written: bool,
+}
+
+impl ChunkEncoder {
+    /// Creates a new chunk encoder.
+    /// `total_chunks` and `original_size` are needed for the FNX2 header.
+    pub fn new(key: &[u8; 32], total_chunks: u32, original_size: u64, compression: u8) -> Self {
+        let mut base_nonce = [0u8; 12];
+        OsRng.fill_bytes(&mut base_nonce);
+        let cipher = Aes256Gcm::new(key.into());
+        Self {
+            cipher,
+            base_nonce,
+            chunk_index: 0,
+            chunk_buffer: Vec::with_capacity(FNX2_CHUNK_SIZE + 16),
+            total_chunks,
+            original_size,
+            compression,
+            header_written: false,
+        }
+    }
+
+    /// Returns the FNX2 header bytes.
+    pub fn header(&self) -> Vec<u8> {
+        let mut header = Vec::with_capacity(FNX2_HEADER_SIZE);
+        header.extend_from_slice(b"FNX2");
+        header.extend_from_slice(&self.base_nonce);
+        header.extend_from_slice(&self.total_chunks.to_be_bytes());
+        header.extend_from_slice(&self.original_size.to_be_bytes());
+        header.push(self.compression);
+        header
+    }
+
+    /// Encrypts a chunk of plaintext. Call sequentially for each chunk.
+    /// Returns the encrypted chunk (ciphertext + GCM tag).
+    pub fn encrypt_chunk(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        if !self.header_written {
+            self.header_written = true;
+        }
+
+        let nonce = chunk_nonce(&self.base_nonce, self.chunk_index as u64);
+        let nonce = Nonce::from_slice(&nonce);
+        let ciphertext = self
+            .cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| anyhow::anyhow!("Chunk encryption failed: {}", e))?;
+
+        self.chunk_index += 1;
+        Ok(ciphertext)
+    }
+}
+
+/// Decodes FNX2 header and prepares for chunked decryption.
+pub struct ChunkDecoder {
+    pub base_nonce: [u8; 12],
+    pub total_chunks: u32,
+    pub original_size: u64,
+    pub compression: u8,
+    chunk_index: u32,
+    cipher: Aes256Gcm,
+}
+
+impl ChunkDecoder {
+    /// Parses FNX2 header from data and creates a decoder.
+    pub fn new(key: &[u8; 32], header: &[u8]) -> Result<Self> {
+        if header.len() < FNX2_HEADER_SIZE {
+            anyhow::bail!("FNX2 header too short: {} bytes", header.len());
+        }
+        if &header[..4] != b"FNX2" {
+            anyhow::bail!("Invalid FNX2 magic");
+        }
+
+        let mut base_nonce = [0u8; 12];
+        base_nonce.copy_from_slice(&header[4..16]);
+
+        let total_chunks = u32::from_be_bytes(header[16..20].try_into()?);
+        let original_size = u64::from_be_bytes(header[20..28].try_into()?);
+        let compression = header[28];
+
+        Ok(Self {
+            base_nonce,
+            total_chunks,
+            original_size,
+            compression,
+            chunk_index: 0,
+            cipher: Aes256Gcm::new(key.into()),
+        })
+    }
+
+    /// Decrypts a single chunk. Call sequentially for each chunk.
+    /// Returns plaintext for this chunk.
+    pub fn decrypt_chunk(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        let nonce = chunk_nonce(&self.base_nonce, self.chunk_index as u64);
+        let nonce = Nonce::from_slice(&nonce);
+        let plaintext = self
+            .cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| anyhow::anyhow!("Chunk {} decryption failed", self.chunk_index))?;
+
+        self.chunk_index += 1;
+        Ok(plaintext)
+    }
 }
 
 #[cfg(test)]
