@@ -68,6 +68,7 @@ class FenixHubService : Service() {
     private var shakeDetector: ShakeDetector? = null
     private var accelerometer: Sensor? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -204,7 +205,17 @@ class FenixHubService : Service() {
         if (current != null && current.isHeld) return
 
         val wifiManager = applicationContext.getSystemService(WifiManager::class.java)
-        multicastLock = wifiManager.createMulticastLock("FenixHubLock").apply {
+        multicastLock = wifiManager.createMulticastLock("FenixHubMulticast").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        // Keep the WiFi radio at full performance during transfers — without this
+        // Android throttles TX to ~4 MB/s even on 5 GHz when the radio is in
+        // power-save mode.
+        wifiLock = wifiManager.createWifiLock(
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+            "FenixHubWifiLock",
+        ).apply {
             setReferenceCounted(false)
             acquire()
         }
@@ -212,11 +223,13 @@ class FenixHubService : Service() {
 
     private fun releaseMulticastLock() {
         multicastLock?.let { lock ->
-            if (lock.isHeld) {
-                lock.release()
-            }
+            if (lock.isHeld) lock.release()
         }
         multicastLock = null
+        wifiLock?.let { lock ->
+            if (lock.isHeld) lock.release()
+        }
+        wifiLock = null
     }
 
     private fun buildNotification(): Notification {

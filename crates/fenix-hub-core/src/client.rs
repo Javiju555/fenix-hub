@@ -9,11 +9,15 @@
 /// A peer responding without the encrypted header is treated as a legacy
 /// device (protocol_version 0). Decryption is skipped in that case, but
 /// the caller should treat the data with lower trust.
-use crate::crypto;
+use crate::crypto::{self, ChunkDecoder};
 use crate::identity::GroupIdentity;
-use crate::protocol::{ENCRYPTED_HEADER, HMAC_HEADER};
+use crate::protocol::{ENCRYPTED_HEADER, FNX2_HEADER_SIZE, HMAC_HEADER};
+use crate::content::ContentType;
 use anyhow::Result;
 use std::net::IpAddr;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
+use tokio_stream::StreamExt;
 
 pub struct PulledContent {
     pub bytes: Vec<u8>,
@@ -71,10 +75,20 @@ pub async fn pull_content(
         .map(|v| v == "1")
         .unwrap_or(false);
 
-    let raw_bytes = response.bytes().await?;
+    let is_v2_stream = response
+        .headers()
+        .get(ENCRYPTED_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "2")
+        .unwrap_or(false);
 
-    // Decrypt if the server indicated AES-256-GCM encryption.
-    let bytes = if is_encrypted {
+    let bytes = if is_v2_stream {
+        // FNX2 v2 streaming: server sends chunks, we decrypt and discard body
+        // (caller should use pull_content_to_file for actual streaming)
+        tracing::debug!("Peer {} uses FNX2 v2 streaming", peer_ip);
+        vec![]
+    } else if is_encrypted {
+        let raw_bytes = response.bytes().await?;
         let enc_key = identity.enc_key();
         crypto::decrypt(enc_key, &raw_bytes).map_err(|e| {
             anyhow::anyhow!(
@@ -91,7 +105,7 @@ pub async fn pull_content(
             peer_ip,
             content_id
         );
-        raw_bytes.to_vec()
+        response.bytes().await?.to_vec()
     };
 
     tracing::debug!(
@@ -146,4 +160,90 @@ fn parse_file_name(content_disposition: &str) -> Option<String> {
                 .map(|value| value.trim_matches('"').to_string())
         })
         .filter(|value| !value.is_empty())
+}
+
+/// Pulls content with streaming decrypt to a file (FNX2 v2).
+/// Writes each decrypted chunk directly to disk, never holding full file in RAM.
+pub async fn pull_content_to_file(
+    peer_ip: IpAddr,
+    peer_port: u16,
+    content_id: &str,
+    identity: &GroupIdentity,
+    output_path: &std::path::Path,
+) -> Result<ContentType> {
+    let url = format!("http://{}:{}/content/{}", peer_ip, peer_port, content_id);
+
+    let sig = identity.sign(content_id.as_bytes());
+    let sig_hex = hex::encode(&sig);
+
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(reqwest::Client::new);
+
+    let response = client
+        .get(&url)
+        .header(HMAC_HEADER, sig_hex)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let is_v2 = response
+        .headers()
+        .get(ENCRYPTED_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "2")
+        .unwrap_or(false);
+
+    if !is_v2 {
+        anyhow::bail!("Peer {} does not support FNX2 v2 streaming", peer_ip);
+    }
+
+    // Stream the response body
+    let mut body = response.bytes_stream();
+    let enc_key = identity.enc_key();
+
+    // Read FNX2 header first
+    let mut header_buf = vec![0u8; FNX2_HEADER_SIZE];
+    let mut header_read = 0usize;
+    while header_read < FNX2_HEADER_SIZE {
+        if let Some(chunk) = body.next().await {
+            let chunk = chunk?;
+            let take = (FNX2_HEADER_SIZE - header_read).min(chunk.len());
+            header_buf[header_read..header_read + take].copy_from_slice(&chunk[..take]);
+            header_read += take;
+        } else {
+            anyhow::bail!("Incomplete FNX2 header");
+        }
+    }
+
+    let mut decoder = ChunkDecoder::new(enc_key, &header_buf)?;
+
+    tracing::debug!(
+        "Pulling {} from {} — {} chunks, {} B",
+        content_id,
+        peer_ip,
+        decoder.total_chunks,
+        decoder.original_size
+    );
+
+    // Open output file and decrypt chunks to disk
+    let mut file = File::create(output_path).await?;
+
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk?;
+        if chunk.is_empty() { continue; }
+        let plaintext = decoder.decrypt_chunk(&chunk)?;
+        file.write_all(&plaintext).await?;
+    }
+
+    file.flush().await?;
+
+    tracing::debug!(
+        "Pulled {} from {} — {} B written to {}",
+        content_id,
+        peer_ip,
+        decoder.original_size,
+        output_path.display()
+    );
+
+    Ok(ContentType::File)
 }

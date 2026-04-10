@@ -29,12 +29,14 @@ use axum::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::sync::{oneshot, RwLock};
 
 use crate::content::{ContentData, ContentItem};
-use crate::crypto;
+use crate::crypto::ChunkEncoder;
 use crate::identity::GroupIdentity;
-use crate::protocol::{ENCRYPTED_HEADER, HMAC_HEADER};
+use crate::protocol::{FNX2_CHUNK_SIZE, FNX2_COMPRESSION_NONE, ENCRYPTED_HEADER, HMAC_HEADER};
 
 pub type ContentStore = Arc<RwLock<HashMap<String, ContentItem>>>;
 
@@ -110,48 +112,55 @@ async fn serve_content(
             resp_headers.insert(CONTENT_DISPOSITION, hv);
         }
     }
-    // Signal to peers that the body is AES-256-GCM encrypted.
-    resp_headers.insert(ENCRYPTED_HEADER, HeaderValue::from_static("1"));
+    // Signal FNX2 chunked streaming (v2).
+    resp_headers.insert(ENCRYPTED_HEADER, HeaderValue::from_static("2"));
 
-    // ── Load plaintext bytes ────────────────────────────────────────────────
-    let plaintext: Vec<u8> = match &item.data {
-        ContentData::Text(text) => text.as_bytes().to_vec(),
-        ContentData::Bytes(bytes) => bytes.clone(),
+    // ── Determine content size and prepare streaming ────────────────────────
+    let (file_path, size) = match &item.data {
+        ContentData::Text(text) => (None, text.len() as u64),
+        ContentData::Bytes(bytes) => (None, bytes.len() as u64),
         ContentData::FilePath(path) => {
-            // Read file outside the store lock to avoid holding it during I/O.
-            let path = path.clone();
-            drop(store);
-            tokio::fs::read(&path)
-                .await
-                .map_err(|_| StatusCode::NOT_FOUND)?
+            let metadata = tokio::fs::metadata(path).await.map_err(|_| StatusCode::NOT_FOUND)?;
+            (Some(path.clone()), metadata.len())
         }
         ContentData::Empty => return Err(StatusCode::NO_CONTENT),
     };
 
-    // ── Encrypt (AES-256-GCM) ───────────────────────────────────────────────
+    let total_chunks = (size / FNX2_CHUNK_SIZE as u64) as u32 + if size % FNX2_CHUNK_SIZE as u64 != 0 { 1 } else { 0 };
     let enc_key = state.identity.enc_key();
-    let encrypted = crypto::encrypt(enc_key, &plaintext).map_err(|e| {
-        tracing::error!("Encryption error for {}: {}", id, e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let mut encoder = ChunkEncoder::new(enc_key, total_chunks, size, FNX2_COMPRESSION_NONE);
 
-    tracing::debug!(
-        "Serving {} — plaintext {} B → encrypted {} B",
-        id,
-        plaintext.len(),
-        encrypted.len()
-    );
+    tracing::debug!("Serving {} — {} B, {} chunks", id, size, total_chunks);
 
-    Ok((resp_headers, Body::from(encrypted)))
+    // ── Build streaming response ─────────────────────────────────────────────
+    let mut all_data = vec![];
+    all_data.push(encoder.header());
+
+    if let Some(path) = file_path {
+        let mut file = File::open(&path).await.map_err(|e| {
+            tracing::error!("Failed to open {}: {}", path.display(), e);
+            StatusCode::NOT_FOUND
+        })?;
+        let mut buf = vec![0u8; FNX2_CHUNK_SIZE];
+        loop {
+            let read = file.read(&mut buf).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if read == 0 { break; }
+            let encrypted = encoder.encrypt_chunk(&buf[..read]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            all_data.push(encrypted);
+        }
+    } else {
+        let data = match &item.data {
+            ContentData::Text(text) => text.as_bytes(),
+            ContentData::Bytes(bytes) => bytes.as_slice(),
+            _ => unreachable!(),
+        };
+        for chunk in data.chunks(FNX2_CHUNK_SIZE) {
+            let encrypted = encoder.encrypt_chunk(chunk).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            all_data.push(encrypted);
+        }
+    }
+
+    let body = Body::from(all_data.into_iter().flatten().collect::<Vec<u8>>());
+
+    Ok((resp_headers, body))
 }
-
-// ── Large-file streaming variant ─────────────────────────────────────────────
-//
-// For very large files we stream from disk rather than reading everything into
-// memory at once.  The tradeoff: we must encrypt the whole plaintext in memory
-// before streaming the ciphertext (GCM requires the full plaintext to compute
-// the authentication tag).  For files where memory matters, consider switching
-// to ChaCha20-Poly1305 with a streaming AEAD construction in a future version.
-//
-// Current limit: files up to ~500 MB work fine on typical desktop hardware.
-// Streaming encryption (e.g. age-style chunked AEAD) is tracked as a TODO.
