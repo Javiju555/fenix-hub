@@ -175,19 +175,20 @@ function setupEventListeners() {
     peerContent = [...peerContent.filter(p => p.content_id !== ann.content_id), ann];
     if (!onlineDevices.includes(ann.device_name)) onlineDevices = [...onlineDevices, ann.device_name];
     updateHeader();
-    if (activeTab === 'red') renderPeerContent();
+    renderPeerContent();
   });
   listen<{ content_id: string; device_name: string }>('peer-content-gone', ({ payload }) => {
     peerContent = peerContent.filter(p => p.content_id !== payload.content_id);
     if (!peerContent.some(p => p.device_name === payload.device_name))
       onlineDevices = onlineDevices.filter(d => d !== payload.device_name);
     updateHeader();
-    if (activeTab === 'red') renderPeerContent();
+    renderPeerContent();
   });
   listen<PeerContentPayload>('direct-notify-received', ({ payload }) => {
     const ann = payload.announcement;
     peerContent = [ann, ...peerContent.filter(p => p.content_id !== ann.content_id)];
     updateHeader();
+    renderPeerContent();
     if (collapsed) expand();
     switchTab('red');
   });
@@ -195,7 +196,7 @@ function setupEventListeners() {
     presenceDevices.add(deviceName);
     if (!onlineDevices.includes(deviceName)) onlineDevices = [...onlineDevices, deviceName];
     updateHeader();
-    if (activeTab === 'red') renderPeerContent();
+    renderPeerContent();
   });
   listen<string>('peer-offline', ({ payload: deviceName }) => {
     presenceDevices.delete(deviceName);
@@ -204,7 +205,7 @@ function setupEventListeners() {
       onlineDevices = onlineDevices.filter(d => d !== deviceName);
     }
     updateHeader();
-    if (activeTab === 'red') renderPeerContent();
+    renderPeerContent();
   });
 }
 
@@ -262,12 +263,11 @@ function renderSetup() {
 function renderHub() {
   document.getElementById('app')!.innerHTML = `
     <div class="hub" id="hub-root">
-      <header class="hub-header" id="hub-header">
+
+      <!-- ── Expanded header ─────────────────────────────────────────── -->
+      <header class="hub-header hub-expanded-header" id="hub-header">
         <div class="hub-logo">${iconHub(18)}</div>
         <span class="hub-title">FenixHub</span>
-        <span class="hub-device-label" title="Dispositivo: ${escapeHtml(identity?.device_name ?? '')}">
-          ${deviceTypeIcon(identity?.device_type ?? 'desktop', 13)}
-        </span>
 
         <div class="hub-tabs" id="hub-tabs">
           <button class="tab active" data-tab="local">${iconInbox(10)} Local <span class="badge" id="count-local">0</span></button>
@@ -280,22 +280,19 @@ function renderHub() {
           <span class="enc-badge" title="Cifrado AES-256-GCM extremo a extremo activo">${iconLock(9)}</span>
         </div>
 
-        <div class="hub-collapsed-bar" id="hub-collapsed-bar" title="Mostrar FenixHub">
-          <span class="hub-pull-grip" aria-hidden="true"></span>
-          <span class="hub-collapsed-copy">
-            <span class="hub-collapsed-label">${iconChevronDown(10)} Abrir</span>
-            <span class="hub-collapsed-counts">
-              <span class="hub-collapsed-pill">${iconInbox(9)} <span id="count-local-mini">0</span></span>
-              <span class="hub-collapsed-pill">${iconWifi(9)} <span id="count-red-mini">0</span></span>
-            </span>
-          </span>
-        </div>
-
         <div class="hub-actions">
           <button class="btn-icon" id="btn-share-all" title="Compartir todo con todos">${iconBroadcast(13)}</button>
           <button class="btn-icon" id="btn-collapse"  title="Minimizar a notch">${iconMinus(13)}</button>
           <button class="btn-icon danger" id="btn-close" title="Ocultar al tray">${iconX(12)}</button>
         </div>
+      </header>
+
+      <!-- ── Collapsed pill ──────────────────────────────────────────── -->
+      <header class="hub-header hub-pill-header" id="hub-pill-header">
+        <div class="hub-logo pill-logo">${iconHub(16)}</div>
+        <button class="pill-tab" id="pill-tab-local" data-pill-tab="local">${iconInbox(10)} Local <span class="badge" id="count-local-mini">0</span></button>
+        <button class="pill-tab pill-tab-red" id="pill-tab-red" data-pill-tab="red">${iconWifi(10)} Red <span class="badge badge-red" id="count-red-mini">0</span></button>
+        <button class="btn-icon danger pill-close" id="btn-pill-close" title="Cerrar al tray">${iconX(11)}</button>
       </header>
 
       <div class="tab-panel active" id="panel-local"></div>
@@ -320,15 +317,24 @@ function renderHub() {
   });
 
   // Collapse → pill
-  document.getElementById('btn-collapse')!.addEventListener('click', () => collapsed ? expand() : collapse());
+  document.getElementById('btn-collapse')!.addEventListener('click', () => collapse());
 
-  // Click header when collapsed → expand
-  document.getElementById('hub-header')!.addEventListener('click', (e) => {
-    if (collapsed && !(e.target as HTMLElement).closest('.hub-actions')) expand();
+  // Close app (expanded)
+  document.getElementById('btn-close')!.addEventListener('click', async () => {
+    await closeApp();
   });
 
-  // Close app
-  document.getElementById('btn-close')!.addEventListener('click', async () => {
+  // Pill tab buttons → expand + switch to tab
+  document.querySelectorAll<HTMLButtonElement>('.pill-tab').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const tab = btn.dataset.pillTab as 'local' | 'red';
+      await expand();
+      switchTab(tab);
+    });
+  });
+
+  // Pill close → send to tray
+  document.getElementById('btn-pill-close')!.addEventListener('click', async () => {
     await closeApp();
   });
 

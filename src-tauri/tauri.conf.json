@@ -18,7 +18,7 @@
         "height": 185,
         "minWidth": 280,
         "minHeight": 34,
-        "resizable": true,
+        "resizable": false,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
@@ -33,7 +33,7 @@
     },
     "trayIcon": {
       "id": "main",
-      "iconPath": "icons/logo-mark.png",
+      "iconPath": "icons/32x32.png",
       "iconAsTemplate": false,
       "tooltip": "FenixHub — portapapeles efímero"
     }

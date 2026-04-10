@@ -110,14 +110,13 @@ fn start_presence_discovery_mdns(
                     let props = info.get_properties();
                     let Some(device_name) = props
                         .get("device_name")
-                        .and_then(|v| v.val_str())
-                        .map(|s| s.to_string())
+                        .map(|v| v.val_str().to_string())
                     else {
                         continue;
                     };
                     let peer_group = props
                         .get("group_id")
-                        .and_then(|v| v.val_str())
+                        .map(|v| v.val_str())
                         .unwrap_or("");
                     if peer_group != group_id {
                         continue;

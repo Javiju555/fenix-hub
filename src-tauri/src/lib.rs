@@ -48,7 +48,6 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let state = app.state::<state::HubState>();
             temp_store::prepare().ok();
-            windowing::ensure_keepalive_window(&app_handle).ok();
 
             if let Some(window) = app_handle.get_webview_window("hub") {
                 windowing::attach_hub_window_handlers(&window, &app_handle);
