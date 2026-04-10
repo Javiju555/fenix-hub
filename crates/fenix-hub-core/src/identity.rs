@@ -18,8 +18,9 @@
 /// ```
 ///
 /// Deriving separate sub-keys from `group_key` via HKDF is standard practice
-/// (key separation). The `group_id` (first 16 bytes of group_key, hex-encoded) is
-/// advertised in mDNS so peers can filter out foreign groups before making HTTP calls.
+/// (key separation). The `group_id` is also derived via HKDF in an independent
+/// context and advertised in mDNS so peers can filter out foreign groups before
+/// making HTTP calls.
 use anyhow::Result;
 use argon2::{Algorithm, Argon2, Params, Version};
 use hkdf::Hkdf;
@@ -29,11 +30,15 @@ use sha2::Sha256;
 /// Argon2id salt — changing this bumps the protocol version and invalidates
 /// all existing group keys (users must re-enter their passphrase).
 /// v2: increased memory cost (64 MiB → stronger brute-force resistance).
-const ARGON2_SALT: &[u8] = b"fenixhub-v2";
+const ARGON2_GROUP_SALT: &[u8] = b"fenixhub-v2";
 
 /// HKDF info strings for key separation.
 const HKDF_INFO_MAC: &[u8] = b"fenixhub-v2-mac";
 const HKDF_INFO_ENC: &[u8] = b"fenixhub-v2-enc";
+const HKDF_INFO_GROUP_ID: &[u8] = b"fenixhub-v2-group-id";
+
+const MIN_PASSPHRASE_LEN: usize = 10;
+const MAX_PASSPHRASE_LEN: usize = 256;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -52,6 +57,10 @@ pub struct GroupIdentity {
     /// Used to encrypt all content in transit.
     enc_key: [u8; 32],
 
+    /// Public group identifier derived in a dedicated HKDF context.
+    /// Safe to advertise for peer filtering.
+    group_id: [u8; 16],
+
     /// Human-readable device name shown to peers (e.g. "Arch Desktop").
     pub device_name: String,
 }
@@ -69,13 +78,16 @@ impl GroupIdentity {
     /// - Iterations:  3 passes
     /// - Parallelism: 1 lane
     pub fn from_passphrase(passphrase: &str, device_name: &str) -> Result<Self> {
+        let passphrase = passphrase.trim();
+        validate_passphrase_strength(passphrase)?;
+
         let params = Params::new(65536, 3, 1, Some(32))
             .map_err(|e| anyhow::anyhow!("Invalid Argon2 params: {}", e))?;
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
         let mut group_key = [0u8; 32];
         argon2
-            .hash_password_into(passphrase.as_bytes(), ARGON2_SALT, &mut group_key)
+            .hash_password_into(passphrase.as_bytes(), ARGON2_GROUP_SALT, &mut group_key)
             .map_err(|e| anyhow::anyhow!("Key derivation failed: {}", e))?;
 
         Ok(Self::from_group_key(group_key, device_name))
@@ -95,11 +107,12 @@ impl GroupIdentity {
 
     /// Internal: build identity from raw group_key + derive sub-keys.
     fn from_group_key(group_key: [u8; 32], device_name: &str) -> Self {
-        let (mac_key, enc_key) = derive_subkeys(&group_key);
+        let (mac_key, enc_key, group_id) = derive_subkeys(&group_key);
         Self {
             group_key,
             mac_key,
             enc_key,
+            group_id,
             device_name: device_name.to_string(),
         }
     }
@@ -109,10 +122,10 @@ impl GroupIdentity {
         hex::encode(self.group_key)
     }
 
-    /// Returns the first 16 bytes of group_key as hex (public group identifier).
+    /// Returns the derived group identifier as hex (public group identifier).
     /// Safe to advertise in mDNS — peers use it to filter foreign groups.
     pub fn group_id(&self) -> String {
-        hex::encode(&self.group_key[..16])
+        hex::encode(self.group_id)
     }
 
     /// Returns the AES-256-GCM encryption key (derived via HKDF from group_key).
@@ -143,18 +156,78 @@ impl GroupIdentity {
 /// HKDF expands the group_key into two independent 32-byte keys using distinct
 /// info strings. This ensures that even if the MAC key were somehow leaked, the
 /// encryption key remains safe (and vice versa).
-fn derive_subkeys(group_key: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+fn derive_subkeys(group_key: &[u8; 32]) -> ([u8; 32], [u8; 32], [u8; 16]) {
     let hkdf = Hkdf::<Sha256>::new(None, group_key);
 
     let mut mac_key = [0u8; 32];
     let mut enc_key = [0u8; 32];
+    let mut group_id = [0u8; 16];
 
     hkdf.expand(HKDF_INFO_MAC, &mut mac_key)
         .expect("HKDF expand for MAC key: output length is valid");
     hkdf.expand(HKDF_INFO_ENC, &mut enc_key)
         .expect("HKDF expand for ENC key: output length is valid");
+    hkdf.expand(HKDF_INFO_GROUP_ID, &mut group_id)
+        .expect("HKDF expand for group_id: output length is valid");
 
-    (mac_key, enc_key)
+    (mac_key, enc_key, group_id)
+}
+
+/// Enforces a baseline passphrase quality policy for group derivation.
+pub fn validate_passphrase_strength(passphrase: &str) -> Result<()> {
+    let passphrase = passphrase.trim();
+    if passphrase.is_empty() {
+        anyhow::bail!("Passphrase cannot be empty");
+    }
+
+    let len = passphrase.chars().count();
+    if len < MIN_PASSPHRASE_LEN {
+        anyhow::bail!(
+            "Passphrase must be at least {} characters long",
+            MIN_PASSPHRASE_LEN
+        );
+    }
+    if len > MAX_PASSPHRASE_LEN {
+        anyhow::bail!(
+            "Passphrase must be at most {} characters long",
+            MAX_PASSPHRASE_LEN
+        );
+    }
+
+    let mut has_lower = false;
+    let mut has_upper = false;
+    let mut has_digit = false;
+    let mut has_symbol = false;
+    let mut unique_chars = std::collections::HashSet::new();
+
+    for ch in passphrase.chars() {
+        unique_chars.insert(ch);
+        if ch.is_ascii_lowercase() {
+            has_lower = true;
+        } else if ch.is_ascii_uppercase() {
+            has_upper = true;
+        } else if ch.is_ascii_digit() {
+            has_digit = true;
+        } else if !ch.is_whitespace() {
+            has_symbol = true;
+        }
+    }
+
+    if unique_chars.len() < 4 {
+        anyhow::bail!("Passphrase is too repetitive; use more character variety");
+    }
+
+    let class_count = [has_lower, has_upper, has_digit, has_symbol]
+        .into_iter()
+        .filter(|v| *v)
+        .count();
+    if class_count < 2 {
+        anyhow::bail!(
+            "Passphrase must include at least 2 character classes (lower/upper/digit/symbol)"
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -163,8 +236,8 @@ mod tests {
 
     #[test]
     fn same_passphrase_same_keys() {
-        let a = GroupIdentity::from_passphrase("test", "A").unwrap();
-        let b = GroupIdentity::from_passphrase("test", "B").unwrap();
+        let a = GroupIdentity::from_passphrase("SharedPass2026", "A").unwrap();
+        let b = GroupIdentity::from_passphrase("SharedPass2026", "B").unwrap();
         assert_eq!(a.group_key, b.group_key);
         assert_eq!(a.mac_key, b.mac_key);
         assert_eq!(a.enc_key, b.enc_key);
@@ -172,21 +245,21 @@ mod tests {
 
     #[test]
     fn different_passphrases_different_keys() {
-        let a = GroupIdentity::from_passphrase("foo", "dev").unwrap();
-        let b = GroupIdentity::from_passphrase("bar", "dev").unwrap();
+        let a = GroupIdentity::from_passphrase("ProjectA2026", "dev").unwrap();
+        let b = GroupIdentity::from_passphrase("ProjectB2026", "dev").unwrap();
         assert_ne!(a.group_key, b.group_key);
         assert_ne!(a.enc_key, b.enc_key);
     }
 
     #[test]
     fn mac_and_enc_keys_differ() {
-        let id = GroupIdentity::from_passphrase("passphrase", "dev").unwrap();
+        let id = GroupIdentity::from_passphrase("Passphrase2026", "dev").unwrap();
         assert_ne!(id.mac_key, id.enc_key);
     }
 
     #[test]
     fn round_trip_hex() {
-        let original = GroupIdentity::from_passphrase("hello", "dev").unwrap();
+        let original = GroupIdentity::from_passphrase("HelloKey2026", "dev").unwrap();
         let restored = GroupIdentity::from_key_hex(&original.key_hex(), "dev").unwrap();
         assert_eq!(original.group_key, restored.group_key);
         assert_eq!(original.enc_key, restored.enc_key);
@@ -194,15 +267,26 @@ mod tests {
 
     #[test]
     fn sign_verify_round_trip() {
-        let id = GroupIdentity::from_passphrase("pw", "dev").unwrap();
+        let id = GroupIdentity::from_passphrase("PassKey2026", "dev").unwrap();
         let sig = id.sign(b"content-id-123");
         assert!(id.verify(b"content-id-123", &sig));
         assert!(!id.verify(b"content-id-456", &sig));
     }
 
     #[test]
+    fn weak_passphrase_is_rejected() {
+        assert!(GroupIdentity::from_passphrase("aaaaaaaa", "dev").is_err());
+        assert!(GroupIdentity::from_passphrase("123456789", "dev").is_err());
+    }
+
+    #[test]
+    fn strong_passphrase_is_accepted() {
+        assert!(GroupIdentity::from_passphrase("CasaRoca2026", "dev").is_ok());
+    }
+
+    #[test]
     fn group_id_is_16_bytes_hex() {
-        let id = GroupIdentity::from_passphrase("abc", "dev").unwrap();
+        let id = GroupIdentity::from_passphrase("AbcGroup2026", "dev").unwrap();
         assert_eq!(id.group_id().len(), 32); // 16 bytes → 32 hex chars
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "fenix-hub-app"
-version = "0.1.0"
+version = "0.2.2"
 edition = "2021"
 
 [lib]
@@ -26,6 +26,7 @@ mdns-sd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+hex = { workspace = true }
 base64 = "0.22"
 uuid = { workspace = true }
 

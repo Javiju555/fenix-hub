@@ -52,6 +52,8 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 # Random nonce generation
 rand = "0.8"
+# Compression for large transferable files
+zstd = "0.13"
 
 # Logging
 tracing = "0.1"

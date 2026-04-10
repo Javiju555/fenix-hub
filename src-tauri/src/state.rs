@@ -23,6 +23,8 @@ pub struct HubState {
     pub mdns: ServiceDaemon,
     pub server_shutdown: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
     pub server_port: Arc<RwLock<Option<u16>>>,
+    pub server_guard_shutdown: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    pub server_guard_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     pub ui_closing: Arc<AtomicBool>,
 }
 
@@ -53,6 +55,8 @@ impl HubState {
             mdns,
             server_shutdown: Arc::new(RwLock::new(None)),
             server_port: Arc::new(RwLock::new(None)),
+            server_guard_shutdown: Arc::new(RwLock::new(None)),
+            server_guard_task: Arc::new(RwLock::new(None)),
             ui_closing: Arc::new(AtomicBool::new(false)),
         }
     }

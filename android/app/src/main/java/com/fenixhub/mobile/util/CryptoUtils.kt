@@ -15,23 +15,35 @@ import javax.crypto.spec.SecretKeySpec
 object CryptoUtils {
     private val argon2 by lazy { Argon2Kt() }
     private val secureRandom = SecureRandom()
-    private const val AUTH_CHALLENGE_PREFIX = "auth/challenge:"
     private const val HMAC_SHA256 = "HmacSHA256"
+    private const val SHA_256 = "SHA-256"
+
+    const val HMAC_HEADER = "X-FenixHub-Auth"
+    const val AUTH_TIMESTAMP_HEADER = "X-FenixHub-Timestamp"
+    const val AUTH_NONCE_HEADER = "X-FenixHub-Nonce"
+    const val AUTH_BODY_SHA256_HEADER = "X-FenixHub-Body-Sha256"
+
+    const val AUTH_MAX_SKEW_MS = 90_000L
+    const val EMPTY_BODY_SHA256_HEX = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+    private const val MIN_PASSPHRASE_LEN = 10
+    private const val MAX_PASSPHRASE_LEN = 256
 
     private const val NONCE_SIZE = 12
     private const val GCM_TAG_BITS = 128
     private const val MIN_ENCRYPTED_SIZE = NONCE_SIZE + 16
 
-    private val ARGON2_SALT = "fenixhub-v2".toByteArray(Charsets.UTF_8)
+    private val ARGON2_GROUP_SALT = "fenixhub-v2".toByteArray(Charsets.UTF_8)
     private val HKDF_INFO_MAC = "fenixhub-v2-mac".toByteArray(Charsets.UTF_8)
     private val HKDF_INFO_ENC = "fenixhub-v2-enc".toByteArray(Charsets.UTF_8)
+    private val HKDF_INFO_GROUP_ID = "fenixhub-v2-group-id".toByteArray(Charsets.UTF_8)
     private val HKDF_ZERO_SALT = ByteArray(32)
 
     fun deriveGroupKey(passphrase: String): ByteArray {
         val result = argon2.hash(
             mode = Argon2Mode.ARGON2_ID,
             password = passphrase.toByteArray(Charsets.UTF_8),
-            salt = ARGON2_SALT,
+            salt = ARGON2_GROUP_SALT,
             tCostInIterations = 3,
             mCostInKibibyte = 65536,
             parallelism = 1,
@@ -101,11 +113,81 @@ object CryptoUtils {
         }
     }
 
-    fun authChallengeHeaderMessage(nonce: String): ByteArray {
-        return "$AUTH_CHALLENGE_PREFIX$nonce".toByteArray(Charsets.UTF_8)
+    fun groupIdFromKey(key: ByteArray): String {
+        require(key.size == 32) { "groupKey must be 32 bytes" }
+        val groupIdBytes = hkdfExpand(hkdfExtract(key), HKDF_INFO_GROUP_ID, 16)
+        return toHex(groupIdBytes)
     }
 
-    fun groupIdFromKey(key: ByteArray): String = toHex(key.copyOfRange(0, 16))
+    fun newAuthNonceHex(): String {
+        val nonce = ByteArray(16).also(secureRandom::nextBytes)
+        return toHex(nonce)
+    }
+
+    fun isValidAuthNonceHex(nonceHex: String): Boolean {
+        val normalized = nonceHex.trim().lowercase()
+        return normalized.length in 16..128 &&
+            normalized.length % 2 == 0 &&
+            normalized.all { it.isDigit() || it in 'a'..'f' }
+    }
+
+    fun sha256Hex(message: ByteArray): String {
+        return toHex(MessageDigest.getInstance(SHA_256).digest(message))
+    }
+
+    fun canonicalAuthMessage(
+        method: String,
+        path: String,
+        groupId: String,
+        timestampMs: Long,
+        nonceHex: String,
+        bodySha256Hex: String,
+    ): ByteArray {
+        return buildString {
+            append("fenixhub-auth-v1\n")
+            append(method.trim().uppercase())
+            append('\n')
+            append(path.trim())
+            append('\n')
+            append(groupId.trim())
+            append('\n')
+            append(timestampMs)
+            append('\n')
+            append(nonceHex.trim().lowercase())
+            append('\n')
+            append(bodySha256Hex.trim().lowercase())
+        }.toByteArray(Charsets.UTF_8)
+    }
+
+    fun validatePassphraseStrength(passphrase: String): String? {
+        val normalized = passphrase.trim()
+        if (normalized.isBlank()) {
+            return "La passphrase es obligatoria"
+        }
+
+        if (normalized.length < MIN_PASSPHRASE_LEN) {
+            return "La passphrase debe tener al menos $MIN_PASSPHRASE_LEN caracteres"
+        }
+
+        if (normalized.length > MAX_PASSPHRASE_LEN) {
+            return "La passphrase supera el maximo de $MAX_PASSPHRASE_LEN caracteres"
+        }
+
+        val hasLower = normalized.any { it.isLowerCase() }
+        val hasUpper = normalized.any { it.isUpperCase() }
+        val hasDigit = normalized.any { it.isDigit() }
+        val hasSymbol = normalized.any { !it.isLetterOrDigit() && !it.isWhitespace() }
+        val classCount = listOf(hasLower, hasUpper, hasDigit, hasSymbol).count { it }
+        if (classCount < 2) {
+            return "Usa al menos 2 tipos de caracteres (minusculas, mayusculas, numeros o simbolos)"
+        }
+
+        if (normalized.toSet().size < 4) {
+            return "La passphrase es demasiado repetitiva"
+        }
+
+        return null
+    }
 
     fun toHex(bytes: ByteArray): String = bytes.joinToString(separator = "") { "%02x".format(it) }
 

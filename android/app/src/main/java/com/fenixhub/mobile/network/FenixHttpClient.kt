@@ -1,5 +1,6 @@
 package com.fenixhub.mobile.network
 
+import com.github.luben.zstd.ZstdInputStream
 import com.fenixhub.mobile.model.AppSettings
 import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.PulledContent
@@ -9,8 +10,14 @@ import kotlinx.coroutines.withContext
 import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.security.GeneralSecurityException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 class FenixHttpClient {
     private val client = OkHttpClient.Builder()
@@ -23,10 +30,19 @@ class FenixHttpClient {
     suspend fun pullContent(peer: PeerContent, settings: AppSettings): Result<PulledContent> {
         return withContext(Dispatchers.IO) {
             runCatching {
-                val authHeader = CryptoUtils.hmacSha256Hex(
-                    settings.macKeyBytes(),
-                    peer.announcement.contentId.toByteArray(Charsets.UTF_8),
+                val canonicalPath = "/content/${peer.announcement.contentId}"
+                val timestampMs = System.currentTimeMillis()
+                val nonceHex = CryptoUtils.newAuthNonceHex()
+                val bodySha256Hex = CryptoUtils.EMPTY_BODY_SHA256_HEX
+                val canonicalAuth = CryptoUtils.canonicalAuthMessage(
+                    method = "GET",
+                    path = canonicalPath,
+                    groupId = settings.groupId,
+                    timestampMs = timestampMs,
+                    nonceHex = nonceHex,
+                    bodySha256Hex = bodySha256Hex,
                 )
+                val authHeader = CryptoUtils.hmacSha256Hex(settings.macKeyBytes(), canonicalAuth)
 
                 val request = Request.Builder()
                     .url(
@@ -34,7 +50,10 @@ class FenixHttpClient {
                             URLEncoder.encode(peer.announcement.contentId, "UTF-8")
                         }",
                     )
-                    .header("X-FenixHub-Auth", authHeader)
+                    .header(CryptoUtils.HMAC_HEADER, authHeader)
+                    .header(CryptoUtils.AUTH_TIMESTAMP_HEADER, timestampMs.toString())
+                    .header(CryptoUtils.AUTH_NONCE_HEADER, nonceHex)
+                    .header(CryptoUtils.AUTH_BODY_SHA256_HEADER, bodySha256Hex)
                     .get()
                     .build()
 
@@ -46,16 +65,16 @@ class FenixHttpClient {
                         error("HTTP ${response.code}")
                     }
                     val body = response.body ?: error("Empty response body")
-                    val encrypted = response.header(ENCRYPTED_HEADER) == "1"
+                    val encryptedHeader = response.header(ENCRYPTED_HEADER)
                     val rawBytes = body.bytes()
                     val recvMs = System.currentTimeMillis() - startMs
                     Log.d(TAG, "Received ${rawBytes.size / 1024} KB in ${recvMs}ms")
 
                     val decryptStart = System.currentTimeMillis()
-                    val bytes = if (encrypted) {
-                        CryptoUtils.decryptAesGcm(settings.encKeyBytes(), rawBytes)
-                    } else {
-                        rawBytes
+                    val bytes = when (encryptedHeader) {
+                        "1" -> CryptoUtils.decryptAesGcm(settings.encKeyBytes(), rawBytes)
+                        "2" -> decryptFnx2V2(settings.encKeyBytes(), rawBytes)
+                        else -> rawBytes
                     }
                     val decryptMs = System.currentTimeMillis() - decryptStart
                     Log.i(TAG, "Pull complete: ${bytes.size / 1024} KB — recv ${recvMs}ms, decrypt ${decryptMs}ms, total ${System.currentTimeMillis() - startMs}ms")
@@ -73,6 +92,150 @@ class FenixHttpClient {
     private companion object {
         const val TAG = "FenixHubClient"
         const val ENCRYPTED_HEADER = "X-FenixHub-Encrypted"
+        const val FNX2_HEADER_SIZE = 29
+        const val FNX2_CHUNK_SIZE = 64 * 1024
+        const val FNX2_GCM_TAG_BYTES = 16
+        const val FNX2_COMPRESSION_NONE = 0x00
+        const val FNX2_COMPRESSION_ZSTD = 0x01
+        const val GCM_TAG_BITS = 128
+        val FNX2_MAGIC = byteArrayOf('F'.code.toByte(), 'N'.code.toByte(), 'X'.code.toByte(), '2'.code.toByte())
+    }
+
+    private fun decryptFnx2V2(encKey: ByteArray, rawPayload: ByteArray): ByteArray {
+        require(encKey.size == 32) { "AES key must be 32 bytes" }
+        if (rawPayload.size < FNX2_HEADER_SIZE) {
+            error("FNX2 header too short: ${rawPayload.size} bytes")
+        }
+        if (!rawPayload.copyOfRange(0, 4).contentEquals(FNX2_MAGIC)) {
+            error("Invalid FNX2 magic")
+        }
+
+        val baseNonce = rawPayload.copyOfRange(4, 16)
+        val totalChunks = readIntBE(rawPayload, 16)
+        val originalSize = readLongBE(rawPayload, 20)
+        val compression = rawPayload[28].toInt() and 0xff
+
+        if (totalChunks < 0) {
+            error("Invalid FNX2 total_chunks: $totalChunks")
+        }
+
+        val encryptedLen = rawPayload.size - FNX2_HEADER_SIZE
+        if (totalChunks == 0) {
+            if (encryptedLen != 0) {
+                error("Invalid FNX2 payload: header declares 0 chunks but body has data")
+            }
+            return decodeFnx2Compression(ByteArray(0), compression, originalSize)
+        }
+
+        val fullChunkEncryptedLen = FNX2_CHUNK_SIZE + FNX2_GCM_TAG_BYTES
+        val minimumCiphertextBytes =
+            (totalChunks.toLong() - 1L) * fullChunkEncryptedLen.toLong() + FNX2_GCM_TAG_BYTES.toLong()
+        if (encryptedLen.toLong() < minimumCiphertextBytes) {
+            error(
+                "FNX2 payload truncated: expected at least $minimumCiphertextBytes bytes of ciphertext, got $encryptedLen",
+            )
+        }
+
+        val plaintextOut = ByteArrayOutputStream()
+        var cursor = FNX2_HEADER_SIZE
+
+        for (chunkIndex in 0 until totalChunks) {
+            val chunkLen = if (chunkIndex < totalChunks - 1) {
+                fullChunkEncryptedLen
+            } else {
+                rawPayload.size - cursor
+            }
+
+            if (chunkLen < FNX2_GCM_TAG_BYTES) {
+                error("FNX2 chunk $chunkIndex too short: $chunkLen bytes")
+            }
+
+            val chunkCiphertext = rawPayload.copyOfRange(cursor, cursor + chunkLen)
+            val chunkNonce = deriveFnx2ChunkNonce(baseNonce, chunkIndex.toLong())
+            val plaintextChunk = decryptAesGcmChunk(encKey, chunkNonce, chunkCiphertext, chunkIndex)
+            plaintextOut.write(plaintextChunk)
+            cursor += chunkLen
+        }
+
+        if (cursor != rawPayload.size) {
+            error("FNX2 payload malformed: trailing bytes after chunk decode")
+        }
+
+        return decodeFnx2Compression(plaintextOut.toByteArray(), compression, originalSize)
+    }
+
+    private fun decodeFnx2Compression(payload: ByteArray, compression: Int, originalSize: Long): ByteArray {
+        return when (compression) {
+            FNX2_COMPRESSION_NONE -> payload
+            FNX2_COMPRESSION_ZSTD -> {
+                val out = ByteArrayOutputStream(payload.size)
+                ByteArrayInputStream(payload).use { input ->
+                    ZstdInputStream(input).use { zstd ->
+                        val buffer = ByteArray(16 * 1024)
+                        while (true) {
+                            val read = zstd.read(buffer)
+                            if (read < 0) {
+                                break
+                            }
+                            if (read == 0) {
+                                continue
+                            }
+                            out.write(buffer, 0, read)
+                        }
+                    }
+                }
+                val decoded = out.toByteArray()
+                if (originalSize >= 0 && decoded.size.toLong() != originalSize) {
+                    error("FNX2 zstd size mismatch: expected $originalSize bytes, got ${decoded.size}")
+                }
+                decoded
+            }
+            else -> error("Unsupported FNX2 compression mode: $compression")
+        }
+    }
+
+    private fun decryptAesGcmChunk(
+        key: ByteArray,
+        nonce: ByteArray,
+        ciphertext: ByteArray,
+        chunkIndex: Int,
+    ): ByteArray {
+        return try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(key, "AES"),
+                GCMParameterSpec(GCM_TAG_BITS, nonce),
+            )
+            cipher.doFinal(ciphertext)
+        } catch (e: GeneralSecurityException) {
+            throw IllegalStateException("FNX2 chunk $chunkIndex decryption failed", e)
+        }
+    }
+
+    private fun deriveFnx2ChunkNonce(baseNonce: ByteArray, chunkIndex: Long): ByteArray {
+        val nonce = baseNonce.copyOf()
+        for (i in 0 until 8) {
+            val shift = (7 - i) * 8
+            val indexByte = ((chunkIndex ushr shift) and 0xffL).toInt()
+            nonce[4 + i] = (nonce[4 + i].toInt() xor indexByte).toByte()
+        }
+        return nonce
+    }
+
+    private fun readIntBE(bytes: ByteArray, offset: Int): Int {
+        return ((bytes[offset].toInt() and 0xff) shl 24) or
+            ((bytes[offset + 1].toInt() and 0xff) shl 16) or
+            ((bytes[offset + 2].toInt() and 0xff) shl 8) or
+            (bytes[offset + 3].toInt() and 0xff)
+    }
+
+    private fun readLongBE(bytes: ByteArray, offset: Int): Long {
+        var value = 0L
+        for (i in 0 until 8) {
+            value = (value shl 8) or (bytes[offset + i].toLong() and 0xffL)
+        }
+        return value
     }
 
     private fun urlHost(host: String): String = if (host.contains(':')) "[$host]" else host

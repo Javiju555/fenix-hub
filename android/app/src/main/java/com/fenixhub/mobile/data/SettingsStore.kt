@@ -26,11 +26,18 @@ class SettingsStore(context: Context) {
     fun current(): AppSettings = mutableSettings.value
 
     fun saveIdentity(passphrase: String, deviceName: String): AppSettings {
-        val groupKey = CryptoUtils.deriveGroupKey(passphrase)
+        val normalizedPassphrase = passphrase.trim()
+        val normalizedDeviceName = deviceName.trim()
+        require(normalizedDeviceName.isNotBlank()) { "El nombre del dispositivo es obligatorio" }
+        CryptoUtils.validatePassphraseStrength(normalizedPassphrase)?.let { message ->
+            throw IllegalArgumentException(message)
+        }
+
+        val groupKey = CryptoUtils.deriveGroupKey(normalizedPassphrase)
         val groupKeyHex = CryptoUtils.toHex(groupKey)
         val settings = AppSettings(
             configured = true,
-            deviceName = deviceName.trim(),
+            deviceName = normalizedDeviceName,
             groupKeyHex = groupKeyHex,
             groupId = CryptoUtils.groupIdFromKey(groupKey),
         )
@@ -92,11 +99,27 @@ class SettingsStore(context: Context) {
             )
         }
 
+        val deviceName = prefs.getString(KEY_DEVICE_NAME, "").orEmpty()
+        val groupKeyHex = prefs.getString(KEY_GROUP_KEY_HEX, "").orEmpty()
+        val savedGroupId = prefs.getString(KEY_GROUP_ID, "").orEmpty()
+
+        val derivedGroupId = if (configured && groupKeyHex.isNotBlank()) {
+            runCatching {
+                CryptoUtils.groupIdFromKey(CryptoUtils.hexToBytes(groupKeyHex))
+            }.getOrDefault(savedGroupId)
+        } else {
+            savedGroupId
+        }
+
+        if (configured && derivedGroupId.isNotBlank() && derivedGroupId != savedGroupId) {
+            prefs.edit().putString(KEY_GROUP_ID, derivedGroupId).apply()
+        }
+
         return AppSettings(
             configured = configured,
-            deviceName = prefs.getString(KEY_DEVICE_NAME, "").orEmpty(),
-            groupKeyHex = prefs.getString(KEY_GROUP_KEY_HEX, "").orEmpty(),
-            groupId = prefs.getString(KEY_GROUP_ID, "").orEmpty(),
+            deviceName = deviceName,
+            groupKeyHex = groupKeyHex,
+            groupId = derivedGroupId,
         )
     }
 

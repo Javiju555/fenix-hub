@@ -18,6 +18,8 @@ import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.PulledContent
 import com.fenixhub.mobile.model.SendMode
 import com.fenixhub.mobile.service.FenixHubService
+import com.fenixhub.mobile.util.CryptoUtils
+import com.fenixhub.mobile.util.TransportHardwareInspector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -100,9 +102,95 @@ class AndroidHubBridge(
                 "null"
             }
             "pull_peer_content" -> pullPeerContent(args).toString()
+            "get_transport_hardware" -> getTransportHardwareJson().toString()
             "open_overlay" -> if (openOverlay()) "true" else "false"
             else -> error("Comando no soportado: $command")
         }
+    }
+
+    private fun getTransportHardwareJson(): JSONObject {
+        val settings = container.settingsStore.current()
+        if (settings.configured) {
+            container.bleIdentityController.ensureRunning(settings.groupId, settings.deviceName)
+            container.wifiDirectController.ensureRunning()
+        }
+
+        val snapshot = TransportHardwareInspector.snapshot(activity)
+        val bleStatus = container.bleIdentityController.status()
+        val wifiStatus = container.wifiDirectController.status()
+        val blePeers = container.bleIdentityController.snapshotPeers()
+        val wifiPeers = container.wifiDirectController.snapshotPeers()
+
+        val handoffCandidates = JSONArray().apply {
+            blePeers.forEach { blePeer ->
+                val wifiPeer = wifiPeers.firstOrNull { candidate ->
+                    candidate.deviceName.trim().equals(blePeer.deviceName.trim(), ignoreCase = true)
+                }
+                if (wifiPeer != null) {
+                    put(
+                        JSONObject()
+                            .put("device_name", blePeer.deviceName)
+                            .put("ble_id", blePeer.deviceId)
+                            .put("wifi_direct_id", wifiPeer.deviceAddress)
+                            .put("flow", "ble_discovery_then_wifi_direct_transfer"),
+                    )
+                }
+            }
+        }
+
+        val blePeersJson = JSONArray().apply {
+            blePeers.forEach { peer ->
+                put(
+                    JSONObject()
+                        .put("id", peer.deviceId)
+                        .put("device_name", peer.deviceName)
+                        .put("rssi", peer.rssi)
+                        .put("last_seen_elapsed_ms", peer.lastSeenElapsedMs),
+                )
+            }
+        }
+
+        val wifiPeersJson = JSONArray().apply {
+            wifiPeers.forEach { peer ->
+                put(
+                    JSONObject()
+                        .put("id", peer.deviceAddress)
+                        .put("device_name", peer.deviceName)
+                        .put("status", peer.status)
+                        .put("last_seen_elapsed_ms", peer.lastSeenElapsedMs),
+                )
+            }
+        }
+
+        val airdropReady = snapshot.ble.supported && snapshot.ble.enabled && snapshot.ble.permissionsReady &&
+            snapshot.wifiDirect.supported && snapshot.wifiDirect.enabled && snapshot.wifiDirect.permissionsReady
+
+        return JSONObject()
+            .put(
+                "ble",
+                JSONObject()
+                    .put("supported", snapshot.ble.supported)
+                    .put("enabled", snapshot.ble.enabled)
+                    .put("permissions_ready", snapshot.ble.permissionsReady)
+                    .put("adapter_name", nullable(snapshot.ble.adapterName))
+                    .put("scanning", bleStatus.scanning)
+                    .put("advertising", bleStatus.advertising)
+                    .put("last_error", nullable(bleStatus.lastError)),
+            )
+            .put(
+                "wifi_direct",
+                JSONObject()
+                    .put("supported", snapshot.wifiDirect.supported)
+                    .put("enabled", snapshot.wifiDirect.enabled)
+                    .put("permissions_ready", snapshot.wifiDirect.permissionsReady)
+                    .put("discovering", wifiStatus.discovering)
+                    .put("last_error", nullable(wifiStatus.lastError)),
+            )
+            .put("airdrop_ready", airdropReady)
+            .put("flow", "ble_discovery_then_wifi_direct_transfer")
+            .put("ble_peers", blePeersJson)
+            .put("wifi_direct_peers", wifiPeersJson)
+            .put("handoff_candidates", handoffCandidates)
     }
 
     private fun identityJson(): JSONObject {
@@ -118,6 +206,9 @@ class AndroidHubBridge(
         val deviceName = args.optString("device_name").trim()
         require(passphrase.isNotBlank()) { "La frase de acceso es obligatoria" }
         require(deviceName.isNotBlank()) { "El nombre del dispositivo es obligatorio" }
+        CryptoUtils.validatePassphraseStrength(passphrase)?.let { message ->
+            error(message)
+        }
 
         val settings = withContext(Dispatchers.Default) {
             container.settingsStore.saveIdentity(passphrase, deviceName)

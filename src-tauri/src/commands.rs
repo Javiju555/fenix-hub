@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 /// Tauri IPC commands — callable from the frontend via invoke().
+#[cfg(not(target_os = "windows"))]
+use std::path::Path;
+use std::time::{Duration, Instant};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
@@ -19,7 +22,8 @@ use crate::windowing;
 const MAX_ANNOUNCEMENT_BYTES: usize = 1000;
 const MAX_ANNOUNCEMENT_FILE_NAME_CHARS: usize = 80;
 const MIN_ANNOUNCEMENT_PREVIEW_CHARS: usize = 24;
-const ANNOUNCEMENT_PREVIEW_TRIM_STEP: usize = 8;
+const MAX_PUBLISH_LIFETIME: Duration = Duration::from_secs(10 * 60);
+const SERVER_GUARD_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 // ── Identity ──────────────────────────────────────────────────────────────────
 
@@ -67,8 +71,14 @@ pub async fn setup_identity(
     app: AppHandle,
     state: State<'_, HubState>,
 ) -> Result<IdentityInfo, String> {
+    let had_identity = state.identity.read().await.is_some();
+    let trimmed_name = args.device_name.trim();
+    if trimmed_name.is_empty() {
+        return Err("Device name is required".to_string());
+    }
+
     let identity = if let Some(ref pass) = args.passphrase {
-        GroupIdentity::from_passphrase(pass, &args.device_name).map_err(|e| e.to_string())?
+        GroupIdentity::from_passphrase(pass, trimmed_name).map_err(|e| e.to_string())?
     } else {
         // No new passphrase — keep existing group key, just rename device
         let existing = state
@@ -77,44 +87,543 @@ pub async fn setup_identity(
             .await
             .clone()
             .ok_or("No existing identity to update")?;
-        GroupIdentity::from_key_hex(&existing.key_hex(), &args.device_name)
+        GroupIdentity::from_key_hex(&existing.key_hex(), trimmed_name)
             .map_err(|e| e.to_string())?
     };
     let identity = Arc::new(identity);
 
     // Resolve device_type: use provided value, fall back to existing, then default.
-    let device_type = match args.device_type.as_deref() {
+    let fallback_type = state.device_type.read().await.clone();
+    let device_type = parse_device_type(args.device_type.as_deref(), &fallback_type);
+
+    // Persist derived key to disk (passphrase never saved)
+    persist::save(&identity, &device_type).map_err(|e| e.to_string())?;
+
+    // Start discovery only on first-time setup to avoid duplicate discovery loops.
+    if !had_identity {
+        discovery::start(
+            app,
+            state.mdns.clone(),
+            identity.clone(),
+            state.peer_content.clone(),
+        );
+    }
+
+    *state.device_type.write().await = device_type;
+    *state.identity.write().await = Some(identity);
+    get_identity(state).await
+}
+
+#[derive(Serialize)]
+pub struct UpdateIdentityResult {
+    pub identity: IdentityInfo,
+    pub group_changed: bool,
+    pub requires_restart: bool,
+}
+
+#[tauri::command]
+pub async fn update_identity(
+    args: SetupIdentityArgs,
+    state: State<'_, HubState>,
+) -> Result<UpdateIdentityResult, String> {
+    let existing = state
+        .identity
+        .read()
+        .await
+        .clone()
+        .ok_or("Identity not configured")?;
+    let previous_group_id = existing.group_id();
+
+    let trimmed_name = args.device_name.trim();
+    if trimmed_name.is_empty() {
+        return Err("Device name is required".to_string());
+    }
+
+    let next_identity = if let Some(passphrase) = args.passphrase.as_deref() {
+        let passphrase = passphrase.trim();
+        if passphrase.is_empty() {
+            return Err("Passphrase cannot be empty".to_string());
+        }
+        GroupIdentity::from_passphrase(passphrase, trimmed_name).map_err(|e| e.to_string())?
+    } else {
+        GroupIdentity::from_key_hex(&existing.key_hex(), trimmed_name).map_err(|e| e.to_string())?
+    };
+
+    let fallback_type = state.device_type.read().await.clone();
+    let device_type = parse_device_type(args.device_type.as_deref(), &fallback_type);
+    let group_changed = next_identity.group_id() != previous_group_id;
+
+    persist::save(&next_identity, &device_type).map_err(|e| e.to_string())?;
+    *state.identity.write().await = Some(Arc::new(next_identity));
+    *state.device_type.write().await = device_type;
+
+    // Existing live announcements carry old identity metadata. Stop active sharing
+    // so the next publish starts with the new identity state.
+    stop_active_shares(&state).await;
+    state.peer_content.write().await.clear();
+
+    let identity = get_identity(state).await?;
+    Ok(UpdateIdentityResult {
+        identity,
+        group_changed,
+        requires_restart: group_changed,
+    })
+}
+
+#[tauri::command]
+pub async fn delete_identity_only(state: State<'_, HubState>) -> Result<(), String> {
+    stop_active_shares(&state).await;
+
+    *state.identity.write().await = None;
+    *state.device_type.write().await = DeviceType::Desktop;
+    state.peer_content.write().await.clear();
+
+    persist::delete_identity_file().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct SaveProfileArgs {
+    pub name: String,
+    #[serde(default)]
+    pub make_active: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ProfileNameArgs {
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct ProfilesPayload {
+    pub profiles: Vec<persist::IdentityProfileInfo>,
+}
+
+#[tauri::command]
+pub async fn list_identity_profiles() -> Result<ProfilesPayload, String> {
+    let profiles = persist::list_profiles().map_err(|e| e.to_string())?;
+    Ok(ProfilesPayload { profiles })
+}
+
+#[tauri::command]
+pub async fn save_current_identity_profile(
+    args: SaveProfileArgs,
+    state: State<'_, HubState>,
+) -> Result<ProfilesPayload, String> {
+    let identity = state
+        .identity
+        .read()
+        .await
+        .clone()
+        .ok_or("Identity not configured")?;
+    let device_type = state.device_type.read().await.clone();
+
+    persist::save_profile(&args.name, &identity, &device_type, args.make_active)
+        .map_err(|e| e.to_string())?;
+    list_identity_profiles().await
+}
+
+#[tauri::command]
+pub async fn activate_identity_profile(
+    args: ProfileNameArgs,
+    state: State<'_, HubState>,
+) -> Result<UpdateIdentityResult, String> {
+    let Some((identity, device_type)) =
+        persist::activate_profile(&args.name).map_err(|e| e.to_string())?
+    else {
+        return Err("Profile not found".to_string());
+    };
+
+    let current_group = state
+        .identity
+        .read()
+        .await
+        .as_ref()
+        .map(|id| id.group_id())
+        .unwrap_or_default();
+    let next_group = identity.group_id();
+
+    *state.identity.write().await = Some(Arc::new(identity));
+    *state.device_type.write().await = device_type;
+
+    stop_active_shares(&state).await;
+    state.peer_content.write().await.clear();
+
+    let identity = get_identity(state).await?;
+    let group_changed = !current_group.is_empty() && current_group != next_group;
+
+    Ok(UpdateIdentityResult {
+        identity,
+        group_changed,
+        // Profile switching changes cryptographic context; keep this explicit.
+        requires_restart: true,
+    })
+}
+
+#[tauri::command]
+pub async fn delete_identity_profile(args: ProfileNameArgs) -> Result<ProfilesPayload, String> {
+    persist::remove_profile(&args.name).map_err(|e| e.to_string())?;
+    list_identity_profiles().await
+}
+
+#[derive(Serialize)]
+pub struct TransportRadioDetails {
+    pub supported: bool,
+    pub enabled: bool,
+    pub adapters: Vec<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TransportCapabilities {
+    pub lan: bool,
+    pub lan_ip: Option<String>,
+    pub ble: bool,
+    pub wifi_direct: bool,
+    pub airdrop_ready: bool,
+    pub flow: String,
+    pub ble_details: TransportRadioDetails,
+    pub wifi_direct_details: TransportRadioDetails,
+}
+
+#[tauri::command]
+pub fn get_transport_capabilities() -> TransportCapabilities {
+    let lan_ip = crate::network::local_ipv4();
+    let ble_details = ble_transport_details();
+    let wifi_direct_details = wifi_direct_transport_details();
+    let ble = ble_details.supported && ble_details.enabled;
+    let wifi_direct = wifi_direct_details.supported && wifi_direct_details.enabled;
+
+    TransportCapabilities {
+        lan: lan_ip.is_some(),
+        lan_ip: lan_ip.map(|ip| ip.to_string()),
+        ble,
+        wifi_direct,
+        airdrop_ready: ble && wifi_direct,
+        flow: "ble_discovery_then_wifi_direct_transfer".to_string(),
+        ble_details,
+        wifi_direct_details,
+    }
+}
+
+#[tauri::command]
+pub fn get_transport_hardware() -> TransportCapabilities {
+    get_transport_capabilities()
+}
+
+fn parse_device_type(raw: Option<&str>, fallback: &DeviceType) -> DeviceType {
+    match raw {
         Some("laptop") => DeviceType::Laptop,
         Some("phone") => DeviceType::Phone,
         Some("tablet") => DeviceType::Tablet,
         Some("server") => DeviceType::Server,
         Some("desktop") => DeviceType::Desktop,
         Some(_) => DeviceType::Desktop,
-        // No type provided: keep the existing value (e.g. updating device_name only).
-        None => state.device_type.read().await.clone(),
+        None => fallback.clone(),
+    }
+}
+
+async fn stop_active_shares(state: &HubState) {
+    stop_server_guard(state).await;
+
+    let announcements: Vec<(String, String)> =
+        state.active_announcements.write().await.drain().collect();
+    for (_, instance_name) in announcements {
+        if let Err(error) = unannounce_content(&state.mdns, &instance_name) {
+            tracing::warn!("Failed to unannounce during identity update: {}", error);
+        }
+    }
+
+    if let Some(tx) = state.server_shutdown.write().await.take() {
+        let _ = tx.send(());
+    }
+    *state.server_port.write().await = None;
+}
+
+async fn start_server_guard(state: &HubState) {
+    stop_server_guard(state).await;
+
+    let Some(initial_ip) = local_ipv4().map(std::net::IpAddr::V4) else {
+        tracing::warn!("Server guard disabled: unable to determine initial LAN IP");
+        return;
     };
 
-    // Persist derived key to disk (passphrase never saved)
-    persist::save(&identity, &device_type).map_err(|e| e.to_string())?;
+    let active_announcements = state.active_announcements.clone();
+    let server_shutdown = state.server_shutdown.clone();
+    let server_port = state.server_port.clone();
+    let mdns = state.mdns.clone();
 
-    // Start discovery with the new identity
-    discovery::start(
-        app,
-        state.mdns.clone(),
-        identity.clone(),
-        state.peer_content.clone(),
+    let (guard_tx, mut guard_rx) = tokio::sync::oneshot::channel::<()>();
+    *state.server_guard_shutdown.write().await = Some(guard_tx);
+
+    let guard_task = tokio::spawn(async move {
+        let started_at = Instant::now();
+        loop {
+            tokio::select! {
+                _ = &mut guard_rx => break,
+                _ = tokio::time::sleep(SERVER_GUARD_POLL_INTERVAL) => {}
+            }
+
+            if started_at.elapsed() >= MAX_PUBLISH_LIFETIME {
+                tracing::warn!("Stopping active shares: publish lifetime exceeded");
+                shutdown_server_runtime(
+                    mdns.clone(),
+                    active_announcements.clone(),
+                    server_shutdown.clone(),
+                    server_port.clone(),
+                )
+                .await;
+                break;
+            }
+
+            let current_ip = local_ipv4().map(std::net::IpAddr::V4);
+            if current_ip != Some(initial_ip) {
+                tracing::warn!(
+                    "Stopping active shares: network changed from {:?} to {:?}",
+                    initial_ip,
+                    current_ip
+                );
+                shutdown_server_runtime(
+                    mdns.clone(),
+                    active_announcements.clone(),
+                    server_shutdown.clone(),
+                    server_port.clone(),
+                )
+                .await;
+                break;
+            }
+        }
+    });
+
+    *state.server_guard_task.write().await = Some(guard_task);
+}
+
+async fn stop_server_guard(state: &HubState) {
+    if let Some(tx) = state.server_guard_shutdown.write().await.take() {
+        let _ = tx.send(());
+    }
+    if let Some(task) = state.server_guard_task.write().await.take() {
+        task.abort();
+    }
+}
+
+async fn shutdown_server_runtime(
+    mdns: mdns_sd::ServiceDaemon,
+    active_announcements: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    server_shutdown: Arc<tokio::sync::RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    server_port: Arc<tokio::sync::RwLock<Option<u16>>>,
+) {
+    let announcements: Vec<(String, String)> = active_announcements.write().await.drain().collect();
+    for (_, instance_name) in announcements {
+        if let Err(error) = unannounce_content(&mdns, &instance_name) {
+            tracing::warn!("Failed to unannounce during guarded shutdown: {}", error);
+        }
+    }
+
+    if let Some(tx) = server_shutdown.write().await.take() {
+        let _ = tx.send(());
+    }
+    *server_port.write().await = None;
+}
+
+#[cfg(target_os = "windows")]
+fn ble_transport_details() -> TransportRadioDetails {
+    let (adapters, error) = windows_script_lines(
+        "Get-PnpDevice -Class Bluetooth -Status OK -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FriendlyName",
+    );
+    let supported = !adapters.is_empty();
+
+    TransportRadioDetails {
+        supported,
+        enabled: supported,
+        adapters,
+        last_error: error,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ble_transport_details() -> TransportRadioDetails {
+    let mut adapters = linux_bluetooth_adapters();
+    let mut last_error = None;
+
+    if adapters.is_empty() && command_exists("bluetoothctl") {
+        match run_command_lines("bluetoothctl", &["list"]) {
+            Some(lines) => {
+                adapters = parse_bluetoothctl_controller_names(&lines);
+            }
+            None => {
+                last_error = Some("failed_to_query_bluetoothctl_list".to_string());
+            }
+        }
+    }
+
+    let supported = !adapters.is_empty() || command_exists("bluetoothctl");
+    let enabled = if command_exists("bluetoothctl") {
+        run_command_lines("bluetoothctl", &["show"])
+            .map(|lines| {
+                lines
+                    .iter()
+                    .any(|line| line.trim().eq_ignore_ascii_case("Powered: yes"))
+            })
+            .unwrap_or(!adapters.is_empty())
+    } else {
+        !adapters.is_empty()
+    };
+
+    TransportRadioDetails {
+        supported,
+        enabled,
+        adapters,
+        last_error,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wifi_direct_transport_details() -> TransportRadioDetails {
+    let (all_adapters, error_all) = windows_script_lines(
+        "Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.NdisPhysicalMedium -eq 'WirelessLan' } | Select-Object -ExpandProperty Name",
+    );
+    let (active_adapters, error_active) = windows_script_lines(
+        "Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.NdisPhysicalMedium -eq 'WirelessLan' -and $_.Status -eq 'Up' } | Select-Object -ExpandProperty Name",
     );
 
-    let dt_str = format!("{:?}", device_type).to_lowercase();
-    let info = IdentityInfo {
-        device_name: identity.device_name.clone(),
-        group_id: identity.group_id(),
-        configured: true,
-        device_type: dt_str,
+    let supported = !all_adapters.is_empty();
+    let enabled = !active_adapters.is_empty();
+
+    TransportRadioDetails {
+        supported,
+        enabled,
+        adapters: if enabled { active_adapters } else { all_adapters },
+        last_error: error_all.or(error_active),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn wifi_direct_transport_details() -> TransportRadioDetails {
+    let adapters = linux_wireless_ifaces();
+    let mut last_error = None;
+
+    let iw_p2p_supported = if command_exists("iw") {
+        match run_command_lines("iw", &["list"]) {
+            Some(lines) => lines.iter().any(|line| {
+                line.contains("P2P-client")
+                    || line.contains("P2P-GO")
+                    || line.contains("P2P-device")
+            }),
+            None => {
+                last_error = Some("failed_to_query_iw_list".to_string());
+                false
+            }
+        }
+    } else {
+        false
     };
-    *state.device_type.write().await = device_type;
-    *state.identity.write().await = Some(identity);
-    Ok(info)
+
+    let supported = iw_p2p_supported || (!adapters.is_empty() && command_exists("wpa_cli"));
+    let enabled = !adapters.is_empty();
+
+    TransportRadioDetails {
+        supported,
+        enabled,
+        adapters,
+        last_error,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_script_lines(script: &str) -> (Vec<String>, Option<String>) {
+    let output = match std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return (Vec::new(), Some(error.to_string())),
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return (
+            Vec::new(),
+            Some(if stderr.is_empty() {
+                "windows_script_failed".to_string()
+            } else {
+                stderr
+            }),
+        );
+    }
+
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    (lines, None)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn linux_bluetooth_adapters() -> Vec<String> {
+    std::fs::read_dir("/sys/class/bluetooth")
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(ToOwned::to_owned))
+        .filter(|name| name.starts_with("hci"))
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn linux_wireless_ifaces() -> Vec<String> {
+    std::fs::read_dir("/sys/class/net")
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().join("wireless").exists())
+        .filter_map(|entry| entry.file_name().to_str().map(ToOwned::to_owned))
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_command_lines(command: &str, args: &[&str]) -> Option<Vec<String>> {
+    let output = std::process::Command::new(command)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn parse_bluetoothctl_controller_names(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("Controller "))
+        .filter_map(|rest| rest.split_once(' '))
+        .map(|(_, name)| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn command_exists(command: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(command)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 // ── Local content management ──────────────────────────────────────────────────
@@ -281,6 +790,8 @@ pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> R
         }
     };
 
+    start_server_guard(&state).await;
+
     let content = state.local_content.read().await;
     let item = content.get(&args.content_id).ok_or("Content not found")?;
 
@@ -325,19 +836,7 @@ pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> R
 /// Stop the content server and remove all mDNS announcements (user closed hub).
 #[tauri::command]
 pub async fn stop_server(state: State<'_, HubState>) -> Result<(), String> {
-    // Unannounce all active announcements
-    let announcements: Vec<(String, String)> =
-        state.active_announcements.write().await.drain().collect();
-    for (_, instance_name) in announcements {
-        unannounce_content(&state.mdns, &instance_name).ok();
-    }
-
-    // Shut down HTTP server
-    if let Some(tx) = state.server_shutdown.write().await.take() {
-        let _ = tx.send(());
-    }
-    *state.server_port.write().await = None;
-
+    stop_active_shares(state.inner()).await;
     tracing::info!("Hub server stopped, all announcements removed");
     Ok(())
 }
@@ -540,15 +1039,28 @@ pub async fn save_peer_content_as(
             .await
             .clone()
             .ok_or("Identity not configured")?;
-        let pulled = fenix_hub_core::client::pull_content(
-            peer_ip,
-            announcement.port,
-            &content_id,
-            &identity,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        std::fs::write(&target_path, &pulled.bytes).map_err(|e| e.to_string())?;
+
+        if announcement.content_type == fenix_hub_core::content::ContentType::Text {
+            let pulled = fenix_hub_core::client::pull_content(
+                peer_ip,
+                announcement.port,
+                &content_id,
+                &identity,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            std::fs::write(&target_path, &pulled.bytes).map_err(|e| e.to_string())?;
+        } else {
+            fenix_hub_core::client::pull_content_to_file(
+                peer_ip,
+                announcement.port,
+                &content_id,
+                &identity,
+                &target_path,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
     }
 
     tracing::info!(
@@ -1022,11 +1534,17 @@ pub fn resize_hub(app: AppHandle, width: f64, height: f64) -> Result<(), String>
 #[tauri::command]
 pub fn open_settings(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("settings") {
+        // Restore from minimized state before showing
+        win.unminimize().ok();
+        win.set_resizable(false).ok();
+        win.set_maximizable(false).ok();
+        win.set_minimizable(false).ok();
+        win.set_size(tauri::LogicalSize::new(560.0, 560.0)).ok();
         win.show().ok();
         win.set_focus().ok();
         return Ok(());
     }
-    // Window might not exist yet (first open). Create it from the config entry.
+    // Recreate if the window was previously hidden/destroyed.
     let config = app
         .config()
         .app
@@ -1039,30 +1557,52 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .build()
         .map_err(|e| e.to_string())?;
-    // On Linux, mark as utility so GNOME doesn't tile it
-    #[cfg(target_os = "linux")]
-    {
-        use gtk::prelude::GtkWindowExt;
-        if let Ok(gtk_win) = win.gtk_window() {
-            gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Normal);
+    // Hide instead of destroy on close so re-open is instant and doesn't recreate.
+    let win_ref = win.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            win_ref.hide().ok();
         }
-    }
+    });
+    win.set_resizable(false).ok();
+    win.set_maximizable(false).ok();
+    win.set_minimizable(false).ok();
+    win.set_size(tauri::LogicalSize::new(560.0, 560.0)).ok();
     win.show().ok();
+    win.set_focus().ok();
     Ok(())
+}
+
+/// Hides the settings window (user clicked the custom close button).
+#[tauri::command]
+pub fn close_settings(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("settings") {
+        win.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Shows a native confirmation dialog before a destructive reset.
+/// Returns true if the user confirmed.
+#[tauri::command]
+pub async fn confirm_reset() -> Result<bool, String> {
+    let result = tokio::task::spawn_blocking(|| {
+        rfd::MessageDialog::new()
+            .set_title("¿Eliminar todos los datos?")
+            .set_description("Se eliminarán la identidad, el historial y la caché de este dispositivo. Esta acción no se puede deshacer.")
+            .set_level(rfd::MessageLevel::Warning)
+            .set_buttons(rfd::MessageButtons::OkCancel)
+            .show()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(matches!(result, rfd::MessageDialogResult::Ok))
 }
 
 #[tauri::command]
 pub async fn close_hub_window(app: AppHandle, state: State<'_, HubState>) -> Result<(), String> {
-    let announcements: Vec<(String, String)> =
-        state.active_announcements.write().await.drain().collect();
-    for (_, instance_name) in announcements {
-        fenix_hub_daemon::mdns::unannounce_content(&state.mdns, &instance_name).ok();
-    }
-    if let Some(tx) = state.server_shutdown.write().await.take() {
-        let _ = tx.send(());
-    }
-    *state.server_port.write().await = None;
-
+    stop_active_shares(state.inner()).await;
     if let Some(win) = app.get_webview_window("hub") {
         win.destroy().map_err(|e| e.to_string())?;
     }
@@ -1095,7 +1635,7 @@ fn compact_announcement_for_mdns(mut announcement: Announcement) -> Announcement
         .clone()
         .filter(|name| name.chars().count() > MAX_ANNOUNCEMENT_FILE_NAME_CHARS)
     {
-        announcement.file_name = Some(truncate_chars(&file_name, MAX_ANNOUNCEMENT_FILE_NAME_CHARS));
+        announcement.file_name = Some(truncate_utf8_bytes(&file_name, MAX_ANNOUNCEMENT_FILE_NAME_CHARS));
     }
     if announcement_size(&announcement) <= MAX_ANNOUNCEMENT_BYTES {
         return announcement;
@@ -1106,14 +1646,15 @@ fn compact_announcement_for_mdns(mut announcement: Announcement) -> Announcement
         return announcement;
     }
 
-    let mut preview_len = announcement.preview.chars().count();
-    while announcement_size(&announcement) > MAX_ANNOUNCEMENT_BYTES
-        && preview_len > MIN_ANNOUNCEMENT_PREVIEW_CHARS
-    {
-        preview_len = preview_len
-            .saturating_sub(ANNOUNCEMENT_PREVIEW_TRIM_STEP)
-            .max(MIN_ANNOUNCEMENT_PREVIEW_CHARS);
-        announcement.preview = truncate_chars(&announcement.preview, preview_len);
+    // Calculate the byte budget for the preview in one pass.
+    let current_size = announcement_size(&announcement);
+    if current_size > MAX_ANNOUNCEMENT_BYTES {
+        let over_by = current_size - MAX_ANNOUNCEMENT_BYTES;
+        let preview_bytes = announcement.preview.len();
+        let target_bytes = preview_bytes
+            .saturating_sub(over_by + 16) // 16 bytes safety margin
+            .max(MIN_ANNOUNCEMENT_PREVIEW_CHARS * 2);
+        announcement.preview = truncate_utf8_bytes(&announcement.preview, target_bytes);
     }
     if announcement_size(&announcement) <= MAX_ANNOUNCEMENT_BYTES {
         return announcement;
@@ -1137,17 +1678,17 @@ fn announcement_size(announcement: &Announcement) -> usize {
 fn announcement_preview_fallback(announcement: &Announcement) -> String {
     match announcement.content_type {
         fenix_hub_core::content::ContentType::Text => {
-            truncate_chars(&announcement.preview, MAX_ANNOUNCEMENT_FILE_NAME_CHARS)
+            truncate_utf8_bytes(&announcement.preview, MAX_ANNOUNCEMENT_FILE_NAME_CHARS)
         }
         fenix_hub_core::content::ContentType::Image => announcement
             .file_name
             .as_deref()
-            .map(|name| format!("Imagen: {}", truncate_chars(name, 48)))
+            .map(|name| format!("Imagen: {}", truncate_utf8_bytes(name, 48)))
             .unwrap_or_else(|| "Imagen lista para descargar".to_string()),
         fenix_hub_core::content::ContentType::File => announcement
             .file_name
             .as_deref()
-            .map(|name| format!("Archivo: {}", truncate_chars(name, 48)))
+            .map(|name| format!("Archivo: {}", truncate_utf8_bytes(name, 48)))
             .unwrap_or_else(|| "Archivo listo para descargar".to_string()),
     }
 }
@@ -1212,8 +1753,15 @@ fn announcement_kind_label(content_type: &fenix_hub_core::content::ContentType) 
     }
 }
 
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 #[cfg(test)]

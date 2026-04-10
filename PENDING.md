@@ -1,128 +1,96 @@
-# FenixHub — Pending tasks / design decisions
+# FenixHub — pending real vs done real
 
-## MUST do before public release
+## Estado verificado (2026-04-10)
 
-### Auth / identity
-- [ ] **Remove fenix-auth integration** before any public release.
-  - Lives in `src-tauri/src/personal/impl.rs` (gitignored).
-  - Compiled only with `--features personal` on Linux.
-  - When ready: create a new repo via `git filter-repo` to strip all history
-    that ever touched `src/personal/` before publishing.
-  - To build personal APK from Linux: `cargo tauri android build --features personal`
+### Implementado
 
-### Clean public repo
-- [ ] Run `git filter-repo --path src-tauri/src/personal --invert` (or equivalent)
-  to produce a history-clean public mirror before the first public release.
+#### v0.2.0
+- [x] Hub en tamano fijo (pill/expanded), sin maximizar ni zoom.
+- [x] Ajustes redisenados (identidad, perfiles, cache, zona de peligro).
+- [x] Perfiles base (guardar, listar, activar, borrar).
+- [x] Compresion para archivos grandes y decode en receptor.
 
----
+#### v0.2.1
+- [x] Firma canonica de requests (`method + path + group_id + timestamp + nonce + body_sha256`).
+- [x] Anti-replay (ventana temporal + cache de nonce) en desktop y Android.
+- [x] `group_id` derivado con HKDF dedicado.
+- [x] Politica minima de passphrase en desktop y Android.
+- [x] Guard de publicacion efimera (TTL + cambio de red).
 
-## Protocol: chunked AEAD + streaming (v2 wire format)
+#### v0.2.2
+- [x] Android decode de FNX2 v2 (`X-FenixHub-Encrypted: 2`) con AES-GCM por chunk.
+- [x] Soporte de compresion zstd en decode FNX2 Android.
+- [x] Paridad Rust/Kotlin con vector canonico de firma (tests en ambos lados).
+- [x] Base AirDrop-like:
+  - [x] Android BLE identity discovery + Wi-Fi Direct discovery.
+  - [x] Android comando de hardware y peers con snapshot por llamada.
+  - [x] Tauri comando de hardware (LAN/BLE/Wi-Fi Direct) con inventario por llamada.
 
-Current limitation: AES-256-GCM puts the auth tag at the end → full file in RAM.
+## Pendiente real
 
-**Target wire format ("FNX2"):**
-```
-Header (29 bytes):
-  magic:          4 B  — b"FNX2"
-  base_nonce:    12 B  — random per transfer
-  total_chunks:   4 B  — u32 BE
-  original_size:  8 B  — u64 BE (pre-compression)
-  compression:    1 B  — 0x00 = none, 0x01 = zstd
+### Transporte cercano (prioridad alta)
+- [ ] Transferencia de payload real sobre Wi-Fi Direct (ahora mismo hay discovery/handoff, no canal de datos final completo).
+- [ ] Handshake de sesion cercana extremo a extremo para modo publico (clave efimera por sesion y confirmacion receptor).
+- [ ] Normalizar contrato de `get_transport_hardware` entre desktop y Android para exponer exactamente las mismas claves.
 
-Per chunk:
-  nonce:         12 B  — base_nonce XOR chunk_index (u64 padded to 12 B)
-  ciphertext: ≤64 KB
-  tag:           16 B  — GCM auth tag
-```
+### Rendimiento / memoria
+- [ ] Servidor FNX2 realmente streaming end-to-end sin ensamblar todo el body cifrado en RAM antes de responder.
+- [ ] Benchmarks de transferencias grandes (desktop-desktop, desktop-android, android-android).
+- [ ] Ajuste fino de chunk size, compresion y latencia en redes lentas.
 
-- Receiver verifies each 64 KB chunk independently → can stream directly to disk.
-- `protocol_version` field in the `Announcement` negotiates old vs new format.
-- Old receivers ignore new senders gracefully (they reject unknown protocol_version).
-- Must be implemented in both Rust (desktop) and Kotlin (Android) simultaneously.
+### Android parity
+- [ ] Paridad completa de perfiles/identidad v2 en capa Android nativa (hoy la base fuerte esta en desktop).
 
----
+### Preparacion release OSS
+- [ ] CI minima: build desktop + tests Rust + tests Android unitarios en cada PR.
+- [ ] Politica de versionado y changelog de release estable.
+- [ ] Reforzar README de instalacion por plataforma.
 
-## Compression (zstd / Meta)
+## Clean public repo / clon limpio desde cero
 
-- Add **before** encryption in the FNX2 sender path.
-- Threshold: files > 10 MB get a compression attempt.
-- Skip if MIME type is already compressed:
-  `image/jpeg`, `image/webp`, `video/*`, `application/zip`, `application/x-7z-compressed`, etc.
-- Skip if compressed size ≥ 95 % of original (no gain).
-- `compression` byte in FNX2 header signals receiver whether to decompress.
-- Rust crate: `zstd = "0.13"` (bindings to libzstd).
+### Objetivo
+Generar un repo publico con historial limpio, sin arrastrar rutas privadas/historicas.
 
----
+### Runbook recomendado
+1. Crear mirror local del repo actual:
 
-## BLE + WiFi Direct (runtime detection)
-
-Goal: no compile-time feature flags for distribution. Detect at runtime.
-
-```rust
-pub struct TransportCaps {
-    pub lan: bool,         // always true if any network interface available
-    pub ble: bool,         // BlueZ on Linux, WinRT on Windows, system on Android
-    pub wifi_direct: bool, // wpa_supplicant P2P on Linux, WifiP2pManager on Android
-}
+```bash
+git clone --mirror <origen_privado> fenix-hub-public.git
+cd fenix-hub-public.git
 ```
 
-- UI hides BLE/WiFi Direct buttons if capability is absent — no error, just absent.
-- Linux: probe BlueZ via D-Bus (`org.bluez`) for BLE; `wpa_supplicant` P2P for WFD.
-- Android: `BluetoothAdapter.isEnabled()` + `WifiP2pManager` availability.
-- Windows: WinRT `BluetoothAdapter.GetDefaultAsync()`.
+2. Limpiar historial sensible (ajusta rutas segun aplique):
 
-Priority: BLE first (simpler, useful for discovery range beyond LAN), WiFi Direct second.
-
----
-
-## Settings window
-
-- Separate Tauri window, label `"settings"`, ~600×450 px, movable, resizable.
-- Not a modal — independent window that can coexist with the hub.
-- Sections:
-  1. **Identidad** — device name, group ID (read-only), copy group ID button.
-  2. **Perfiles** — list of saved identities, switch active, create new, delete.
-  3. **Servicio** — presence beacon on/off, cache size limit, clear cache.
-  4. **Zona de peligro** — "Eliminar sesión" (wipes `~/.config/fenix-hub/`), "Salir del grupo".
-- Android: equivalent settings screen/activity (same Tauri webview or native).
-
----
-
-## Multi-user / profiles
-
-```json
-{
-  "active": "javier-personal",
-  "identities": {
-    "javier-personal": { "device_name": "...", "group_id": "...", "key_pair": {...} },
-    "javier-trabajo":  { ... }
-  }
-}
+```bash
+git filter-repo --path src-tauri/src/personal --invert-paths
 ```
 
-- Switching profile restarts discovery with new group_id.
-- Each profile has its own clipboard history in `~/.cache/fenix-hub/<profile>/`.
+3. Verificar que la ruta no existe en historial:
 
----
+```bash
+git log --all -- src-tauri/src/personal
+```
 
-## Platform completeness
+4. Crear repo remoto publico vacio y empujar mirror limpio:
 
-### Windows
-- [ ] Verify presence beacon (`_fenixhub-presence._tcp`) with mdns-sd (no avahi).
-- [ ] Test cache path: `dirs::cache_dir()` → `AppData\Local\fenix-hub\`.
-- [ ] Tray icon + AOT window in release build.
+```bash
+git remote add public <url_repo_publico>
+git push --mirror public
+```
 
-### Android
-- [ ] Presence beacon via `NsdManager` or `jmDNS`.
-- [ ] Settings screen.
-- [ ] WiFi Direct via `WifiP2pManager`.
-- [ ] Personal auth (`--features personal`) for personal APK builds only.
+5. Clonar de nuevo el repo publico para validar desde cero:
 
----
+```bash
+cd ..
+git clone <url_repo_publico> fenix-hub-public-check
+cd fenix-hub-public-check
+```
 
-## Nice to have (post v1)
+6. Smoke checks en clon limpio:
 
-- [ ] Drag & drop out of FenixHub to other apps (expose cached file path for native drag).
-- [ ] Configurable cache FIFO size (currently 30 files hardcoded).
-- [ ] Cross-network relay (STUN/TURN + DTLS) for discovery beyond LAN (v2 multi-user).
-- [ ] macOS port (if ever relevant).
+```bash
+bun run --cwd frontend build
+cargo test -p fenix-hub-core
+cd android
+./gradlew :app:testDebugUnitTest
+```

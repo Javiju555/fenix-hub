@@ -32,6 +32,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import java.net.Inet4Address
+import java.net.NetworkInterface
 
 class FenixHubService : Service() {
     inner class LocalBinder : Binder() {
@@ -50,6 +54,8 @@ class FenixHubService : Service() {
     private val localContentFactory by lazy { container.localContentFactory }
     private val httpServer by lazy { FenixHttpServer(settingsStore, repository) }
     private val nsdController by lazy { NsdController(this, repository, settingsStore) }
+    private val bleIdentityController by lazy { container.bleIdentityController }
+    private val wifiDirectController by lazy { container.wifiDirectController }
     private val hotspotManager by lazy { container.hotspotManager }
     private val overlayController by lazy {
         OverlayController(
@@ -64,6 +70,7 @@ class FenixHubService : Service() {
     }
 
     private var syncJob: Job? = null
+    private var publishGuardJob: Job? = null
     private var sensorManager: SensorManager? = null
     private var shakeDetector: ShakeDetector? = null
     private var accelerometer: Sensor? = null
@@ -147,7 +154,10 @@ class FenixHubService : Service() {
 
         httpServer.startIfNeeded()
         nsdController.startDiscovery()
+        bleIdentityController.ensureRunning(settings.groupId, settings.deviceName)
+        wifiDirectController.ensureRunning()
         startShakeDetection()
+        startPublishGuardIfNeeded()
 
         if (syncJob?.isActive != true) {
             syncJob = serviceScope.launch {
@@ -167,12 +177,81 @@ class FenixHubService : Service() {
     private fun stopNetworkStack(clearPeers: Boolean) {
         syncJob?.cancel()
         syncJob = null
+        publishGuardJob?.cancel()
+        publishGuardJob = null
         stopShakeDetection()
+        bleIdentityController.stop()
+        wifiDirectController.stop()
         nsdController.stop()
         httpServer.stop()
         if (clearPeers) {
             repository.clearPeers()
         }
+    }
+
+    private fun startPublishGuardIfNeeded() {
+        if (publishGuardJob?.isActive == true) return
+
+        publishGuardJob = serviceScope.launch {
+            var publishNetworkIp: String? = null
+
+            while (isActive) {
+                delay(PUBLISH_GUARD_POLL_MS)
+
+                val published = repository.localContent.value.filter { it.isPublished }
+                if (published.isEmpty()) {
+                    publishNetworkIp = null
+                    continue
+                }
+
+                val oldestPublishedAt = published.mapNotNull { it.publishedAt }.minOrNull()
+                    ?: System.currentTimeMillis()
+                if (System.currentTimeMillis() - oldestPublishedAt > MAX_PUBLISH_LIFETIME_MS) {
+                    repository.unpublishAll()
+                    httpServer.stop()
+                    showToast("Publicacion expirada por seguridad. Vuelve a compartir.")
+                    publishNetworkIp = null
+                    continue
+                }
+
+                val currentIp = currentLanIpv4()
+                if (publishNetworkIp == null) {
+                    publishNetworkIp = currentIp
+                    continue
+                }
+
+                if (currentIp != null && publishNetworkIp != currentIp) {
+                    repository.unpublishAll()
+                    httpServer.stop()
+                    showToast("Cambio de red detectado. Publicacion detenida por seguridad.")
+                    publishNetworkIp = null
+                }
+            }
+        }
+    }
+
+    private fun currentLanIpv4(): String? {
+        return runCatching {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return@runCatching null
+            while (interfaces.hasMoreElements()) {
+                val iface = interfaces.nextElement()
+                if (!iface.isUp || iface.isLoopback || iface.name.startsWith("p2p")) {
+                    continue
+                }
+
+                val addresses = iface.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val address = addresses.nextElement()
+                    if (address is Inet4Address) {
+                        val host = address.hostAddress
+                        if (!host.isNullOrBlank()) {
+                            return@runCatching host
+                        }
+                    }
+                }
+            }
+            null
+        }.getOrNull()
     }
 
     private fun showOverlayIfPermitted() {
@@ -287,6 +366,8 @@ class FenixHubService : Service() {
         const val ACTION_STOP_HOTSPOT = "com.fenixhub.mobile.action.STOP_HOTSPOT"
         private const val CHANNEL_ID = "fenixhub-service"
         private const val NOTIFICATION_ID = 3106
+        private const val MAX_PUBLISH_LIFETIME_MS = 10 * 60 * 1000L
+        private const val PUBLISH_GUARD_POLL_MS = 5_000L
 
         fun start(context: Context, action: String? = null) {
             val intent = Intent(context, FenixHubService::class.java)
