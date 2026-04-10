@@ -33,6 +33,11 @@ class NsdController(
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private val registrations = linkedMapOf<String, RegistrationHandle>()
     private val peerLastSeenAt = linkedMapOf<String, Long>()
+
+    // Android 12+ only allows one resolveService() at a time.
+    // Queue pending resolves and drain one-by-one after each completes.
+    private var resolveInProgress = false
+    private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private val refreshRunnable = Runnable {
         if (!discoveryEnabled) return@Runnable
         pruneExpiredPeers()
@@ -76,6 +81,8 @@ class NsdController(
         refreshRequested = false
         mainHandler.removeCallbacks(refreshRunnable)
         stopDiscoveryInternal()
+        resolveQueue.clear()
+        resolveInProgress = false
         registrations.keys.toList().forEach(::unregisterInternal)
         peerLastSeenAt.clear()
         repository.clearPeers()
@@ -112,47 +119,7 @@ class NsdController(
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
                 if (serviceInfo.serviceType != SERVICE_TYPE) return
                 if (registrations.values.any { it.serviceName == serviceInfo.serviceName }) return
-
-                nsdManager.resolveService(
-                    serviceInfo,
-                    object : NsdManager.ResolveListener {
-                        override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-                            Log.d(TAG, "Resolve failed for ${serviceInfo.serviceName}: $errorCode")
-                        }
-
-                        override fun onServiceResolved(resolvedServiceInfo: NsdServiceInfo) {
-                            val raw = TxtRecordCodec.decode(resolvedServiceInfo.attributes) ?: return
-                            val announcement = AnnouncementCodec.decode(raw) ?: return
-                            val settings = settingsStore.current()
-
-                            if (!settings.configured || announcement.groupId != settings.groupId) return
-                            if (settingsStore.isIgnoredPeerContent(announcement.contentId)) return
-                            if (announcement.deviceName == settings.deviceName &&
-                                repository.getLocalContent(announcement.contentId) != null
-                            ) {
-                                return
-                            }
-
-                            if (announcement.sendMode is SendMode.Direct &&
-                                announcement.sendMode.targetDevice != settings.deviceName
-                            ) {
-                                return
-                            }
-
-                            val host = resolvedServiceInfo.host?.hostAddress?.substringBefore('%') ?: return
-                            mainHandler.post {
-                                peerLastSeenAt[announcement.contentId] = SystemClock.elapsedRealtime()
-                                repository.upsertPeer(
-                                    PeerContent(
-                                        peerIp = host,
-                                        port = resolvedServiceInfo.port,
-                                        announcement = announcement,
-                                    ),
-                                )
-                            }
-                        }
-                    },
-                )
+                mainHandler.post { enqueueResolve(serviceInfo) }
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
@@ -346,6 +313,54 @@ class NsdController(
             peerLastSeenAt.remove(contentId)
             repository.removePeer(contentId)
         }
+    }
+
+    // Must be called on mainHandler thread.
+    private fun enqueueResolve(serviceInfo: NsdServiceInfo) {
+        resolveQueue.addLast(serviceInfo)
+        if (!resolveInProgress) drainResolveQueue()
+    }
+
+    private fun drainResolveQueue() {
+        val serviceInfo = resolveQueue.removeFirstOrNull() ?: run {
+            resolveInProgress = false
+            return
+        }
+        resolveInProgress = true
+        nsdManager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
+            override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                Log.d(TAG, "Resolve failed for ${serviceInfo.serviceName}: $errorCode")
+                mainHandler.post { drainResolveQueue() }
+            }
+
+            override fun onServiceResolved(resolvedServiceInfo: NsdServiceInfo) {
+                val raw = TxtRecordCodec.decode(resolvedServiceInfo.attributes)
+                val announcement = raw?.let { AnnouncementCodec.decode(it) }
+                if (announcement != null) {
+                    val settings = settingsStore.current()
+                    if (settings.configured && announcement.groupId == settings.groupId &&
+                        !settingsStore.isIgnoredPeerContent(announcement.contentId) &&
+                        !(announcement.deviceName == settings.deviceName &&
+                            repository.getLocalContent(announcement.contentId) != null) &&
+                        !(announcement.sendMode is SendMode.Direct &&
+                            announcement.sendMode.targetDevice != settings.deviceName)
+                    ) {
+                        val host = resolvedServiceInfo.host?.hostAddress?.substringBefore('%')
+                        if (host != null) {
+                            mainHandler.post {
+                                peerLastSeenAt[announcement.contentId] = SystemClock.elapsedRealtime()
+                                repository.upsertPeer(PeerContent(
+                                    peerIp = host,
+                                    port = resolvedServiceInfo.port,
+                                    announcement = announcement,
+                                ))
+                            }
+                        }
+                    }
+                }
+                mainHandler.post { drainResolveQueue() }
+            }
+        })
     }
 
     private fun String.encodedSize(): Int = toByteArray(Charsets.UTF_8).size

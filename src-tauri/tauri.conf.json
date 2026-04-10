@@ -26,6 +26,22 @@
         "skipTaskbar": true,
         "shadow": false,
         "dragDropEnabled": false
+      },
+      {
+        "label": "settings",
+        "title": "FenixHub — Ajustes",
+        "url": "/#settings",
+        "width": 620,
+        "height": 480,
+        "minWidth": 480,
+        "minHeight": 380,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "visible": false,
+        "skipTaskbar": false,
+        "center": true
       }
     ],
     "security": {

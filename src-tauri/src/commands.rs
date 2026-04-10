@@ -450,12 +450,27 @@ pub async fn pull_peer_content(
     Ok(dto)
 }
 
+#[derive(Serialize)]
+pub struct CopyPeerResult {
+    /// Absolute path to the cached file, if the content is an image.
+    /// The frontend uses this to show a thumbnail preview without re-downloading.
+    pub cached_path: Option<String>,
+}
+
 #[tauri::command]
 pub async fn copy_peer_content(
     content_id: String,
     state: State<'_, HubState>,
-) -> Result<(), String> {
+) -> Result<CopyPeerResult, String> {
     let (announcement, peer_ip, pulled) = ensure_peer_cached(&content_id, &state).await?;
+    // Capture the cached path before consuming the announcement.
+    let is_image = announcement.content_type == fenix_hub_core::content::ContentType::Image;
+    let cached_path = if is_image {
+        let p = peer_received_path(&content_id, &announcement);
+        if p.exists() { p.to_str().map(ToOwned::to_owned) } else { None }
+    } else {
+        None
+    };
     let item = build_peer_item(&announcement, pulled)?;
     // Image decode (JPEG → RGBA8 ~48 MB for a 3 MP photo) is CPU-bound and
     // must not block the async executor.  Move it to a blocking thread.
@@ -469,7 +484,7 @@ pub async fn copy_peer_content(
         announcement.device_name,
         peer_ip
     );
-    Ok(())
+    Ok(CopyPeerResult { cached_path })
 }
 
 #[derive(Serialize)]
@@ -593,20 +608,26 @@ fn peer_received_path(content_id: &str, announcement: &Announcement) -> std::pat
     let _ = std::fs::create_dir_all(&dir);
 
     // Derive extension from the file name or MIME type.
-    let ext: Option<String> = announcement
-        .file_name
-        .as_deref()
-        .and_then(|n| std::path::Path::new(n).extension())
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            announcement
-                .mime_type
-                .as_deref()
-                .and_then(|m| mime_guess::get_mime_extensions_str(m))
-                .and_then(|exts| exts.first())
-                .map(|s| s.to_string())
-        });
+    // Text content always gets .txt regardless of MIME to avoid mime_guess
+    // returning unusual extensions like .asm for text/plain.
+    let ext: Option<String> = if announcement.content_type == fenix_hub_core::content::ContentType::Text {
+        Some("txt".to_string())
+    } else {
+        announcement
+            .file_name
+            .as_deref()
+            .and_then(|n| std::path::Path::new(n).extension())
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                announcement
+                    .mime_type
+                    .as_deref()
+                    .and_then(|m| mime_guess::get_mime_extensions_str(m))
+                    .and_then(|exts| exts.first())
+                    .map(|s| s.to_string())
+            })
+    };
 
     match ext {
         Some(e) => dir.join(format!("{content_id}.{e}")),
@@ -796,6 +817,27 @@ fn clipboard_set_image_file(
     clipboard: &mut arboard::Clipboard,
     path: &std::path::Path,
 ) -> anyhow::Result<()> {
+    // On Linux X11: pipe the raw PNG bytes to xclip — avoids 4-second RGBA decode.
+    // xclip stays alive in the background serving clipboard requests until
+    // another app claims ownership.
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(file) = std::fs::File::open(path) {
+            let result = std::process::Command::new("xclip")
+                .args(["-selection", "clipboard", "-t", "image/png", "-i"])
+                .stdin(file)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            if result.is_ok() {
+                // xclip forks internally — the spawned child exits quickly,
+                // leaving a grandchild to serve clipboard requests.
+                return Ok(());
+            }
+            tracing::warn!("xclip not found, falling back to arboard RGBA decode");
+        }
+    }
+
     let img = image::open(path)?.to_rgba8();
     let width = img.width() as usize;
     let height = img.height() as usize;
@@ -978,6 +1020,38 @@ pub fn resize_hub(app: AppHandle, width: f64, height: f64) -> Result<(), String>
 /// Close the hub window cleanly from JS: unannounce, stop server, destroy window.
 /// History is intentionally kept (FIFO persists across sessions).
 #[tauri::command]
+pub fn open_settings(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("settings") {
+        win.show().ok();
+        win.set_focus().ok();
+        return Ok(());
+    }
+    // Window might not exist yet (first open). Create it from the config entry.
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "settings")
+        .cloned()
+        .ok_or("Settings window config not found")?;
+    let win = tauri::WebviewWindowBuilder::from_config(&app, &config)
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+    // On Linux, mark as utility so GNOME doesn't tile it
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::GtkWindowExt;
+        if let Ok(gtk_win) = win.gtk_window() {
+            gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Normal);
+        }
+    }
+    win.show().ok();
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn close_hub_window(app: AppHandle, state: State<'_, HubState>) -> Result<(), String> {
     let announcements: Vec<(String, String)> =
         state.active_announcements.write().await.drain().collect();
@@ -1076,6 +1150,58 @@ fn announcement_preview_fallback(announcement: &Announcement) -> String {
             .map(|name| format!("Archivo: {}", truncate_chars(name, 48)))
             .unwrap_or_else(|| "Archivo listo para descargar".to_string()),
     }
+}
+
+/// Delete all files in the peer received cache (~/.cache/fenix-hub/received/).
+#[tauri::command]
+pub fn clear_received_cache() -> Result<(), String> {
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("fenix-hub")
+        .join("received");
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Delete all FenixHub data: clipboard history, identity, and received cache.
+/// The app should be restarted or the window closed after this.
+#[tauri::command]
+pub async fn reset_all_data(state: State<'_, HubState>) -> Result<(), String> {
+    // Clear in-memory clipboard
+    {
+        let mut store = state.local_content.write().await;
+        store.clear();
+    }
+    // Remove clipboard dir on disk
+    if let Ok(clipboard_dir) = dirs::cache_dir()
+        .ok_or("no cache dir")
+        .map(|d| d.join("fenix-hub").join("clipboard"))
+    {
+        if clipboard_dir.exists() {
+            std::fs::remove_dir_all(&clipboard_dir).ok();
+        }
+    }
+    // Remove received cache
+    if let Ok(received_dir) = dirs::cache_dir()
+        .ok_or("no cache dir")
+        .map(|d| d.join("fenix-hub").join("received"))
+    {
+        if received_dir.exists() {
+            std::fs::remove_dir_all(&received_dir).ok();
+        }
+    }
+    // Remove identity
+    if let Ok(config_dir) = dirs::config_dir()
+        .ok_or("no config dir")
+        .map(|d| d.join("fenix-hub"))
+    {
+        if config_dir.exists() {
+            std::fs::remove_dir_all(&config_dir).ok();
+        }
+    }
+    Ok(())
 }
 
 fn announcement_kind_label(content_type: &fenix_hub_core::content::ContentType) -> &'static str {

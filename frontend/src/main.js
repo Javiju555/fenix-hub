@@ -131,6 +131,11 @@ const W_PILL = 280, H_PILL = 34;
 async function init() {
     // Block browser context menu — this is a native-style app, not a webpage
     document.addEventListener('contextmenu', e => e.preventDefault());
+    // Settings window uses the same bundle but a different hash.
+    if (window.location.hash === '#settings') {
+        await initSettings();
+        return;
+    }
     identity = await invoke('get_identity');
     if (!identity.configured) {
         renderSetup();
@@ -139,6 +144,66 @@ async function init() {
     await loadContent();
     renderHub();
     setupEventListeners();
+}
+// ── Settings window ───────────────────────────────────────────────────────────
+async function initSettings() {
+    identity = await invoke('get_identity');
+    renderSettings();
+}
+function renderSettings() {
+    const app = document.getElementById('app');
+    app.innerHTML = `
+    <div class="settings-root">
+      <h2>Ajustes de FenixHub</h2>
+
+      <section class="settings-section">
+        <h3>Identidad</h3>
+        <div class="settings-row">
+          <span class="settings-label">Dispositivo</span>
+          <span class="settings-value">${identity?.device_name ?? '—'}</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label">Grupo (ID)</span>
+          <span class="settings-value mono" id="group-id-val">${identity?.group_id?.slice(0, 16) ?? '—'}…</span>
+          <button class="btn-secondary" id="btn-copy-gid">Copiar</button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Caché</h3>
+        <div class="settings-row">
+          <span class="settings-label">Archivos recibidos</span>
+          <span class="settings-value">FIFO 30 archivos en ~/.cache/fenix-hub/received/</span>
+        </div>
+        <div class="settings-row">
+          <button class="btn-secondary" id="btn-clear-cache">Limpiar caché</button>
+        </div>
+      </section>
+
+      <section class="settings-section danger">
+        <h3>Zona de peligro</h3>
+        <div class="settings-row">
+          <span class="settings-label">Eliminar todos los datos de FenixHub de este dispositivo</span>
+        </div>
+        <div class="settings-row">
+          <button class="btn-danger" id="btn-reset">Eliminar identidad y datos</button>
+        </div>
+      </section>
+    </div>
+  `;
+    document.getElementById('btn-copy-gid')?.addEventListener('click', () => {
+        if (identity?.group_id)
+            navigator.clipboard.writeText(identity.group_id);
+    });
+    document.getElementById('btn-clear-cache')?.addEventListener('click', async () => {
+        await invoke('clear_received_cache');
+        alert('Caché limpiado.');
+    });
+    document.getElementById('btn-reset')?.addEventListener('click', async () => {
+        if (!confirm('¿Seguro? Se eliminarán la identidad, el historial y la caché de este dispositivo.'))
+            return;
+        await invoke('reset_all_data');
+    });
 }
 async function loadContent() {
     [localContent, peerContent] = await Promise.all([
@@ -268,6 +333,7 @@ function renderHub() {
 
         <div class="hub-actions">
           <button class="btn-icon" id="btn-share-all" title="Compartir todo con todos">${iconBroadcast(13)}</button>
+          <button class="btn-icon" id="btn-settings"  title="Ajustes">${iconGear(13)}</button>
           <button class="btn-icon" id="btn-collapse"  title="Minimizar a notch">${iconMinus(13)}</button>
           <button class="btn-icon danger" id="btn-close" title="Ocultar al tray">${iconX(12)}</button>
         </div>
@@ -299,6 +365,10 @@ function renderHub() {
             }
         }
         renderLocalContent();
+    });
+    // Settings
+    document.getElementById('btn-settings').addEventListener('click', async () => {
+        await invoke('open_settings');
     });
     // Collapse → pill
     document.getElementById('btn-collapse').addEventListener('click', () => collapse());
@@ -635,7 +705,22 @@ function renderPeerContent() {
             try {
                 if (action === 'copy') {
                     btn.textContent = 'Copiando…';
-                    await invoke('copy_peer_content', peerCommandArgs(id));
+                    const result = await invoke('copy_peer_content', peerCommandArgs(id));
+                    // If the peer sent an image, show the thumbnail now that it's cached locally.
+                    if (result?.cached_path) {
+                        const card = btn.closest('.content-card');
+                        if (card && !card.querySelector('.card-thumb')) {
+                            const src = `file://${result.cached_path}`;
+                            const top = card.querySelector('.card-top');
+                            if (top) {
+                                const thumb = document.createElement('img');
+                                thumb.className = 'card-thumb';
+                                thumb.src = src;
+                                card.insertBefore(thumb, top);
+                                top.remove();
+                            }
+                        }
+                    }
                     flashPeerAction(btn, 'Copiado');
                     return;
                 }
@@ -703,6 +788,9 @@ function iconDevice(s) {
 }
 function iconMinus(s) {
     return svg(s, '0 0 14 14', '<line x1="2" y1="7" x2="12" y2="7" stroke-width="2"/>');
+}
+function iconGear(s) {
+    return svg(s, '0 0 16 16', '<circle cx="8" cy="8" r="2.5" stroke-width="1.5" fill="none"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.1 3.1l1.4 1.4M11.5 11.5l1.4 1.4M3.1 12.9l1.4-1.4M11.5 4.5l1.4-1.4" stroke-width="1.5"/>');
 }
 function iconChevronDown(s) {
     return svg(s, '0 0 14 14', '<polyline points="2,4.5 7,9.5 12,4.5" stroke-width="2"/>');

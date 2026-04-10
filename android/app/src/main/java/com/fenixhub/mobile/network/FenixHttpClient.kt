@@ -6,12 +6,19 @@ import com.fenixhub.mobile.model.PulledContent
 import com.fenixhub.mobile.util.CryptoUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 class FenixHttpClient {
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        // Large files at LAN speeds can take 30–60s — don't timeout mid-transfer.
+        .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
 
     suspend fun pullContent(peer: PeerContent, settings: AppSettings): Result<PulledContent> {
         return withContext(Dispatchers.IO) {
@@ -31,6 +38,9 @@ class FenixHttpClient {
                     .get()
                     .build()
 
+                val startMs = System.currentTimeMillis()
+                Log.d(TAG, "Pulling ${peer.announcement.contentId} from ${peer.peerIp}:${peer.port}")
+
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         error("HTTP ${response.code}")
@@ -38,11 +48,17 @@ class FenixHttpClient {
                     val body = response.body ?: error("Empty response body")
                     val encrypted = response.header(ENCRYPTED_HEADER) == "1"
                     val rawBytes = body.bytes()
+                    val recvMs = System.currentTimeMillis() - startMs
+                    Log.d(TAG, "Received ${rawBytes.size / 1024} KB in ${recvMs}ms")
+
+                    val decryptStart = System.currentTimeMillis()
                     val bytes = if (encrypted) {
                         CryptoUtils.decryptAesGcm(settings.encKeyBytes(), rawBytes)
                     } else {
                         rawBytes
                     }
+                    val decryptMs = System.currentTimeMillis() - decryptStart
+                    Log.i(TAG, "Pull complete: ${bytes.size / 1024} KB — recv ${recvMs}ms, decrypt ${decryptMs}ms, total ${System.currentTimeMillis() - startMs}ms")
 
                     PulledContent(
                         bytes = bytes,
@@ -55,6 +71,7 @@ class FenixHttpClient {
     }
 
     private companion object {
+        const val TAG = "FenixHubClient"
         const val ENCRYPTED_HEADER = "X-FenixHub-Encrypted"
     }
 
