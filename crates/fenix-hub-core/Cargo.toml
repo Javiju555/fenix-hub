@@ -8,6 +8,11 @@ description = "FenixHub cross-platform core: identity, protocol, content transfe
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+async-stream = "0.3"
+futures-util = { workspace = true }
+bytes = { workspace = true }
 axum = { workspace = true }
 reqwest = { workspace = true }
 mdns-sd = { workspace = true }

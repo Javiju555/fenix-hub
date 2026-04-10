@@ -133,7 +133,10 @@ pub fn run() {
             commands::prepare_local_drag,
             commands::resize_hub,
             commands::close_hub_window,
+            commands::open_settings,
             commands::add_file_by_path,
+            commands::clear_received_cache,
+            commands::reset_all_data,
         ])
         .build(tauri::generate_context!())
         .expect("error while building FenixHub")
