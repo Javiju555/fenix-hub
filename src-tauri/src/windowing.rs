@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use anyhow::{anyhow, Result};
 use tauri::{
-    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, Manager, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 
 use fenix_hub_daemon::mdns::unannounce_content;
@@ -10,31 +10,6 @@ use fenix_hub_daemon::mdns::unannounce_content;
 use crate::state::HubState;
 
 const HUB_WINDOW_LABEL: &str = "hub";
-const KEEPALIVE_WINDOW_LABEL: &str = "daemon-keepalive";
-
-pub fn ensure_keepalive_window(app: &AppHandle) -> Result<()> {
-    if app.get_webview_window(KEEPALIVE_WINDOW_LABEL).is_some() {
-        return Ok(());
-    }
-
-    WebviewWindowBuilder::new(
-        app,
-        KEEPALIVE_WINDOW_LABEL,
-        WebviewUrl::External("about:blank".parse()?),
-    )
-    .title("")
-    .inner_size(1.0, 1.0)
-    .min_inner_size(1.0, 1.0)
-    .resizable(false)
-    .decorations(false)
-    .transparent(true)
-    .visible(false)
-    .skip_taskbar(true)
-    .focusable(false)
-    .build()?;
-
-    Ok(())
-}
 
 pub fn attach_hub_window_handlers(window: &WebviewWindow, app: &AppHandle) {
     app.state::<HubState>()
@@ -115,59 +90,45 @@ fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
     // before it runs its placement algorithm.  On GNOME/Mutter this is the only
     // reliable way — calling set_position after show() races with smart-placement.
     window.set_always_on_top(true)?;
-    position_hub_window_top(window);
+    position_hub_window_top(window, 820.0);
     window.show()?;
     window.set_focus()?;
 
-    // Re-apply after the WM finishes its async placement pass.  80 ms is usually
-    // enough for Mutter; 200 ms covers slower compositors.
-    let w = window.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        // Skip if the user already collapsed the window to pill mode.
-        // Pill physical width is ~560 px; expanded is ~1640 px.
-        let size = w.outer_size().unwrap_or_default();
-        if size.width > 0 && size.width < 800 {
-            return;
-        }
-        let _ = w.set_always_on_top(true);
-        position_hub_window_top(&w);
-    });
+    // On Linux, re-apply after the WM finishes its async placement pass.
+    #[cfg(target_os = "linux")]
+    {
+        let w = window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let size = w.outer_size().unwrap_or_default();
+            if size.width > 0 && size.width < 800 {
+                return;
+            }
+            let _ = w.set_always_on_top(true);
+            position_hub_window_top(&w, 820.0);
+        });
+    }
 
     Ok(())
 }
 
 /// Position the hub window at the top-center of the primary monitor.
-pub(crate) fn position_hub_window_top(window: &WebviewWindow) {
-    let monitor_result = window.primary_monitor();
-    let monitor = match monitor_result {
+/// `logical_width` is the new window width in logical pixels (e.g. 820 expanded, 280 pill).
+pub(crate) fn position_hub_window_top(window: &WebviewWindow, logical_width: f64) {
+    let monitor = match window.primary_monitor() {
         Ok(Some(m)) => m,
-        Ok(None) => {
-            tracing::warn!("position_hub_window_top: primary_monitor() returned None");
-            // Fallback: try any available monitor.
-            match window.available_monitors() {
-                Ok(monitors) if !monitors.is_empty() => monitors.into_iter().next().unwrap(),
-                _ => {
-                    tracing::warn!("position_hub_window_top: no monitors available, skipping");
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!("position_hub_window_top: primary_monitor() error: {}", e);
-            return;
-        }
+        Ok(None) => match window.available_monitors() {
+            Ok(monitors) if !monitors.is_empty() => monitors.into_iter().next().unwrap(),
+            _ => return,
+        },
+        Err(_) => return,
     };
 
     let screen_w = monitor.size().width as i32;
     let scale = monitor.scale_factor();
-    // Always center using the expanded width (820 logical px).
-    // outer_size() is unreliable during WM placement and returns the pill width
-    // (~560 px physical) when the window is collapsed, which would produce a
-    // wrong x coordinate and cause jarring jumps.
-    let win_w = (820.0 * scale) as i32;
+    let win_w = (logical_width * scale) as i32;
     let x = (screen_w - win_w) / 2;
-    let y = (8.0 * scale) as i32; // 8 logical px from top
+    let y = (8.0 * scale) as i32;
     tracing::debug!(
         "position_hub_window_top: screen_w={} win_w={} scale={} → x={} y={}",
         screen_w, win_w, scale, x, y

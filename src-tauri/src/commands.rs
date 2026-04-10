@@ -968,7 +968,9 @@ pub fn resize_hub(app: AppHandle, width: f64, height: f64) -> Result<(), String>
     if let Some(win) = app.get_webview_window("hub") {
         win.set_size(tauri::LogicalSize::new(width, height))
             .map_err(|e| e.to_string())?;
-        windowing::position_hub_window_top(&win);
+        // Recenter after every resize: collapsing changes width 820→280 and expanding
+        // 280→820, so the x position must be recalculated to stay top-center.
+        windowing::position_hub_window_top(&win, width);
     }
     Ok(())
 }
