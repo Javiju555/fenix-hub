@@ -192,38 +192,64 @@ class FenixHttpServer(
         }
 
         val encKey = settings.encKeyBytes()
-        val nonce = ByteArray(NONCE_SIZE).also(secureRandom::nextBytes)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").also {
-            it.init(
-                Cipher.ENCRYPT_MODE,
-                SecretKeySpec(encKey, "AES"),
-                GCMParameterSpec(GCM_TAG_BITS, nonce),
-            )
-        }
+        val originalSize = file.length()
+        // totalChunks fits in Int for any realistic file (2^31 * 64KB = 128 TB)
+        val totalChunks = if (originalSize == 0L) 0 else
+            ((originalSize + FNX2_CHUNK_SIZE - 1) / FNX2_CHUNK_SIZE).toInt()
+        val baseNonce = ByteArray(NONCE_SIZE).also(secureRandom::nextBytes)
+        val secretKey = SecretKeySpec(encKey, "AES")
 
-        val fileSizeBytes = file.length()
-        Log.d(TAG, "Serving $contentId — ${fileSizeBytes / 1024} KB encrypted streaming")
+        Log.d(TAG, "Serving $contentId — ${originalSize / 1024} KB, $totalChunks FNX2 chunks")
         val startMs = System.currentTimeMillis()
 
-        response.headers.append(ENCRYPTED_HEADER, "1")
+        // FNX2 v2: per-chunk AES-GCM (64 KB chunks). Desktop stream-decrypts
+        // directly to disk — no full-file buffer needed on either side.
+        response.headers.append(ENCRYPTED_HEADER, "2")
         respondBytesWriter(contentType = contentType) {
-            writeFully(nonce)
-            var totalRead = 0L
-            val buf = ByteArray(CHUNK_SIZE)
-            file.inputStream().buffered(CHUNK_SIZE).use { input ->
-                while (true) {
-                    val read = withContext(Dispatchers.IO) { input.read(buf) }
-                    if (read == -1) break
-                    val chunk = cipher.update(buf, 0, read) ?: continue
-                    if (chunk.isNotEmpty()) writeFully(chunk)
-                    totalRead += read
+            // ── FNX2 header (29 bytes) ─────────────────────────────────────
+            writeFully(FNX2_MAGIC)                  // 4 bytes
+            writeFully(baseNonce)                   // 12 bytes
+            writeFully(intToBE(totalChunks))        // 4 bytes
+            writeFully(longToBE(originalSize))      // 8 bytes
+            writeFully(byteArrayOf(FNX2_COMPRESSION_NONE.toByte())) // 1 byte
+
+            if (totalChunks == 0) return@respondBytesWriter
+
+            // ── Chunks ────────────────────────────────────────────────────
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val chunkNonce = ByteArray(NONCE_SIZE)
+            val buf = ByteArray(FNX2_CHUNK_SIZE)
+
+            file.inputStream().buffered(FNX2_CHUNK_SIZE).use { input ->
+                for (chunkIndex in 0 until totalChunks) {
+                    // Read exactly FNX2_CHUNK_SIZE bytes (or fewer for the last chunk)
+                    val read = withContext(Dispatchers.IO) {
+                        var total = 0
+                        while (total < FNX2_CHUNK_SIZE) {
+                            val n = input.read(buf, total, FNX2_CHUNK_SIZE - total)
+                            if (n == -1) break
+                            total += n
+                        }
+                        total
+                    }
+                    if (read == 0) break
+
+                    // Per-chunk nonce: XOR base_nonce[4..12] with chunk index (BE u64)
+                    baseNonce.copyInto(chunkNonce)
+                    val idx = chunkIndex.toLong()
+                    for (i in 0 until 8) {
+                        chunkNonce[4 + i] = (chunkNonce[4 + i].toInt() xor
+                            ((idx ushr ((7 - i) * 8)).toInt() and 0xff)).toByte()
+                    }
+
+                    cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, chunkNonce))
+                    writeFully(cipher.doFinal(buf, 0, read))
                 }
             }
-            val final = withContext(Dispatchers.IO) { cipher.doFinal() }
-            if (final != null && final.isNotEmpty()) writeFully(final)
+
             val elapsedMs = System.currentTimeMillis() - startMs
-            val speedKBs = if (elapsedMs > 0) totalRead / elapsedMs else 0
-            Log.i(TAG, "Served $contentId — ${totalRead / 1024} KB in ${elapsedMs}ms (${speedKBs} KB/s)")
+            val speedKBs = if (elapsedMs > 0) originalSize / elapsedMs else 0
+            Log.i(TAG, "Served $contentId — ${originalSize / 1024} KB in ${elapsedMs}ms ($speedKBs KB/s) FNX2 v2")
         }
     }
 
@@ -366,6 +392,19 @@ class FenixHttpServer(
         }
     }
 
+    private fun intToBE(value: Int): ByteArray = byteArrayOf(
+        (value ushr 24).toByte(),
+        (value ushr 16).toByte(),
+        (value ushr 8).toByte(),
+        value.toByte(),
+    )
+
+    private fun longToBE(value: Long): ByteArray {
+        val result = ByteArray(8)
+        for (i in 0 until 8) result[i] = (value ushr ((7 - i) * 8)).toByte()
+        return result
+    }
+
     private companion object {
         const val TAG = "FenixHubServer"
         const val DEFAULT_PORT = 8765
@@ -373,8 +412,14 @@ class FenixHttpServer(
         const val ENCRYPTED_HEADER = "X-FenixHub-Encrypted"
         const val NONCE_SIZE = 12
         const val GCM_TAG_BITS = 128
-        const val CHUNK_SIZE = 256 * 1024  // 256 KB
+        const val CHUNK_SIZE = 256 * 1024       // 256 KB (ephemeral plaintext streaming)
+        const val FNX2_CHUNK_SIZE = 64 * 1024  // 64 KB — matches desktop FNX2 decoder
+        const val FNX2_COMPRESSION_NONE = 0x00
         const val MAX_REPLAY_CACHE_ENTRIES = 8_192
         val secureRandom = SecureRandom()
+        val FNX2_MAGIC = byteArrayOf(
+            'F'.code.toByte(), 'N'.code.toByte(),
+            'X'.code.toByte(), '2'.code.toByte(),
+        )
     }
 }
