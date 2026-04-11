@@ -11,6 +11,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Data stored per active mDNS announcement, used for periodic re-announce.
+#[derive(Clone)]
+pub struct AnnouncementRecord {
+    pub instance_name: String,
+    pub announcement: Announcement,
+    pub local_ip: IpAddr,
+}
+
 pub struct HubState {
     pub identity: Arc<RwLock<Option<Arc<GroupIdentity>>>>,
     /// Device type (Desktop / Laptop / Phone / Tablet / Server) — cosmetic only.
@@ -18,8 +26,8 @@ pub struct HubState {
     pub local_content: Arc<RwLock<HashMap<String, ContentItem>>>,
     /// Peer content: content_id → (Announcement, peer_ip)
     pub peer_content: Arc<RwLock<HashMap<String, (Announcement, IpAddr)>>>,
-    /// Active mDNS announcements: content_id → instance_name
-    pub active_announcements: Arc<RwLock<HashMap<String, String>>>,
+    /// Active mDNS announcements: content_id → record (instance_name + data for re-announce)
+    pub active_announcements: Arc<RwLock<HashMap<String, AnnouncementRecord>>>,
     pub mdns: ServiceDaemon,
     pub server_shutdown: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
     pub server_port: Arc<RwLock<Option<u16>>>,

@@ -197,10 +197,9 @@ pub(crate) fn position_hub_window_top(window: &WebviewWindow, logical_width: f64
 }
 
 async fn close_hub_ui_state(state: &HubState) -> Result<()> {
-    let announcements: Vec<(String, String)> =
-        state.active_announcements.write().await.drain().collect();
-    for (_, instance_name) in announcements {
-        unannounce_content(&state.mdns, &instance_name).ok();
+    let announcements = state.active_announcements.write().await.drain().collect::<Vec<_>>();
+    for (_, rec) in announcements {
+        unannounce_content(&state.mdns, &rec.instance_name).ok();
     }
 
     if let Some(tx) = state.server_shutdown.write().await.take() {
