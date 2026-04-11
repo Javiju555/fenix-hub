@@ -587,8 +587,6 @@ function setupEventListeners() {
     });
     listen('peer-online', ({ payload: deviceName }) => {
         presenceDevices.add(deviceName);
-        if (!onlineDevices.includes(deviceName))
-            onlineDevices = [...onlineDevices, deviceName];
         updateHeader();
         renderPeerContent();
     });
