@@ -582,7 +582,7 @@ function renderApp() {
         </div>
         <div class="a-hero-actions">
           <div class="a-header-actions">
-            <button class="a-chip-btn accent" id="btn-clipboard">${iconClipboard(16)} Capturar</button>
+            <button class="a-chip-btn accent" id="btn-clipboard">${iconClipboard(16)} Pegar</button>
             <button class="a-chip-btn" id="btn-overlay">${iconOverlay(16)} Overlay</button>
             <button class="a-chip-btn" id="btn-settings">${iconSettings(16)} Ajustes</button>
           </div>
