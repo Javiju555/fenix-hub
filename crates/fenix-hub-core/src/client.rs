@@ -31,6 +31,7 @@ use zstd::bulk::decompress;
 
 pub struct PulledContent {
     pub bytes: Vec<u8>,
+    pub file_path: Option<std::path::PathBuf>, // set when streamed to disk
     pub mime_type: Option<String>,
     pub file_name: Option<String>,
 }
@@ -131,6 +132,7 @@ pub async fn pull_content(
 
     Ok(PulledContent {
         bytes,
+        file_path: None,
         mime_type,
         file_name,
     })

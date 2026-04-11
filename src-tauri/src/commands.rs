@@ -1164,11 +1164,22 @@ async fn ensure_peer_cached(
 
     if temp_path.exists() {
         tracing::debug!("Cache hit for {content_id}: {:?}", temp_path);
-        let bytes = std::fs::read(&temp_path).map_err(|e| e.to_string())?;
-        let pulled = fenix_hub_core::client::PulledContent {
-            bytes,
-            file_name: announcement.file_name.clone(),
-            mime_type: announcement.mime_type.clone(),
+        // For File type: avoid loading large files into RAM — point at the cached path.
+        let pulled = if announcement.content_type == fenix_hub_core::content::ContentType::File {
+            fenix_hub_core::client::PulledContent {
+                bytes: vec![],
+                file_path: Some(temp_path.clone()),
+                file_name: announcement.file_name.clone(),
+                mime_type: announcement.mime_type.clone(),
+            }
+        } else {
+            let bytes = std::fs::read(&temp_path).map_err(|e| e.to_string())?;
+            fenix_hub_core::client::PulledContent {
+                bytes,
+                file_path: None,
+                file_name: announcement.file_name.clone(),
+                mime_type: announcement.mime_type.clone(),
+            }
         };
         return Ok((announcement, peer_ip, pulled));
     }
@@ -1181,16 +1192,35 @@ async fn ensure_peer_cached(
         .clone()
         .ok_or("Identity not configured")?;
 
-    let pulled =
-        fenix_hub_core::client::pull_content(peer_ip, announcement.port, content_id, &identity)
+    // For File content type: stream directly to disk — don't buffer in RAM.
+    let pulled = if announcement.content_type == fenix_hub_core::content::ContentType::File {
+        fenix_hub_core::client::pull_content_to_file(
+            peer_ip,
+            announcement.port,
+            content_id,
+            &identity,
+            &temp_path,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        fenix_hub_core::client::PulledContent {
+            bytes: vec![],
+            file_path: Some(temp_path.clone()),
+            file_name: announcement.file_name.clone(),
+            mime_type: announcement.mime_type.clone(),
+        }
+    } else {
+        // Text and Image: load in memory (needed for clipboard / preview generation).
+        let p = fenix_hub_core::client::pull_content(peer_ip, announcement.port, content_id, &identity)
             .await
             .map_err(|e| e.to_string())?;
-
-    if let Err(e) = std::fs::write(&temp_path, &pulled.bytes) {
-        tracing::warn!("Failed to cache {content_id} to {:?}: {e}", temp_path);
-    } else {
-        tracing::debug!("Cached {content_id} → {:?}", temp_path);
-    }
+        if let Err(e) = std::fs::write(&temp_path, &p.bytes) {
+            tracing::warn!("Failed to cache {content_id} to {:?}: {e}", temp_path);
+        } else {
+            tracing::debug!("Cached {content_id} → {:?}", temp_path);
+        }
+        p
+    };
 
     Ok((announcement, peer_ip, pulled))
 }
@@ -1219,14 +1249,32 @@ fn build_peer_item(
             )
             .map_err(|e| e.to_string())
         }
-        fenix_hub_core::content::ContentType::File => create_temp_binary_item(
-            pulled.bytes,
-            fenix_hub_core::content::ContentType::File,
-            pulled.file_name.or_else(|| announcement.file_name.clone()),
-            pulled.mime_type.or_else(|| announcement.mime_type.clone()),
-            Some(announcement.preview.clone()),
-        )
-        .map_err(|e| e.to_string()),
+        fenix_hub_core::content::ContentType::File => {
+            if let Some(path) = pulled.file_path {
+                // Already on disk from streaming — point ContentItem at existing file.
+                let final_name = pulled
+                    .file_name
+                    .or_else(|| announcement.file_name.clone())
+                    .unwrap_or_else(|| "archivo".to_string());
+                ContentItem::from_temp_file(
+                    path,
+                    fenix_hub_core::content::ContentType::File,
+                    Some(final_name),
+                    pulled.mime_type.or_else(|| announcement.mime_type.clone()),
+                    Some(announcement.preview.clone()),
+                )
+                .map_err(|e| e.to_string())
+            } else {
+                create_temp_binary_item(
+                    pulled.bytes,
+                    fenix_hub_core::content::ContentType::File,
+                    pulled.file_name.or_else(|| announcement.file_name.clone()),
+                    pulled.mime_type.or_else(|| announcement.mime_type.clone()),
+                    Some(announcement.preview.clone()),
+                )
+                .map_err(|e| e.to_string())
+            }
+        }
     }
 }
 
