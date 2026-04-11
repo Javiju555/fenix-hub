@@ -270,6 +270,7 @@ pub async fn delete_identity_profile(args: ProfileNameArgs) -> Result<ProfilesPa
 pub struct TransportRadioDetails {
     pub supported: bool,
     pub enabled: bool,
+    pub permissions_ready: bool,
     pub adapters: Vec<String>,
     pub last_error: Option<String>,
 }
@@ -278,31 +279,32 @@ pub struct TransportRadioDetails {
 pub struct TransportCapabilities {
     pub lan: bool,
     pub lan_ip: Option<String>,
-    pub ble: bool,
-    pub wifi_direct: bool,
     pub airdrop_ready: bool,
     pub flow: String,
-    pub ble_details: TransportRadioDetails,
-    pub wifi_direct_details: TransportRadioDetails,
+    pub ble: TransportRadioDetails,
+    pub wifi_direct: TransportRadioDetails,
+    pub ble_peers: Vec<String>,
+    pub wifi_direct_peers: Vec<String>,
+    pub handoff_candidates: Vec<String>,
 }
 
 #[tauri::command]
 pub fn get_transport_capabilities() -> TransportCapabilities {
     let lan_ip = crate::network::local_ipv4();
-    let ble_details = ble_transport_details();
-    let wifi_direct_details = wifi_direct_transport_details();
-    let ble = ble_details.supported && ble_details.enabled;
-    let wifi_direct = wifi_direct_details.supported && wifi_direct_details.enabled;
+    let ble = ble_transport_details();
+    let wifi_direct = wifi_direct_transport_details();
+    let airdrop_ready = ble.supported && ble.enabled && wifi_direct.supported && wifi_direct.enabled;
 
     TransportCapabilities {
         lan: lan_ip.is_some(),
         lan_ip: lan_ip.map(|ip| ip.to_string()),
+        airdrop_ready,
+        flow: "ble_discovery_then_wifi_direct_transfer".to_string(),
         ble,
         wifi_direct,
-        airdrop_ready: ble && wifi_direct,
-        flow: "ble_discovery_then_wifi_direct_transfer".to_string(),
-        ble_details,
-        wifi_direct_details,
+        ble_peers: vec![],
+        wifi_direct_peers: vec![],
+        handoff_candidates: vec![],
     }
 }
 
@@ -436,6 +438,7 @@ fn ble_transport_details() -> TransportRadioDetails {
     TransportRadioDetails {
         supported,
         enabled: supported,
+        permissions_ready: true,
         adapters,
         last_error: error,
     }
@@ -473,6 +476,7 @@ fn ble_transport_details() -> TransportRadioDetails {
     TransportRadioDetails {
         supported,
         enabled,
+        permissions_ready: true,
         adapters,
         last_error,
     }
@@ -493,6 +497,7 @@ fn wifi_direct_transport_details() -> TransportRadioDetails {
     TransportRadioDetails {
         supported,
         enabled,
+        permissions_ready: true,
         adapters: if enabled { active_adapters } else { all_adapters },
         last_error: error_all.or(error_active),
     }
@@ -525,6 +530,7 @@ fn wifi_direct_transport_details() -> TransportRadioDetails {
     TransportRadioDetails {
         supported,
         enabled,
+        permissions_ready: true,
         adapters,
         last_error,
     }

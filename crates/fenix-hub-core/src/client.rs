@@ -253,7 +253,14 @@ pub async fn pull_content_to_file(
         .unwrap_or(false);
 
     if !is_v2 {
-        anyhow::bail!("Peer {} does not support FNX2 v2 streaming", peer_ip);
+        // Peer is an older server — fall back to pull_content (buffered).
+        tracing::warn!(
+            "Peer {} does not support FNX2 v2 streaming; falling back to buffered pull",
+            peer_ip
+        );
+        let pulled = pull_content(peer_ip, peer_port, content_id, identity).await?;
+        tokio::fs::write(output_path, &pulled.bytes).await?;
+        return Ok(ContentType::File);
     }
 
     // Stream the response body

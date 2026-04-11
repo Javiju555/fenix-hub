@@ -25,16 +25,17 @@
   - [x] Android BLE identity discovery + Wi-Fi Direct discovery.
   - [x] Android comando de hardware y peers con snapshot por llamada.
   - [x] Tauri comando de hardware (LAN/BLE/Wi-Fi Direct) con inventario por llamada.
+- [x] Servidor FNX2 streaming end-to-end sin ensamblar payload en RAM (`Body::from_stream`, archivos grandes por chunks).
+- [x] Cliente streaming a disco (`pull_content_to_file`) con fallback graceful a pull bufferizado.
+- [x] Contrato `get_transport_hardware` normalizado entre desktop y Android (`ble`/`wifi_direct` anidados, `permissions_ready`, `ble_peers`, `handoff_candidates`).
 
 ## Pendiente real
 
 ### Transporte cercano (prioridad alta)
 - [ ] Transferencia de payload real sobre Wi-Fi Direct (ahora mismo hay discovery/handoff, no canal de datos final completo).
 - [ ] Handshake de sesion cercana extremo a extremo para modo publico (clave efimera por sesion y confirmacion receptor).
-- [ ] Normalizar contrato de `get_transport_hardware` entre desktop y Android para exponer exactamente las mismas claves.
 
 ### Rendimiento / memoria
-- [ ] Servidor FNX2 realmente streaming end-to-end sin ensamblar todo el body cifrado en RAM antes de responder.
 - [ ] Benchmarks de transferencias grandes (desktop-desktop, desktop-android, android-android).
 - [ ] Ajuste fino de chunk size, compresion y latencia en redes lentas.
 
