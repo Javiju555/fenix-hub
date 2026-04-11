@@ -234,7 +234,7 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
 
 interface IdentityInfo   { device_name: string; group_id: string; configured: boolean; device_type: string; }
 interface ContentItem    { id: string; content_type: 'text'|'image'|'file'; preview: string; size_bytes: number; created_at: number; file_name?: string | null; mime_type?: string | null; transfer_path?: string | null; data_text?: string | null; }
-interface PeerAnnouncement { group_id: string; content_id: string; device_name: string; preview: string; content_type: 'text'|'image'|'file'; size_bytes: number; send_mode: { Broadcast: null }|{ Direct: { target_device: string } }; created_at: number; port: number; file_name?: string | null; mime_type?: string | null; }
+interface PeerAnnouncement { group_id: string; content_id: string; device_name: string; preview: string; content_type: 'text'|'image'|'file'; size_bytes: number; send_mode: { Broadcast: null }|{ Direct: { target_device: string } }; created_at: number; port: number; file_name?: string | null; mime_type?: string | null; _localSrc?: string; }
 interface PeerContentPayload { announcement: PeerAnnouncement; peer_ip: string; }
 interface DragPayload { text?: string | null; uri_list?: string | null; }
 interface SaveContentResult { saved: boolean; path?: string | null; }
@@ -622,6 +622,14 @@ function setupEventListeners() {
   });
   listen<PeerContentPayload>('peer-content-available', ({ payload }) => {
     const ann = payload.announcement;
+    // On duplicate mDNS resolves the new announcement may have a truncated preview
+    // (NSD TXT records have size limits). Preserve whatever is better.
+    const existing = peerContent.find(p => p.content_id === ann.content_id);
+    if (existing) {
+      if (existing._localSrc) ann._localSrc = existing._localSrc; // keep cached asset URL
+      if (existing.preview.startsWith('data:image') && !ann.preview.startsWith('data:image'))
+        ann.preview = existing.preview; // keep full-res thumbnail
+    }
     peerContent = [...peerContent.filter(p => p.content_id !== ann.content_id), ann];
     if (!onlineDevices.includes(ann.device_name)) onlineDevices = [...onlineDevices, ann.device_name];
     updateHeader();
@@ -1258,9 +1266,10 @@ function renderPeerContent() {
   }
 
   container.innerHTML = `<div class="card-grid">${peerContent.map(item => {
-    const isImg = item.preview.startsWith('data:image');
-    const topContent = isImg
-      ? `<img class="card-thumb" src="${item.preview}" />`
+    // _localSrc: full-res asset:// URL set after local cache; preview: mDNS base64 thumbnail
+    const thumbSrc = item._localSrc || (item.preview.startsWith('data:image') ? item.preview : null);
+    const topContent = thumbSrc
+      ? `<img class="card-thumb" src="${thumbSrc}" />`
       : `<div class="card-top">
            <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
            <div class="card-body">
@@ -1291,19 +1300,13 @@ function renderPeerContent() {
         if (action === 'copy') {
           btn.textContent = 'Copiando…';
           const result = await invoke<{ cached_path: string | null }>('copy_peer_content', peerCommandArgs(id));
-          // If the peer sent an image, show the thumbnail now that it's cached locally.
           if (result?.cached_path) {
-            const card = btn.closest('.content-card') as HTMLElement | null;
-            if (card && !card.querySelector('.card-thumb')) {
-              const top = card.querySelector('.card-top');
-              if (top) {
-                const thumb = document.createElement('img');
-                thumb.className = 'card-thumb';
-                thumb.src = convertFileSrc(result.cached_path);
-                card.insertBefore(thumb, top);
-                top.remove();
-              }
-            }
+            // Persist asset URL in peerContent so re-renders keep the thumbnail
+            const assetSrc = convertFileSrc(result.cached_path);
+            peerContent = peerContent.map(p =>
+              p.content_id === id ? { ...p, _localSrc: assetSrc } : p
+            );
+            renderPeerContent();
           }
           flashPeerAction(btn, 'Copiado');
           return;
@@ -1312,19 +1315,14 @@ function renderPeerContent() {
         btn.textContent = 'Guardando…';
         const result = await invoke<SaveContentResult>('save_peer_content_as', peerCommandArgs(id));
         if (result.saved) {
-          // Show thumbnail if the saved item is an image (same as copy flow).
           if (result.path) {
-            const card = btn.closest('.content-card') as HTMLElement | null;
             const peerItem = peerContent.find(p => p.content_id === id);
-            if (card && peerItem?.content_type === 'image' && !card.querySelector('.card-thumb')) {
-              const top = card.querySelector('.card-top');
-              if (top) {
-                const thumb = document.createElement('img');
-                thumb.className = 'card-thumb';
-                thumb.src = convertFileSrc(result.path);
-                card.insertBefore(thumb, top);
-                top.remove();
-              }
+            if (peerItem?.content_type === 'image') {
+              const assetSrc = convertFileSrc(result.path);
+              peerContent = peerContent.map(p =>
+                p.content_id === id ? { ...p, _localSrc: assetSrc } : p
+              );
+              renderPeerContent();
             }
           }
           flashPeerAction(btn, 'Guardado');
