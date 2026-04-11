@@ -108,6 +108,61 @@ pub fn run() {
                         state.peer_content.clone(),
                     );
                     tracing::info!("Identity loaded from disk, discovery started");
+
+                    // Re-announce all shared content every 15 s so late-joining peers
+                    // discover it. mDNS-SD does not respond to PTR queries for services
+                    // that have been registered for a long time.
+                    let reannounce_map = state.active_announcements.clone();
+                    let reannounce_mdns = mdns.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let mut interval = tokio::time::interval(
+                            std::time::Duration::from_secs(15),
+                        );
+                        interval.tick().await; // skip the immediate first tick
+                        loop {
+                            interval.tick().await;
+                            let records: Vec<crate::state::AnnouncementRecord> = {
+                                reannounce_map.read().await.values().cloned().collect()
+                            };
+                            if records.is_empty() {
+                                continue;
+                            }
+                            tracing::debug!(
+                                "mDNS re-announce: refreshing {} service(s)",
+                                records.len()
+                            );
+                            for rec in &records {
+                                fenix_hub_daemon::mdns::unannounce_content(
+                                    &reannounce_mdns,
+                                    &rec.instance_name,
+                                )
+                                .ok();
+                            }
+                            for rec in &records {
+                                // Only re-announce if still active (remove_content may have
+                                // taken it out between our snapshot and here).
+                                if !reannounce_map
+                                    .read()
+                                    .await
+                                    .contains_key(&rec.announcement.content_id)
+                                {
+                                    continue;
+                                }
+                                if let std::net::IpAddr::V4(ipv4) = rec.local_ip {
+                                    if let Err(e) = fenix_hub_daemon::mdns::announce_content(
+                                        &reannounce_mdns,
+                                        &rec.announcement,
+                                        ipv4,
+                                    ) {
+                                        tracing::warn!(
+                                            "mDNS re-announce failed for {}: {e}",
+                                            rec.announcement.content_id
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    });
                 } else {
                     tracing::info!("No saved identity — waiting for first-run setup");
                 }

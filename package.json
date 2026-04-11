@@ -9,6 +9,6 @@
     "build:vite": "bun run --cwd frontend build"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2"
+    "@tauri-apps/cli": "^2.10.1"
   }
 }

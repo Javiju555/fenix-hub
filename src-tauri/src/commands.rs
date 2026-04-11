@@ -328,10 +328,10 @@ fn parse_device_type(raw: Option<&str>, fallback: &DeviceType) -> DeviceType {
 async fn stop_active_shares(state: &HubState) {
     stop_server_guard(state).await;
 
-    let announcements: Vec<(String, String)> =
+    let announcements: Vec<_> =
         state.active_announcements.write().await.drain().collect();
-    for (_, instance_name) in announcements {
-        if let Err(error) = unannounce_content(&state.mdns, &instance_name) {
+    for (_, rec) in announcements {
+        if let Err(error) = unannounce_content(&state.mdns, &rec.instance_name) {
             tracing::warn!("Failed to unannounce during identity update: {}", error);
         }
     }
@@ -411,13 +411,13 @@ async fn stop_server_guard(state: &HubState) {
 
 async fn shutdown_server_runtime(
     mdns: mdns_sd::ServiceDaemon,
-    active_announcements: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    active_announcements: Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::state::AnnouncementRecord>>>,
     server_shutdown: Arc<tokio::sync::RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
     server_port: Arc<tokio::sync::RwLock<Option<u16>>>,
 ) {
-    let announcements: Vec<(String, String)> = active_announcements.write().await.drain().collect();
-    for (_, instance_name) in announcements {
-        if let Err(error) = unannounce_content(&mdns, &instance_name) {
+    let announcements: Vec<_> = active_announcements.write().await.drain().collect();
+    for (_, rec) in announcements {
+        if let Err(error) = unannounce_content(&mdns, &rec.instance_name) {
             tracing::warn!("Failed to unannounce during guarded shutdown: {}", error);
         }
     }
@@ -748,9 +748,9 @@ pub async fn add_binary_content(
 #[tauri::command]
 pub async fn remove_content(id: String, state: State<'_, HubState>) -> Result<(), String> {
     // Unannounce from mDNS if it was published
-    let instance = state.active_announcements.write().await.remove(&id);
-    if let Some(instance_name) = instance {
-        unannounce_content(&state.mdns, &instance_name)
+    let rec = state.active_announcements.write().await.remove(&id);
+    if let Some(rec) = rec {
+        unannounce_content(&state.mdns, &rec.instance_name)
             .map_err(|e| tracing::warn!("Failed to unannounce {}: {}", id, e))
             .ok();
     }
@@ -833,7 +833,11 @@ pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> R
         .active_announcements
         .write()
         .await
-        .insert(args.content_id.clone(), instance_name);
+        .insert(args.content_id.clone(), crate::state::AnnouncementRecord {
+            instance_name,
+            announcement,
+            local_ip: std::net::IpAddr::V4(local_ip),
+        });
 
     tracing::info!("Published {} on port {} via mDNS", args.content_id, port);
     Ok(())
