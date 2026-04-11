@@ -420,6 +420,42 @@ textarea {
   color: var(--overlay-dim);
 }
 
+.overlay-sheet-item.danger {
+  color: var(--overlay-red);
+}
+
+.overlay-sheet-item.success {
+  color: var(--overlay-green);
+}
+
+.overlay-footer-bar {
+  display: flex;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.overlay-footer-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--overlay-border);
+  color: var(--overlay-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  touch-action: manipulation;
+}
+
+.overlay-footer-btn.subtle {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--overlay-dim);
+}
+
 @media (orientation: landscape) {
   .overlay-shell {
     grid-template-rows: auto auto 1fr;

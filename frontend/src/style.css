@@ -1,7 +1,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --glass-bg: rgba(8, 13, 30, 0.88);
+  --glass-bg: rgba(8, 13, 30, 0.97);
   --glass-border: rgba(255, 255, 255, 0.09);
   --surface: rgba(255, 255, 255, 0.055);
   --surface-hover: rgba(255, 255, 255, 0.09);
@@ -637,6 +637,16 @@ button:active { opacity: 0.65; }
 ::-webkit-scrollbar { height: 3px; width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.10); border-radius: 2px; }
+
+#panel-local,
+#panel-red {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+#panel-local::-webkit-scrollbar,
+#panel-red::-webkit-scrollbar {
+  display: none;
+}
 
 /* ── Settings window ──────────────────────────────────────────────────────── */
 

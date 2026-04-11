@@ -23,8 +23,8 @@ class FenixHubApplication : Application() {
 
 class AppContainer(application: Application) {
     val settingsStore = SettingsStore(application)
-    val contentRepository = ContentRepository()
     val tempClipboardStore = TempClipboardStore(application).also { it.clearAll() }
+    val contentRepository = ContentRepository(tempClipboardStore)
     val localContentFactory = LocalContentFactory(tempClipboardStore)
     val receivedContentHandler = ReceivedContentHandler(application, tempClipboardStore)
     val httpClient = FenixHttpClient()

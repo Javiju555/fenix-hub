@@ -1,6 +1,6 @@
 # FenixHub — Plan de trabajo
 
-> Generado el 2026-04-11. Para paralelizar entre modelos.  
+> Actualizado 2026-04-11. Para paralelizar entre modelos.  
 > Cada tarea es independiente salvo que se indique dependencia.
 
 ---
@@ -25,396 +25,214 @@ frontend/
     overlay.ts   ← Overlay Android (TypeScript, fuente)
     overlay.js   ← Overlay Android (JavaScript, copia manual — SIEMPRE junto a overlay.ts)
     overlay.css  ← Estilos del overlay
-    android.ts   ← App principal Android (WebView de la actividad principal)
-    android.js   ← Copia manual de android.ts
 ```
 
-> **IMPORTANTE**: Los archivos `.ts` y `.js` deben mantenerse en sincronía manual.  
-> Tras editar el `.ts`, refleja los mismos cambios en el `.js` correspondiente.  
-> Build: `cd frontend && bun run build`
+> **CRÍTICO**: Los archivos `.ts` y `.js` son copias manuales — NO hay transpilador automático.  
+> Tras editar el `.ts`, refleja los mismos cambios en el `.js` correspondiente (mismo orden de funciones, mismo contenido, sin tipos TypeScript).  
+> Build: `cd frontend && bun run build`  
+> Verificar tipos: `cd frontend && npx tsc --noEmit` (debe terminar sin errores — tsconfig está en modo strict)
 
-### Android overlay — cómo funciona
+### Estado del tsconfig
 
-- `OverlayController.kt` crea un `WindowManager.LayoutParams TYPE_APPLICATION_OVERLAY` con un `WebView`.
-- El WebView carga `https://appassets.androidplatform.net/assets/overlay.html` (generado del build).
-- `OverlayWebBridge.kt` expone un JS bridge (`FenixHubBridge`) para que el JS llame comandos nativos.
-- Tamaño del panel: **360dp ancho, 540dp alto**, máx 60% ancho / 74% alto en portrait. Esquina top-end (derecha).
-- Minimizado: círculo de **58dp** en esquina top-end.
+`frontend/tsconfig.json` tiene `"noUnusedLocals": true` y `"noUnusedParameters": true`.  
+**No desactivar estas flags**. Si el build falla por código no usado, eliminar el código, no deshabilitar la comprobación.
 
 ---
 
-## TAREA 1 — Drag-to-scroll horizontal en Desktop
+## TAREAS COMPLETADAS (referencia)
 
-**Prioridad**: Alta  
-**Dificultad**: Fácil (~30 min)  
-**Archivos**: `frontend/src/main.ts`, `frontend/src/main.js`, CSS de app (buscar en `frontend/src/`)
+| # | Tarea | Estado |
+|---|---|---|
+| 1 | Drag-to-scroll horizontal en Desktop (`main.ts`/`main.js`) | ✅ DONE |
+| 2 | Rediseño overlay Android — bottom sheet en lugar de footer de botones | ✅ DONE |
+| 3 | Eliminar base64 preview de imágenes en `NsdController.kt` | ✅ DONE |
+| 4 | Settings CSS — fondo más opaco | ✅ DONE |
+| 5 | Limpieza código muerto overlay.ts/overlay.js | ✅ DONE |
+| 6 | Android edge-drag trigger + slide-in desde derecha | ✅ DONE |
+| 7 | Android FIFO 25-item limit en historial local | ✅ DONE |
+
+---
+
+## TAREA 5 — Limpieza de código muerto en overlay.ts / overlay.js
+
+**Prioridad**: URGENTE (el código no compila limpio hasta que esto esté hecho)  
+**Dificultad**: Fácil — solo borrar bloques  
+**Archivos**: `frontend/src/overlay.ts`, `frontend/src/overlay.js`
+
+### Contexto
+
+El rediseño del overlay (Tarea 2) eliminó `renderActions()` y el sistema de selección, dejando funciones huérfanas que ya no se llaman desde ningún sitio. Además, en un paso previo ya se eliminaron `sendToDevice`, `sendToDeviceSingle` y `deleteLocalTargets` del `.ts`, pero `openDeviceSheet` y `openDeviceSheetSingle` aún las referencian — el `.ts` no compila limpio ahora mismo.
+
+### Qué eliminar de `overlay.ts`
+
+Eliminar **completas** las siguientes funciones (búscalas por nombre, no por número de línea):
+
+1. **`downloadPeerTargets()`** — itera todos los peers, no tiene caller
+2. **`ignorePeerTargets()`** — itera todos los peers, no tiene caller
+3. **`copyPeerTargets()`** — itera todos los peers, no tiene caller
+4. **`openDeviceSheet()`** — abría un sheet para elegir dispositivo, no tiene caller; además referencia `sendToDevice` que ya no existe
+5. **`openDeviceSheetSingle(id)`** — igual, referencia `sendToDeviceSingle` que ya no existe
+6. **`iconSend(size)`** — SVG helper, no tiene caller
+7. **`iconBroadcast(size)`** — SVG helper, no tiene caller
+8. **`iconWifi(size)`** — SVG helper, no tiene caller
+
+### Cómo verificar
+
+Tras borrar, ejecutar:
+
+```bash
+cd frontend && npx tsc --noEmit
+```
+
+Debe terminar **sin errores ni warnings**. Si aparece algún "declared but never read" adicional, borrarlo también.
+
+### Sincronizar overlay.js
+
+Después de limpiar el `.ts`, aplicar los mismos borrados en `overlay.js`:
+- Las mismas funciones existen en el `.js` (sin tipos, sin `async`/`function` keyword differences)
+- Busca `function downloadPeerTargets`, `function ignorePeerTargets`, etc. y borra cada bloque completo
+- El `.js` no necesita compilar con tsc, pero debe ser estructuralmente idéntico al `.ts` sin tipos
+
+---
+
+## TAREA 6 — Android: disparador de overlay por arrastre al borde derecho
+
+**Prioridad**: Media  
+**Dificultad**: Media (~2h)  
+**Archivos**: Android — buscar en `android/app/src/main/java/com/fenixhub/mobile/`
+
+### Comportamiento deseado
+
+Cuando el usuario tiene un archivo seleccionado (long-press activo sobre un archivo en cualquier app) y lo arrastra hacia el **borde derecho** de la pantalla, el overlay de FenixHub debe aparecer deslizándose desde la derecha.
+
+No hace falta que el archivo "caiga" sobre el overlay — solo que se acerque al borde (~80px del borde derecho) para que el overlay aparezca. El usuario puede entonces soltar el archivo sobre el overlay para transferirlo, o ignorar el overlay si lo arrastra de vuelta.
+
+### Referencia
+
+Huawei SuperHub hace exactamente esto: el panel emerge desde la derecha cuando detecta un drag cerca del borde. Es más predecible que agitar el dispositivo.
+
+### Implementación sugerida
+
+#### Opción A — Accessibility Service (recomendada)
+
+Android puede registrar un `AccessibilityService` con `FLAG_REQUEST_TOUCH_EXPLORATION_MODE` o usar `WindowManager` con `FLAG_NOT_FOCUSABLE | FLAG_WATCH_OUTSIDE_TOUCH` para detectar eventos de toque globales.
+
+Sin embargo, la opción más limpia es añadir un **trigger strip** transparente: una vista de ~20dp de ancho pegada al borde derecho, siempre visible, que al recibir un `DragEvent.ACTION_DRAG_ENTERED` o `ACTION_DRAG_LOCATION` lanza el overlay.
+
+#### Pasos
+
+1. **Crear `EdgeTriggerView`** — `View` o `FrameLayout` de 20dp × MATCH_PARENT, transparente, con `alpha=0` (invisible pero clickable).  
+   Registrarla en `WindowManager` con:
+   ```kotlin
+   val params = WindowManager.LayoutParams(
+       dpToPx(20), WindowManager.LayoutParams.MATCH_PARENT,
+       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+       WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+       PixelFormat.TRANSLUCENT
+   )
+   params.gravity = Gravity.END or Gravity.TOP
+   ```
+
+2. **Añadir listener de drag**:
+   ```kotlin
+   edgeTriggerView.setOnDragListener { _, event ->
+       when (event.action) {
+           DragEvent.ACTION_DRAG_ENTERED, DragEvent.ACTION_DRAG_LOCATION -> {
+               if (!overlayVisible) showOverlay()
+           }
+           DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> {
+               // Overlay sigue visible hasta que el usuario lo cierre
+           }
+       }
+       true
+   }
+   ```
+
+3. **Animación de entrada desde la derecha** — en `OverlayController.kt`, al llamar `showOverlay()`, animar con:
+   ```kotlin
+   overlayView.translationX = overlayView.width.toFloat()
+   overlayView.animate().translationX(0f).setDuration(280).setInterpolator(DecelerateInterpolator()).start()
+   ```
+
+4. **Arrancar `EdgeTriggerView` desde el mismo servicio que lanza el overlay** — probablemente `OverlayService.kt` o similar. Buscar dónde se crea el `WindowManager` para el overlay y añadir la vista trigger en el mismo `onCreate()`.
+
+### Notas
+
+- La `EdgeTriggerView` solo debe estar activa cuando el servicio overlay esté corriendo (el usuario tiene FenixHub activo).
+- No requiere cambios en frontend JS.
+- Permiso necesario ya existe: `SYSTEM_ALERT_WINDOW` (ya usado por el overlay).
+
+---
+
+## TAREA 7 — Android: límite FIFO de 25 items en historial local
+
+**Prioridad**: Media  
+**Dificultad**: Fácil  
+**Archivos**: Buscar `TempClipboardStore`, `LocalContentStore`, o similar en `android/app/src/main/java/com/fenixhub/mobile/`
 
 ### Problema
 
-El hub desktop tiene un scroll horizontal con cards de contenido local y de peers.  
-La barra de scroll nativa del sistema es imposible de agarrar en una ventana de 34px de altura.
+El historial de contenido local en Android no tiene límite. Con el tiempo puede acumular decenas o cientos de items, consumiendo almacenamiento y haciendo el overlay inutilizable.
 
 ### Objetivo
 
-- Scroll horizontal arrastrando el ratón en cualquier zona vacía entre/fuera de las cards.
-- Ocultar la scrollbar nativa (scroll invisible).
-- El contenedor scrollable en "Red" es `#panel-red` (contiene `.card-grid`).
-- El contenedor scrollable en "Local" es `#panel-local` (contiene `.card-grid`).
+Limitar el historial a **25 items**. Cuando se añade el item 26, el más antiguo (por `created_at` ascendente) se elimina automáticamente — FIFO.
 
 ### Implementación
 
-**JS** — añadir drag-scroll a ambos paneles tras renderizar las cards.  
-Llama a esta función después de `renderLocalContent()` y `renderPeerContent()`:
+1. Localizar la clase que persiste el historial local (busca `insert`, `add`, `save` junto a `LocalContent` o `ContentItem`).
 
-```typescript
-function attachDragScroll(el: HTMLElement) {
-  let isDown = false;
-  let startX = 0;
-  let scrollLeft = 0;
+2. Añadir constante:
+   ```kotlin
+   private const val MAX_HISTORY_ITEMS = 25
+   ```
 
-  el.addEventListener('mousedown', (e) => {
-    // Solo drag en zona sin botones (el target debe ser el contenedor o .card-grid, no un botón)
-    if ((e.target as HTMLElement).closest('button, a, input')) return;
-    isDown = true;
-    el.style.cursor = 'grabbing';
-    startX = e.pageX - el.offsetLeft;
-    scrollLeft = el.scrollLeft;
-    e.preventDefault();
-  });
+3. Tras insertar un nuevo item, comprobar y purgar:
+   ```kotlin
+   fun addItem(item: LocalContent) {
+       store.add(item)
+       // Purgar si supera el límite
+       if (store.size > MAX_HISTORY_ITEMS) {
+           val sorted = store.sortedBy { it.createdAt }
+           val toRemove = sorted.take(store.size - MAX_HISTORY_ITEMS)
+           toRemove.forEach { store.remove(it) }
+       }
+   }
+   ```
 
-  el.addEventListener('mouseleave', () => { isDown = false; el.style.cursor = ''; });
-  el.addEventListener('mouseup',    () => { isDown = false; el.style.cursor = ''; });
+   Si el store usa una base de datos (Room/SQLite), hacer la purga con una query:
+   ```kotlin
+   // Borrar los más antiguos que excedan el límite
+   dao.deleteOldestBeyondLimit(MAX_HISTORY_ITEMS)
+   ```
+   
+   Query Room equivalente:
+   ```kotlin
+   @Query("DELETE FROM local_content WHERE id NOT IN (SELECT id FROM local_content ORDER BY created_at DESC LIMIT :limit)")
+   fun deleteOldestBeyondLimit(limit: Int)
+   ```
 
-  el.addEventListener('mousemove', (e) => {
-    if (!isDown) return;
-    const x    = e.pageX - el.offsetLeft;
-    const walk = (x - startX) * 1.4;
-    el.scrollLeft = scrollLeft - walk;
-  });
-}
-```
-
-Aplicar en `renderLocalContent()` y `renderPeerContent()` justo tras settear `innerHTML`:
-
-```typescript
-// al final de renderLocalContent():
-attachDragScroll(document.getElementById('panel-local')!);
-
-// al final de renderPeerContent():
-attachDragScroll(document.getElementById('panel-red')!);
-```
-
-**CSS** — ocultar scrollbar en los paneles (buscar el selector `.tab-panel` o añadir a `#panel-local, #panel-red`):
-
-```css
-#panel-local,
-#panel-red {
-  scrollbar-width: none;          /* Firefox */
-  -ms-overflow-style: none;       /* IE/Edge legacy */
-}
-#panel-local::-webkit-scrollbar,
-#panel-red::-webkit-scrollbar {
-  display: none;                  /* Chrome/Safari/WebView2 */
-}
-```
-
-> Verificar que el CSS de app esté en `frontend/src/app.css` o similar. Si no existe ese selector, búscalo en los estilos inline del `main.ts`.
+4. Verificar que la purga también elimina los archivos en caché asociados (si `LocalContent` tiene un `cachePath` o similar).
 
 ---
 
-## TAREA 2 — Rediseño del overlay Android
-
-**Prioridad**: Alta  
-**Dificultad**: Media (~2-3h)  
-**Archivos**: `frontend/src/overlay.ts`, `frontend/src/overlay.js`, `frontend/src/overlay.css`  
-**Sin cambios en Kotlin** (a menos que se cambie el tamaño del panel).
-
-### Problema actual
-
-El overlay tiene un footer siempre visible con una grid de 5 botones grandes (WiFi Direct, Mandar a, Publicar, Borrar, Pegar). Esto ocupa demasiado espacio, se ve saturado y no es funcional en un panel pequeño.
-
-### Referencia visual
-
-Huawei SuperHub en Android: panel vertical estrecho, cards apiladas, **sin botones permanentes**. Las acciones aparecen solo al tocar una card (bottom sheet).
-
-### Diseño objetivo
+## Dependencias entre tareas nuevas
 
 ```
-┌──────────────────────────────┐
-│ 🔥 FenixHub    [−] [×]      │  ← header compacto
-├──────────────────────────────┤
-│ [Local 2] [Red 0]  [Abrir→] │  ← tabs + botón abrir
-├──────────────────────────────┤
-│ ┌──────────────────────────┐ │
-│ │ 📝 TEXT                  │ │  ← card local
-│ │ Texto reciente desde...  │ │
-│ │ 28 B                     │ │
-│ └──────────────────────────┘ │
-│ ┌──────────────────────────┐ │
-│ │ 🖼 IMAGE  • LIVE         │ │  ← card published
-│ │ foto-urgente.jpg         │ │
-│ │ 640 KB                   │ │
-│ └──────────────────────────┘ │
-│          (scroll)            │
-├──────────────────────────────┤
-│ [📋 Pegar]      [✕ Cerrar]  │  ← footer mínimo (2 pills)
-└──────────────────────────────┘
-
-Al tocar una card → bottom sheet slide-up:
-┌──────────────────────────────┐
-│ foto-urgente.jpg             │
-│ ┌──────────┐ ┌────────────┐ │
-│ │ 📡 Todos │ │ 🛑 Parar   │ │
-│ └──────────┘ └────────────┘ │
-│ ┌──────────┐ ┌────────────┐ │
-│ │ 🗑 Borrar │ │ ↗ Directo │ │
-│ └──────────┘ └────────────┘ │
-│ [Cancelar]                   │
-└──────────────────────────────┘
+TAREA 5 (dead code)     → independiente, HACER PRIMERO (desbloquea build limpio)
+TAREA 6 (edge-drag)     → independiente de 5 y 7
+TAREA 7 (FIFO limit)    → independiente de 5 y 6
 ```
 
-### Cambios en `overlay.ts`
-
-#### 1. Estructura HTML del shell (función `render()`)
-
-Cambiar `grid-template-rows` de `auto auto 1fr auto` a `auto auto 1fr auto`.  
-El `<footer class="overlay-actions">` se reemplaza por un footer mínimo:
-
-```typescript
-// Reemplazar la sección <footer> en render() por:
-`<footer class="overlay-footer-bar">
-  <button class="overlay-footer-btn" id="act-paste">${iconClipboard(16)} Pegar</button>
-  <button class="overlay-footer-btn subtle" id="act-close-overlay">${iconX(16)} Cerrar</button>
-</footer>`
-```
-
-Eventos del nuevo footer:
-```typescript
-document.getElementById('act-paste')!.addEventListener('click', () => void copyOrPasteLocal());
-document.getElementById('act-close-overlay')!.addEventListener('click', () => void invoke('close_overlay'));
-```
-
-#### 2. Eliminar `renderActions()` del flujo principal
-
-- Eliminar `<section id="overlay-actions">` del HTML del shell.
-- Eliminar la llamada `renderActions()` en `update()`.
-- Mantener `renderActions` solo como función privada que genera el contenido del sheet (ver paso 3).
-
-#### 3. Acción al tocar una card → bottom sheet
-
-Crear función `showActionSheet(item, tab)`:
-
-```typescript
-function showActionSheet(item: ContentItem | PeerAnnouncement, tab: 'local' | 'red') {
-  // Crear backdrop + sheet con las acciones del item
-  // Usar las clases CSS ya existentes: overlay-sheet-backdrop, overlay-sheet, overlay-sheet-item
-  const backdrop = document.createElement('div');
-  backdrop.className = 'overlay-sheet-backdrop';
-
-  const isLocal = tab === 'local';
-  const localItem = item as ContentItem;
-  const peerItem = item as PeerAnnouncement;
-
-  let buttonsHtml = '';
-  if (isLocal) {
-    const pub = localItem.is_published;
-    buttonsHtml = `
-      <button class="overlay-sheet-item" data-sheet-action="publish">
-        ${pub ? '⏹ Parar difusión' : '📡 Publicar para todos'}
-      </button>
-      ${pub ? `<button class="overlay-sheet-item" data-sheet-action="direct">↗ Mandar directo</button>` : ''}
-      <button class="overlay-sheet-item" data-sheet-action="copy">${iconCopy(16)} Copiar</button>
-      <button class="overlay-sheet-item danger" data-sheet-action="delete">${iconTrash(16)} Borrar</button>
-      <button class="overlay-sheet-item ghost" data-sheet-action="cancel">Cancelar</button>
-    `;
-  } else {
-    buttonsHtml = `
-      <button class="overlay-sheet-item success" data-sheet-action="download">${iconDownload(16)} Descargar</button>
-      <button class="overlay-sheet-item" data-sheet-action="copy">${iconCopy(16)} Copiar directo</button>
-      <button class="overlay-sheet-item danger" data-sheet-action="ignore">${iconMute(16)} Ignorar</button>
-      <button class="overlay-sheet-item ghost" data-sheet-action="cancel">Cancelar</button>
-    `;
-  }
-
-  backdrop.innerHTML = `
-    <div class="overlay-sheet">
-      <div class="overlay-sheet-title">${escapeHtml(
-        isLocal ? (localItem.file_name || localItem.preview.slice(0, 40)) : (peerItem.file_name || peerItem.preview.slice(0, 40))
-      )}</div>
-      ${buttonsHtml}
-    </div>
-  `;
-
-  // Cerrar al tocar fuera del sheet
-  backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) backdrop.remove();
-  });
-
-  // Manejar acciones
-  backdrop.querySelectorAll<HTMLButtonElement>('[data-sheet-action]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      backdrop.remove();
-      const action = btn.dataset.sheetAction!;
-      if (action === 'cancel') return;
-
-      if (isLocal) {
-        const id = localItem.id;
-        if (action === 'publish')  await togglePublishSingle(localItem);
-        if (action === 'copy')     await copySingleLocal(id);
-        if (action === 'delete')   await deleteSingleLocal(id);
-        if (action === 'direct')   await startDirectModeFromOverlay();
-      } else {
-        const id = peerItem.content_id;
-        if (action === 'download') await downloadSinglePeer(id);
-        if (action === 'copy')     await copySinglePeer(id);
-        if (action === 'ignore')   await ignoreSinglePeer(id);
-      }
-    });
-  });
-
-  document.getElementById('app')!.appendChild(backdrop);
-}
-```
-
-Adaptar los helpers de acción existentes (`getLocalTargets`, `togglePublishTargets`, etc.) para versiones "single-item" si no existen.
-
-#### 4. Click en card → llamar al sheet (en `renderCards()`)
-
-```typescript
-// En el listener de cards locales:
-button.addEventListener('click', () => {
-  const id = button.dataset.localId!;
-  const item = localContent.find(i => i.id === id);
-  if (item) showActionSheet(item, 'local');
-});
-
-// En el listener de cards peer:
-button.addEventListener('click', () => {
-  const id = button.dataset.peerId!;
-  const item = peerContent.find(i => i.content_id === id);
-  if (item) showActionSheet(item, 'red');
-});
-```
-
-Eliminar `selectedLocalId` y `selectedPeerId` del estado (ya no son necesarios para resaltar selección).
-
-### Cambios en `overlay.css`
-
-#### 1. Nuevo footer mínimo
-
-```css
-.overlay-footer-bar {
-  display: flex;
-  gap: 8px;
-  padding-top: 4px;
-}
-
-.overlay-footer-btn {
-  flex: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 12px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--overlay-border);
-  color: var(--overlay-text);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 700;
-  touch-action: manipulation;
-}
-
-.overlay-footer-btn.subtle {
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--overlay-dim);
-}
-```
-
-#### 2. Sheet items con variantes de color
-
-```css
-.overlay-sheet-item.danger {
-  color: var(--overlay-red);
-}
-
-.overlay-sheet-item.success {
-  color: var(--overlay-green);
-}
-```
-
-#### 3. Eliminar estilos obsoletos (opcional, no breaking)
-
-Las clases `.overlay-actions`, `.overlay-grid`, `.overlay-hint`, `.overlay-close-row` ya no se usan.  
-Pueden dejarse o eliminarse.
-
----
-
-## TAREA 3 — Eliminar base64 preview de imágenes (limpieza)
-
-**Prioridad**: Baja  
-**Dificultad**: Fácil  
-**Archivos**: `android/app/src/main/java/com/fenixhub/mobile/network/NsdController.kt`  
-**Contexto**: El campo `preview` del anuncio mDNS intenta enviar una miniatura base64 de imágenes, pero el límite del TXT record (~1000 bytes totales) hace que nunca quepa para imágenes reales. Siempre se trunca y muestra el fallback de texto.
-
-### Cambio
-
-En `NsdController.kt`, función `previewForAnnouncement()` (línea ~404):
-
-```kotlin
-// ANTES:
-private fun previewForAnnouncement(item: LocalContent): String {
-    if (item.contentType != HubContentType.IMAGE) {
-        return item.preview
-    }
-    return runCatching {
-        PreviewUtils.imageAnnouncementPreviewDataUrl(File(item.cachePath).readBytes())
-    }.getOrElse {
-        item.fileName?.let { fileName -> "Imagen: ${fileName.take(48)}" } ?: "Imagen lista para descargar"
-    }
-}
-
-// DESPUÉS (eliminar el intento de base64, ir directo al fallback de texto):
-private fun previewForAnnouncement(item: LocalContent): String {
-    if (item.contentType != HubContentType.IMAGE) {
-        return item.preview
-    }
-    return item.fileName?.let { "Imagen: ${it.take(48)}" } ?: "Imagen lista para descargar"
-}
-```
-
-Esto reduce el tamaño del anuncio mDNS, deja más espacio para `fileName` y evita trabajo de CPU innecesario.
-
----
-
-## TAREA 4 — Settings: fondo más opaco (CSS cosmético)
-
-**Prioridad**: Baja  
-**Dificultad**: Trivial  
-**Archivos**: `frontend/src/` — buscar estilos de `.settings-panel` o `#settings` en los CSS/TS
-
-La ventana de settings en desktop tiene el fondo demasiado transparente. Aumentar la opacidad del backdrop/fondo del panel de settings a ~0.97-0.99.
-
----
-
-## Dependencias entre tareas
-
-```
-TAREA 1 (drag-scroll)    → independiente
-TAREA 2 (overlay)        → independiente
-TAREA 3 (base64)         → independiente
-TAREA 4 (settings CSS)   → independiente
-```
-
-Todas son paralelizables. Tras cada tarea: `cd frontend && bun run build` para verificar que compila.
+Todas las tareas nuevas son paralelizables entre sí, salvo que conviene hacer la 5 primero para tener el build limpio.
 
 ---
 
 ## Notas para el modelo ejecutor
 
-1. **Siempre** editar `.ts` Y `.js` en paralelo — son copias manuales.
-2. El mock data en `overlay.ts` (variables `mockLocal`, `mockPeers`) sirve para probar la UI en browser sin Android — no borrarlos.
-3. Las funciones de acción ya existen en `overlay.ts` (`sendLocalTargets`, `togglePublishTargets`, `deleteLocalTargets`, `copyOrPasteLocal`, `downloadPeerTargets`, `ignorePeerTargets`, `copyPeerTargets`). Reutilizarlas o crear variantes single-item.
-4. El bridge de Android (`invoke()`) funciona igual para Tauri y Android — no hay diferencia a nivel TS.
-5. Para verificar sin dispositivo Android, abrir `dist/overlay.html` en Chrome DevTools con dimensiones 360×540.
+1. **SIEMPRE** editar `.ts` Y `.js` en paralelo — son copias manuales sin transpilador.
+2. **NO** desactivar flags de tsconfig (`noUnusedLocals`, `noUnusedParameters`) para ocultar errores — borrar el código muerto en su lugar.
+3. El mock data en `overlay.ts` (`mockLocal`, `mockPeers`) sirve para probar en browser sin Android — **no borrarlo**.
+4. Para verificar sin Android: abrir `dist/overlay.html` en Chrome DevTools con dimensiones 360×540.
+5. Build frontend: `cd frontend && bun run build`. Verificar tipos: `cd frontend && npx tsc --noEmit`.
