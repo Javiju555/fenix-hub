@@ -217,7 +217,7 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
         handoff_candidates: [],
       } as T;
     case 'get_transport_capabilities':
-      return { lan: true, ble: false, wifi_direct: false } as T;
+      return { lan: true, airdrop_ready: false, flow: '', ble: { supported: false, enabled: false, permissions_ready: false, adapters: [] }, wifi_direct: { supported: false, enabled: false, permissions_ready: false, adapters: [] }, ble_peers: [], wifi_direct_peers: [], handoff_candidates: [] } as T;
     case 'confirm_reset': return true as T;
     case 'close_settings': return undefined as T;
     default: return undefined as T;
@@ -333,7 +333,7 @@ async function reloadSettingsView(feedback?: { message: string; tone: 'ok'|'warn
 async function loadTransportCapabilities(): Promise<TransportCapabilities> {
   return invoke<TransportCapabilities>('get_transport_hardware')
     .catch(() => invoke<TransportCapabilities>('get_transport_capabilities'))
-    .catch(() => ({ lan: true, ble: false, wifi_direct: false }));
+    .catch(() => ({ lan: false, airdrop_ready: false, flow: '', ble: { supported: false, enabled: false, permissions_ready: false, adapters: [] }, wifi_direct: { supported: false, enabled: false, permissions_ready: false, adapters: [] }, ble_peers: [], wifi_direct_peers: [], handoff_candidates: [] }));
 }
 
 function renderSettings(
