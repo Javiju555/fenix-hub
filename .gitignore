@@ -14,3 +14,5 @@ android/.gradle/
 android/app/build/
 android/build/
 .claude/worktrees/
+opencode.json
+scripts/opencode-lmstudio.ps1

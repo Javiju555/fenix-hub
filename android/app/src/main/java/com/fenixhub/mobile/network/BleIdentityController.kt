@@ -15,6 +15,7 @@ import android.content.Context
 import android.os.ParcelUuid
 import android.os.SystemClock
 import android.util.Log
+import com.fenixhub.mobile.model.WifiDirectHandoff
 import com.fenixhub.mobile.util.TransportHardwareInspector
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -33,6 +34,13 @@ data class BleRuntimeStatus(
     val lastError: String?,
 )
 
+/**
+ * Callback invocado cuando se recibe un handoff WiFi Direct por BLE.
+ */
+fun interface WifiDirectHandoffListener {
+    fun onHandoffReceived(handoff: WifiDirectHandoff, sourceDeviceId: String)
+}
+
 class BleIdentityController(context: Context) {
     private val appContext = context.applicationContext
     private val bluetoothManager = appContext.getSystemService(BluetoothManager::class.java)
@@ -41,6 +49,7 @@ class BleIdentityController(context: Context) {
     private val advertiser: BluetoothLeAdvertiser? get() = adapter?.bluetoothLeAdvertiser
 
     private val serviceUuid = ParcelUuid(UUID.fromString(SERVICE_UUID))
+    private val handoffUuid = ParcelUuid(UUID.fromString(HANDOFF_SERVICE_UUID))
     private val peers = LinkedHashMap<String, BlePeer>()
     private val lock = Any()
 
@@ -48,7 +57,13 @@ class BleIdentityController(context: Context) {
     private var scanning = false
 
     @Volatile
+    private var scanningHandoffs = false
+
+    @Volatile
     private var advertising = false
+
+    @Volatile
+    private var advertisingHandoff = false
 
     @Volatile
     private var activeGroupTag: String = ""
@@ -58,6 +73,9 @@ class BleIdentityController(context: Context) {
 
     @Volatile
     private var lastError: String? = null
+
+    @Volatile
+    private var handoffListener: WifiDirectHandoffListener? = null
 
     fun ensureRunning(groupId: String, deviceName: String) {
         val hw = TransportHardwareInspector.snapshot(appContext).ble
@@ -89,11 +107,16 @@ class BleIdentityController(context: Context) {
 
     fun stop() {
         runCatching { scanner?.stopScan(scanCallback) }
+        runCatching { scanner?.stopScan(handoffScanCallback) }
         runCatching { advertiser?.stopAdvertising(advertiseCallback) }
+        runCatching { advertiser?.stopAdvertising(handoffAdvertiseCallback) }
         scanning = false
+        scanningHandoffs = false
         advertising = false
+        advertisingHandoff = false
         activeGroupTag = ""
         activeDeviceName = ""
+        handoffListener = null
         synchronized(lock) { peers.clear() }
     }
 
@@ -112,6 +135,53 @@ class BleIdentityController(context: Context) {
             advertising = advertising,
             lastError = lastError,
         )
+    }
+
+    // ── Handoff BLE → WiFi Direct ──────────────────────────────────────────
+
+    /**
+     * Registra un listener para recibir handoffs WiFi Direct por BLE.
+     */
+    fun setHandoffListener(listener: WifiDirectHandoffListener?) {
+        handoffListener = listener
+    }
+
+    /**
+     * Inicia el escaneo de handoffs WiFi Direct por BLE.
+     * Escucha el servicio HANDOFF_SERVICE_UUID para detectar peers que ofrezcan
+     * información de transferencia (IP p2p, puerto, contentId).
+     */
+    fun startHandoffScanning() {
+        if (scanningHandoffs) return
+        val bleScanner = scanner ?: return
+
+        val filter = ScanFilter.Builder()
+            .setServiceUuid(handoffUuid)
+            .build()
+
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+
+        runCatching {
+            bleScanner.startScan(listOf(filter), settings, handoffScanCallback)
+            scanningHandoffs = true
+            Log.d(TAG, "Handoff BLE scanning started")
+        }.onFailure { error ->
+            scanningHandoffs = false
+            lastError = error.message
+            Log.w(TAG, "Handoff BLE scan start failed", error)
+        }
+    }
+
+    /**
+     * Detiene el escaneo de handoffs.
+     */
+    fun stopHandoffScanning() {
+        if (!scanningHandoffs) return
+        runCatching { scanner?.stopScan(handoffScanCallback) }
+        scanningHandoffs = false
+        Log.d(TAG, "Handoff BLE scanning stopped")
     }
 
     private fun startScanning() {
@@ -220,6 +290,25 @@ class BleIdentityController(context: Context) {
         }
     }
 
+    private val handoffScanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val record = result.scanRecord ?: return
+            val raw = record.getServiceData(handoffUuid) ?: return
+            val decoded = raw.toString(StandardCharsets.UTF_8)
+            val handoff = WifiDirectHandoff.fromJson(decoded) ?: return
+            val address = runCatching { result.device.address }.getOrNull()
+            val deviceId = if (!address.isNullOrBlank()) address else "ble-handoff-${handoff.contentId}"
+            Log.d(TAG, "Handoff received from $deviceId: ${handoff.contentId} via ${handoff.role}")
+            handoffListener?.onHandoffReceived(handoff, deviceId)
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            scanningHandoffs = false
+            lastError = "handoff_scan_failed_$errorCode"
+            Log.w(TAG, "Handoff BLE scan failed: $errorCode")
+        }
+    }
+
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
             advertising = true
@@ -232,9 +321,22 @@ class BleIdentityController(context: Context) {
         }
     }
 
+    private val handoffAdvertiseCallback = object : AdvertiseCallback() {
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+            advertisingHandoff = true
+        }
+
+        override fun onStartFailure(errorCode: Int) {
+            advertisingHandoff = false
+            lastError = "handoff_advertise_failed_$errorCode"
+            Log.w(TAG, "Handoff BLE advertise failed: $errorCode")
+        }
+    }
+
     private companion object {
         const val TAG = "BleIdentityController"
         const val SERVICE_UUID = "6f8d3a52-7a6b-4b62-b2c0-5c0d49f45710"
+        const val HANDOFF_SERVICE_UUID = "6f8d3a52-7a6b-4b62-b2c0-5c0d49f45711"
         const val PEER_TTL_MS = 25_000L
 
         fun normalizedGroupTag(groupId: String): String {
