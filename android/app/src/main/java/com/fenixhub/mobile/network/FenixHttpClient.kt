@@ -10,6 +10,7 @@ import kotlinx.coroutines.withContext
 import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okio.BufferedSource
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.security.GeneralSecurityException
@@ -61,29 +62,32 @@ class FenixHttpClient {
                 Log.d(TAG, "Pulling ${peer.announcement.contentId} from ${peer.peerIp}:${peer.port}")
 
                 client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        error("HTTP ${response.code}")
-                    }
+                    if (!response.isSuccessful) error("HTTP ${response.code}")
                     val body = response.body ?: error("Empty response body")
                     val encryptedHeader = response.header(ENCRYPTED_HEADER)
-                    val rawBytes = body.bytes()
-                    val recvMs = System.currentTimeMillis() - startMs
-                    Log.d(TAG, "Received ${rawBytes.size / 1024} KB in ${recvMs}ms")
+                    val mimeType = body.contentType()?.toString()
+                    val fileName = fileNameFromDisposition(response.header("Content-Disposition"))
 
-                    val decryptStart = System.currentTimeMillis()
                     val bytes = when (encryptedHeader) {
-                        "1" -> CryptoUtils.decryptAesGcm(settings.encKeyBytes(), rawBytes)
-                        "2" -> decryptFnx2V2(settings.encKeyBytes(), rawBytes)
-                        else -> rawBytes
+                        "2" -> {
+                            // FNX2 v2: stream-decrypt chunk by chunk — never holds full ciphertext in RAM
+                            streamDecryptFnx2(body.source(), settings.encKeyBytes(), startMs)
+                        }
+                        "1" -> {
+                            val rawBytes = body.bytes()
+                            val recvMs = System.currentTimeMillis() - startMs
+                            val result = CryptoUtils.decryptAesGcm(settings.encKeyBytes(), rawBytes)
+                            Log.i(TAG, "Pull complete (v1): ${result.size / 1024} KB — ${recvMs}ms")
+                            result
+                        }
+                        else -> {
+                            val rawBytes = body.bytes()
+                            Log.i(TAG, "Pull complete (legacy): ${rawBytes.size / 1024} KB — ${System.currentTimeMillis() - startMs}ms")
+                            rawBytes
+                        }
                     }
-                    val decryptMs = System.currentTimeMillis() - decryptStart
-                    Log.i(TAG, "Pull complete: ${bytes.size / 1024} KB — recv ${recvMs}ms, decrypt ${decryptMs}ms, total ${System.currentTimeMillis() - startMs}ms")
 
-                    PulledContent(
-                        bytes = bytes,
-                        mimeType = body.contentType()?.toString(),
-                        fileName = fileNameFromDisposition(response.header("Content-Disposition")),
-                    )
+                    PulledContent(bytes = bytes, mimeType = mimeType, fileName = fileName)
                 }
             }
         }
@@ -110,27 +114,24 @@ class FenixHttpClient {
                 Log.d(TAG, "Ephemeral pull $contentId from $targetIp:$port")
 
                 client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        error("HTTP ${response.code}")
-                    }
+                    if (!response.isSuccessful) error("HTTP ${response.code}")
                     val body = response.body ?: error("Empty response body")
                     val encryptedHeader = response.header(ENCRYPTED_HEADER)
-                    val rawBytes = body.bytes()
-                    val recvMs = System.currentTimeMillis() - startMs
-                    Log.d(TAG, "Ephemeral received ${rawBytes.size / 1024} KB in ${recvMs}ms")
+                    val mimeType = body.contentType()?.toString()
+                    val fileName = fileNameFromDisposition(response.header("Content-Disposition"))
 
-                    // Ephemeral mode: no encryption (WiFi Direct encrypts at link layer)
-                    // But if the server sends encrypted data, try to decrypt
-                    // For now, assume unencrypted in ephemeral mode
-                    val bytes = rawBytes
-                    val decryptMs = System.currentTimeMillis() - startMs - recvMs
-                    Log.i(TAG, "Ephemeral pull complete: ${bytes.size / 1024} KB — recv ${recvMs}ms, decrypt ${decryptMs}ms, total ${System.currentTimeMillis() - startMs}ms")
+                    // Ephemeral mode: WiFi Direct encrypts at link layer, but if the server
+                    // happens to send FNX2 v2 (e.g. reusing the LAN server), stream-decrypt it.
+                    val bytes = when (encryptedHeader) {
+                        "2" -> streamDecryptFnx2(body.source(), ByteArray(32), startMs)
+                        else -> {
+                            val rawBytes = body.bytes()
+                            Log.i(TAG, "Ephemeral pull complete: ${rawBytes.size / 1024} KB — ${System.currentTimeMillis() - startMs}ms")
+                            rawBytes
+                        }
+                    }
 
-                    PulledContent(
-                        bytes = bytes,
-                        mimeType = body.contentType()?.toString(),
-                        fileName = fileNameFromDisposition(response.header("Content-Disposition")),
-                    )
+                    PulledContent(bytes = bytes, mimeType = mimeType, fileName = fileName)
                 }
             }
         }
@@ -149,57 +150,56 @@ class FenixHttpClient {
         val FNX2_MAGIC = byteArrayOf('F'.code.toByte(), 'N'.code.toByte(), 'X'.code.toByte(), '2'.code.toByte())
     }
 
-    private fun decryptFnx2V2(encKey: ByteArray, rawPayload: ByteArray): ByteArray {
+    /**
+     * Stream-decrypt an FNX2 v2 response body chunk by chunk.
+     *
+     * Unlike the old approach (body.bytes() → decrypt whole buffer), this reads
+     * each 65KB chunk from the network and decrypts it immediately. Peak RAM is
+     * ~originalSize (plaintext output) instead of ~2×originalSize (ciphertext + plaintext).
+     */
+    private fun streamDecryptFnx2(source: BufferedSource, encKey: ByteArray, startMs: Long): ByteArray {
         require(encKey.size == 32) { "AES key must be 32 bytes" }
-        if (rawPayload.size < FNX2_HEADER_SIZE) {
-            error("FNX2 header too short: ${rawPayload.size} bytes")
-        }
-        // Check magic without allocating a copy
+
+        // Read and validate 29-byte FNX2 header
+        val header = source.readByteArray(FNX2_HEADER_SIZE.toLong())
+        if (header.size < FNX2_HEADER_SIZE) error("FNX2 header too short: ${header.size} bytes")
         for (i in 0 until 4) {
-            if (rawPayload[i] != FNX2_MAGIC[i]) error("Invalid FNX2 magic")
+            if (header[i] != FNX2_MAGIC[i]) error("Invalid FNX2 magic")
         }
 
-        val baseNonce = rawPayload.copyOfRange(4, 16) // 12 bytes, once
-        val totalChunks = readIntBE(rawPayload, 16)
-        val originalSize = readLongBE(rawPayload, 20)
-        val compression = rawPayload[28].toInt() and 0xff
+        val baseNonce = header.copyOfRange(4, 16)
+        val totalChunks = readIntBE(header, 16)
+        val originalSize = readLongBE(header, 20)
+        val compression = header[28].toInt() and 0xff
 
         if (totalChunks < 0) error("Invalid FNX2 total_chunks: $totalChunks")
-
-        val encryptedLen = rawPayload.size - FNX2_HEADER_SIZE
         if (totalChunks == 0) {
-            if (encryptedLen != 0) error("Invalid FNX2 payload: header declares 0 chunks but body has data")
+            Log.i(TAG, "Pull complete (FNX2 stream): 0 chunks — ${System.currentTimeMillis() - startMs}ms")
             return decodeFnx2Compression(ByteArray(0), compression, originalSize)
         }
 
         val fullChunkEncryptedLen = FNX2_CHUNK_SIZE + FNX2_GCM_TAG_BYTES
-        val minimumCiphertextBytes =
-            (totalChunks.toLong() - 1L) * fullChunkEncryptedLen.toLong() + FNX2_GCM_TAG_BYTES.toLong()
-        if (encryptedLen.toLong() < minimumCiphertextBytes) {
-            error("FNX2 payload truncated: expected at least $minimumCiphertextBytes bytes of ciphertext, got $encryptedLen")
-        }
-
-        // Pre-allocate output — avoids repeated internal copies inside ByteArrayOutputStream
-        val expectedPlaintext = originalSize.coerceAtMost(
-            (totalChunks.toLong() * FNX2_CHUNK_SIZE).coerceAtMost(Int.MAX_VALUE.toLong())
-        ).toInt()
+        val expectedPlaintext = originalSize
+            .coerceAtMost((totalChunks.toLong() * FNX2_CHUNK_SIZE).coerceAtMost(Int.MAX_VALUE.toLong()))
+            .toInt()
         val plaintextOut = ByteArrayOutputStream(expectedPlaintext.coerceAtLeast(FNX2_CHUNK_SIZE))
 
-        // Create cipher once, re-init per chunk — avoids JCA provider lookup × N
         val secretKey = SecretKeySpec(encKey, "AES")
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-
-        // Reusable nonce buffer — mutated per chunk, avoids 12-byte alloc × N
         val chunkNonce = baseNonce.copyOf()
 
-        var cursor = FNX2_HEADER_SIZE
-
         for (chunkIndex in 0 until totalChunks) {
-            val chunkLen = if (chunkIndex < totalChunks - 1) fullChunkEncryptedLen else rawPayload.size - cursor
+            // Non-last chunks are always fullChunkEncryptedLen; last chunk reads whatever remains
+            val chunkBytes = if (chunkIndex < totalChunks - 1) {
+                source.readByteArray(fullChunkEncryptedLen.toLong())
+            } else {
+                source.readByteArray()
+            }
 
-            if (chunkLen < FNX2_GCM_TAG_BYTES) error("FNX2 chunk $chunkIndex too short: $chunkLen bytes")
+            if (chunkBytes.size < FNX2_GCM_TAG_BYTES) {
+                error("FNX2 chunk $chunkIndex too short: ${chunkBytes.size} bytes")
+            }
 
-            // Derive nonce in-place: reset to baseNonce then XOR chunk index into bytes [4..11]
             baseNonce.copyInto(chunkNonce)
             val idx = chunkIndex.toLong()
             for (i in 0 until 8) {
@@ -208,17 +208,16 @@ class FenixHttpClient {
 
             try {
                 cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, chunkNonce))
-                // doFinal with offset — no copyOfRange allocation
-                val plaintext = cipher.doFinal(rawPayload, cursor, chunkLen)
-                plaintextOut.write(plaintext)
+                plaintextOut.write(cipher.doFinal(chunkBytes))
             } catch (e: GeneralSecurityException) {
                 throw IllegalStateException("FNX2 chunk $chunkIndex decryption failed", e)
             }
-
-            cursor += chunkLen
         }
 
-        if (cursor != rawPayload.size) error("FNX2 payload malformed: trailing bytes after chunk decode")
+        val totalMs = System.currentTimeMillis() - startMs
+        val kb = plaintextOut.size() / 1024
+        val mbps = if (totalMs > 0) (plaintextOut.size().toLong() * 8 / totalMs / 1000.0) else 0.0
+        Log.i(TAG, "Pull complete (FNX2 stream): ${kb} KB in ${totalMs}ms (%.1f Mbps)".format(mbps))
 
         return decodeFnx2Compression(plaintextOut.toByteArray(), compression, originalSize)
     }
