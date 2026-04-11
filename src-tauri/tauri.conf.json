@@ -50,7 +50,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPLOCAL/**", "$APPDATA/**", "$HOME/**"]
+      }
     },
     "trayIcon": {
       "id": "main",
