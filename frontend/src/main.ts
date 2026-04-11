@@ -208,12 +208,13 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
       return {
         lan: true,
         lan_ip: '192.168.1.50',
-        ble: true,
-        wifi_direct: true,
         airdrop_ready: true,
         flow: 'ble_discovery_then_wifi_direct_transfer',
-        ble_details: { supported: true, enabled: true, adapters: ['Mock BLE Adapter'] },
-        wifi_direct_details: { supported: true, enabled: true, adapters: ['Mock Wi-Fi Adapter'] },
+        ble: { supported: true, enabled: true, permissions_ready: true, adapters: ['Mock BLE Adapter'] },
+        wifi_direct: { supported: true, enabled: true, permissions_ready: true, adapters: ['Mock Wi-Fi Adapter'] },
+        ble_peers: [],
+        wifi_direct_peers: [],
+        handoff_candidates: [],
       } as T;
     case 'get_transport_capabilities':
       return { lan: true, ble: false, wifi_direct: false } as T;
@@ -237,18 +238,20 @@ interface ProfilesPayload { profiles: IdentityProfileInfo[]; }
 interface TransportRadioDetails {
   supported: boolean;
   enabled: boolean;
+  permissions_ready: boolean;
   adapters: string[];
   last_error?: string | null;
 }
 interface TransportCapabilities {
   lan: boolean;
-  ble: boolean;
-  wifi_direct: boolean;
   lan_ip?: string | null;
   airdrop_ready?: boolean;
   flow?: string;
-  ble_details?: TransportRadioDetails;
-  wifi_direct_details?: TransportRadioDetails;
+  ble: TransportRadioDetails;
+  wifi_direct: TransportRadioDetails;
+  ble_peers?: string[];
+  wifi_direct_peers?: string[];
+  handoff_candidates?: string[];
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -426,14 +429,14 @@ function renderSettings(
             <div class="transport-note">IP actual: ${escapeHtml(transport.lan_ip || 'sin enlace LAN')}</div>
             <div class="transport-item">
               <span>Bluetooth LE</span>
-              <span class="cap-pill ${transport.ble ? 'ok' : 'off'}">${transport.ble ? 'Disponible' : 'No disponible'}</span>
+              <span class="cap-pill ${transport.ble?.supported && transport.ble?.enabled ? 'ok' : 'off'}">${transport.ble?.supported && transport.ble?.enabled ? 'Disponible' : 'No disponible'}</span>
             </div>
-            <div class="transport-note">Adaptadores BLE: ${escapeHtml((transport.ble_details?.adapters || []).join(', ') || 'ninguno detectado')}</div>
+            <div class="transport-note">Adaptadores BLE: ${escapeHtml((transport.ble?.adapters || []).join(', ') || 'ninguno detectado')}</div>
             <div class="transport-item">
               <span>Wi-Fi Direct</span>
-              <span class="cap-pill ${transport.wifi_direct ? 'ok' : 'off'}">${transport.wifi_direct ? 'Disponible' : 'No disponible'}</span>
+              <span class="cap-pill ${transport.wifi_direct?.supported && transport.wifi_direct?.enabled ? 'ok' : 'off'}">${transport.wifi_direct?.supported && transport.wifi_direct?.enabled ? 'Disponible' : 'No disponible'}</span>
             </div>
-            <div class="transport-note">Adaptadores Wi-Fi: ${escapeHtml((transport.wifi_direct_details?.adapters || []).join(', ') || 'ninguno detectado')}</div>
+            <div class="transport-note">Adaptadores Wi-Fi: ${escapeHtml((transport.wifi_direct?.adapters || []).join(', ') || 'ninguno detectado')}</div>
             <div class="transport-note">Flujo cercano: ${escapeHtml(transport.flow || 'ble_discovery_then_wifi_direct_transfer')}</div>
             <div class="transport-note">Modo AirDrop-like: <strong>${transport.airdrop_ready ? 'listo' : 'parcial'}</strong></div>
           </div>

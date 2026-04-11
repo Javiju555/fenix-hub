@@ -58,9 +58,8 @@ Importante: el canal final de transferencia completa sobre Wi-Fi Direct aun esta
 ## Roadmap corto (para release OSS fuerte)
 
 1. Canal de transferencia cercano completo sobre Wi-Fi Direct.
-2. Streaming real sin ensamblar payload completo en RAM.
-3. Benchmarks y tuning de velocidad por plataforma.
-4. CI de release + repo publico limpio con historial filtrado.
+2. Benchmarks y tuning de velocidad por plataforma.
+3. Repo publico limpio con historial filtrado.
 
 ## Estado de plataforma
 
