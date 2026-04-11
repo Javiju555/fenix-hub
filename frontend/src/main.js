@@ -563,6 +563,15 @@ function setupEventListeners() {
     });
     listen('peer-content-available', ({ payload }) => {
         const ann = payload.announcement;
+        // On duplicate mDNS resolves the new announcement may have a truncated preview
+        // (NSD TXT records have size limits). Preserve whatever is better.
+        const existing = peerContent.find(p => p.content_id === ann.content_id);
+        if (existing) {
+            if (existing._localSrc)
+                ann._localSrc = existing._localSrc; // keep cached asset URL
+            if (existing.preview.startsWith('data:image') && !ann.preview.startsWith('data:image'))
+                ann.preview = existing.preview; // keep full-res thumbnail
+        }
         peerContent = [...peerContent.filter(p => p.content_id !== ann.content_id), ann];
         if (!onlineDevices.includes(ann.device_name))
             onlineDevices = [...onlineDevices, ann.device_name];
@@ -587,6 +596,8 @@ function setupEventListeners() {
     });
     listen('peer-online', ({ payload: deviceName }) => {
         presenceDevices.add(deviceName);
+        // Do NOT add to onlineDevices — a peer is only "visible" when it has active content.
+        // This prevents idle/present-but-empty peers from showing in the counter or send buttons.
         updateHeader();
         renderPeerContent();
     });
@@ -1171,9 +1182,10 @@ function renderPeerContent() {
         return;
     }
     container.innerHTML = `<div class="card-grid">${peerContent.map(item => {
-        const isImg = item.preview.startsWith('data:image');
-        const topContent = isImg
-            ? `<img class="card-thumb" src="${item.preview}" />`
+        // _localSrc: full-res asset:// URL set after local cache; preview: mDNS base64 thumbnail
+        const thumbSrc = item._localSrc || (item.preview.startsWith('data:image') ? item.preview : null);
+        const topContent = thumbSrc
+            ? `<img class="card-thumb" src="${thumbSrc}" />`
             : `<div class="card-top">
            <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
            <div class="card-body">
@@ -1202,19 +1214,11 @@ function renderPeerContent() {
                 if (action === 'copy') {
                     btn.textContent = 'Copiando…';
                     const result = await invoke('copy_peer_content', peerCommandArgs(id));
-                    // If the peer sent an image, show the thumbnail now that it's cached locally.
                     if (result?.cached_path) {
-                        const card = btn.closest('.content-card');
-                        if (card && !card.querySelector('.card-thumb')) {
-                            const top = card.querySelector('.card-top');
-                            if (top) {
-                                const thumb = document.createElement('img');
-                                thumb.className = 'card-thumb';
-                                thumb.src = convertFileSrc(result.cached_path);
-                                card.insertBefore(thumb, top);
-                                top.remove();
-                            }
-                        }
+                        // Persist asset URL in peerContent so re-renders keep the thumbnail
+                        const assetSrc = convertFileSrc(result.cached_path);
+                        peerContent = peerContent.map(p => p.content_id === id ? { ...p, _localSrc: assetSrc } : p);
+                        renderPeerContent();
                     }
                     flashPeerAction(btn, 'Copiado');
                     return;
@@ -1222,19 +1226,12 @@ function renderPeerContent() {
                 btn.textContent = 'Guardando…';
                 const result = await invoke('save_peer_content_as', peerCommandArgs(id));
                 if (result.saved) {
-                    // Show thumbnail if the saved item is an image (same as copy flow).
                     if (result.path) {
-                        const card = btn.closest('.content-card');
                         const peerItem = peerContent.find(p => p.content_id === id);
-                        if (card && peerItem?.content_type === 'image' && !card.querySelector('.card-thumb')) {
-                            const top = card.querySelector('.card-top');
-                            if (top) {
-                                const thumb = document.createElement('img');
-                                thumb.className = 'card-thumb';
-                                thumb.src = convertFileSrc(result.path);
-                                card.insertBefore(thumb, top);
-                                top.remove();
-                            }
+                        if (peerItem?.content_type === 'image') {
+                            const assetSrc = convertFileSrc(result.path);
+                            peerContent = peerContent.map(p => p.content_id === id ? { ...p, _localSrc: assetSrc } : p);
+                            renderPeerContent();
                         }
                     }
                     flashPeerAction(btn, 'Guardado');
