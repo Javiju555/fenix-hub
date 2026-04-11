@@ -644,7 +644,8 @@ function setupEventListeners() {
   });
   listen<string>('peer-online', ({ payload: deviceName }) => {
     presenceDevices.add(deviceName);
-    if (!onlineDevices.includes(deviceName)) onlineDevices = [...onlineDevices, deviceName];
+    // Do NOT add to onlineDevices — a peer is only "visible" when it has active content.
+    // This prevents idle/present-but-empty peers from showing in the counter or send buttons.
     updateHeader();
     renderPeerContent();
   });
