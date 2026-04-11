@@ -1348,118 +1348,88 @@ fn save_item_to_path(item: &ContentItem, path: &std::path::Path) -> anyhow::Resu
 }
 
 fn write_item_to_clipboard(item: &ContentItem) -> anyhow::Result<()> {
-    use fenix_hub_core::content::ContentType;
-    let mut clipboard = arboard::Clipboard::new()?;
     match &item.data {
         ContentData::Text(text) => {
-            clipboard.set_text(text)?;
+            arboard::Clipboard::new()?.set_text(text)?;
         }
         ContentData::FilePath(path) => {
-            if item.content_type == ContentType::Image {
-                clipboard_set_image_file(&mut clipboard, path)?;
-            } else {
-                clipboard.set_text(path.to_string_lossy().to_string())?;
-            }
+            clipboard_set_file(path, &item.content_type)?;
         }
         ContentData::Bytes(bytes) => {
-            if item.content_type == ContentType::Image {
-                let path = temp_store::write_item_bytes(
-                    &item.id,
-                    item.file_name.as_deref().unwrap_or("fenixhub-item.png"),
-                    bytes,
-                )?;
-                clipboard_set_image_file(&mut clipboard, &path)?;
-            } else {
-                let path = temp_store::write_item_bytes(
-                    &item.id,
-                    item.file_name.as_deref().unwrap_or("fenixhub-item.bin"),
-                    bytes,
-                )?;
-                clipboard.set_text(path.to_string_lossy().to_string())?;
-            }
+            let fname = item.file_name.as_deref().unwrap_or("fenixhub-item.bin");
+            let path = temp_store::write_item_bytes(&item.id, fname, bytes)?;
+            clipboard_set_file(&path, &item.content_type)?;
         }
         ContentData::Empty => {}
     }
     Ok(())
 }
 
+/// Copy a file to the clipboard.
+/// Windows: CF_HDROP (like Ctrl+C in Explorer) — instant, no decode.
+/// Linux:   xclip for images, arboard fallback.
+fn clipboard_set_file(
+    path: &std::path::Path,
+    content_type: &fenix_hub_core::content::ContentType,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = content_type;
+        return clipboard_hdrop(path);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use fenix_hub_core::content::ContentType;
+        let mut clipboard = arboard::Clipboard::new()?;
+        if *content_type == ContentType::Image {
+            clipboard_set_image_file(&mut clipboard, path)
+        } else {
+            clipboard.set_text(path.to_string_lossy().to_string())?;
+            Ok(())
+        }
+    }
+}
+
+/// Windows CF_HDROP: writes the file path to clipboard as a shell file-copy.
+/// Instant — no image decoding. Accepted by Telegram, Discord, WhatsApp, etc.
+#[cfg(target_os = "windows")]
+fn clipboard_hdrop(path: &std::path::Path) -> anyhow::Result<()> {
+    // DROPFILES header (20 bytes):
+    //   pFiles (u32) = 20  — byte offset to the file list
+    //   pt.x/y (i32) = 0  — unused drop point
+    //   fNC (u32) = 0      — client area
+    //   fWide (u32) = 1    — Unicode path list
+    // File list: UTF-16LE path + null + null (double-null = end of list)
+    let path_str = path.to_string_lossy();
+    let mut utf16: Vec<u16> = path_str.encode_utf16().collect();
+    utf16.push(0); // path null terminator
+    utf16.push(0); // list null terminator
+
+    let mut buf = vec![0u8; 20 + utf16.len() * 2];
+    buf[0..4].copy_from_slice(&20u32.to_le_bytes());   // pFiles
+    buf[16..20].copy_from_slice(&1u32.to_le_bytes());  // fWide = TRUE
+    for (i, &w) in utf16.iter().enumerate() {
+        let off = 20 + i * 2;
+        buf[off..off + 2].copy_from_slice(&w.to_le_bytes());
+    }
+
+    use clipboard_win::{Clipboard, raw};
+    let _clip = Clipboard::new_attempts(10).map_err(|e| anyhow::anyhow!("{e}"))?;
+    raw::empty().map_err(|e| anyhow::anyhow!("{e}"))?;
+    // CF_HDROP = 15
+    clipboard_win::raw::set_without_clear(15, &buf).map_err(|e| anyhow::anyhow!("{e}"))?;
+    tracing::debug!("Set clipboard via CF_HDROP: {}", path.display());
+    Ok(())
+}
+
+/// Linux/macOS image clipboard: xclip for X11, arboard fallback.
+/// Not called on Windows — use clipboard_hdrop instead.
+#[cfg(not(target_os = "windows"))]
 fn clipboard_set_image_file(
     clipboard: &mut arboard::Clipboard,
     path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    // ── Windows: JFIF/PNG + CF_DIB (universal bitmap) ───────────────────────
-    // Strategy:
-    //   1. Read raw file bytes (JPEG → JFIF, PNG → PNG) — zero encode cost.
-    //   2. Decode to RGBA once for CF_DIB (device-independent bitmap).
-    //      CF_DIB (format 8) is the universal clipboard format that ALL Windows
-    //      apps understand, including Chrome/Edge pasting into web pages.
-    //   3. Open clipboard once, EmptyClipboard, then set both formats.
-    //      JFIF/PNG is available for native apps; CF_DIB for browser targets.
-    // This is faster than arboard (no GDI round-trip) and paste-compatible
-    // with every app. Falls back to arboard RGBA if the native write fails.
-    #[cfg(target_os = "windows")]
-    {
-        extern "system" {
-            fn RegisterClipboardFormatW(lpszFormat: *const u16) -> u32;
-        }
-
-        let ext = path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        let native_fmt = match ext.as_str() { "png" => "PNG", _ => "JFIF" };
-
-        let file_result: anyhow::Result<(Vec<u8>, image::DynamicImage)> = (|| {
-            let bytes = std::fs::read(path)?;
-            let img = match ext.as_str() {
-                "jpg" | "jpeg" | "png" => image::load_from_memory(&bytes)?,
-                _ => image::open(path)?,
-            };
-            Ok((bytes, img))
-        })();
-
-        if let Ok((native_bytes, img)) = file_result {
-            let rgba = img.to_rgba8();
-            let (w, h) = (rgba.width(), rgba.height());
-
-            // Build CF_DIB: BITMAPINFOHEADER (40 bytes) + BGRA pixel data
-            let mut dib = Vec::with_capacity(40 + (w * h * 4) as usize);
-            dib.extend_from_slice(&40u32.to_le_bytes());         // biSize
-            dib.extend_from_slice(&(w as i32).to_le_bytes());    // biWidth
-            dib.extend_from_slice(&(-(h as i32)).to_le_bytes()); // biHeight (top-down)
-            dib.extend_from_slice(&1u16.to_le_bytes());          // biPlanes
-            dib.extend_from_slice(&32u16.to_le_bytes());         // biBitCount
-            dib.extend_from_slice(&0u32.to_le_bytes());          // biCompression BI_RGB
-            dib.extend_from_slice(&0u32.to_le_bytes());          // biSizeImage
-            dib.extend_from_slice(&0i32.to_le_bytes());          // biXPelsPerMeter
-            dib.extend_from_slice(&0i32.to_le_bytes());          // biYPelsPerMeter
-            dib.extend_from_slice(&0u32.to_le_bytes());          // biClrUsed
-            dib.extend_from_slice(&0u32.to_le_bytes());          // biClrImportant
-            for px in rgba.as_raw().chunks_exact(4) {
-                dib.push(px[2]); dib.push(px[1]); dib.push(px[0]); dib.push(px[3]); // BGRA
-            }
-
-            let name_w: Vec<u16> = native_fmt.encode_utf16().chain(Some(0u16)).collect();
-            let native_id = unsafe { RegisterClipboardFormatW(name_w.as_ptr()) };
-
-            use clipboard_win::{formats, Clipboard, Setter, raw};
-            if let Ok(_clip) = Clipboard::new_attempts(10) {
-                let _ = raw::empty(); // EmptyClipboard — flush stale data
-                if native_id != 0 {
-                    let _ = formats::RawData(native_id).write_clipboard(&native_bytes);
-                }
-                if formats::RawData(8).write_clipboard(&dib).is_ok() {  // 8 = CF_DIB
-                    tracing::debug!(
-                        "Set clipboard via {}/CF_DIB ({} bytes)", native_fmt, native_bytes.len()
-                    );
-                    return Ok(());
-                }
-            }
-        }
-        tracing::warn!("Native clipboard write failed, falling back to arboard RGBA");
-    }
-
     // ── Linux X11: pipe raw PNG bytes to xclip ───────────────────────────────
     #[cfg(target_os = "linux")]
     {
