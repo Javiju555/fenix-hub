@@ -46,7 +46,7 @@ use crate::protocol::{
     ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, FNX2_COMPRESSION_NONE, FNX2_COMPRESSION_ZSTD, HMAC_HEADER,
 };
 
-const COMPRESS_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
+const COMPRESS_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
 const COMPRESS_MIN_RATIO: f64 = 0.95;
 const MAX_REPLAY_CACHE_ENTRIES: usize = 8_192;
 
@@ -186,50 +186,93 @@ async fn serve_content(
     // Signal FNX2 chunked streaming (v2).
     resp_headers.insert(ENCRYPTED_HEADER, HeaderValue::from_static("2"));
 
-    // ── Prepare payload (optional compression before encryption) ─────────────
-    let raw_payload = match &item.data {
-        ContentData::Text(text) => text.as_bytes().to_vec(),
-        ContentData::Bytes(bytes) => bytes.clone(),
-        ContentData::FilePath(path) => tokio::fs::read(path)
-            .await
-            .map_err(|_| StatusCode::NOT_FOUND)?,
-        ContentData::Empty => return Err(StatusCode::NO_CONTENT),
+    // ── Build response body ──────────────────────────────────────────────────
+    let body = match &item.data {
+        ContentData::FilePath(path) => {
+            // Large file: stream encrypt chunk by chunk — never holds full file in RAM.
+            let path = path.clone();
+            let enc_key = *state.identity.enc_key();
+            let item_size = tokio::fs::metadata(&path).await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let total_chunks = (item_size / FNX2_CHUNK_SIZE as u64)
+                + if item_size % FNX2_CHUNK_SIZE as u64 != 0 { 1 } else { 0 };
+            let mut encoder = ChunkEncoder::new(
+                &enc_key,
+                total_chunks as u32,
+                item_size,
+                FNX2_COMPRESSION_NONE,
+            );
+            let header = encoder.header();
+
+            tracing::debug!(
+                "Serving {} — size={} B chunks={} compression=none (streaming)",
+                id,
+                item_size,
+                total_chunks,
+            );
+
+            type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+            let stream: futures_util::stream::BoxStream<
+                'static,
+                Result<bytes::Bytes, BoxError>,
+            > = Box::pin(async_stream::try_stream! {
+                yield bytes::Bytes::from(header);
+
+                let mut file = tokio::fs::File::open(&path).await
+                    .map_err(|e| -> BoxError { Box::new(e) })?;
+                let mut buf = vec![0u8; FNX2_CHUNK_SIZE];
+                loop {
+                    use tokio::io::AsyncReadExt;
+                    let n = file.read(&mut buf).await
+                        .map_err(|e| -> BoxError { Box::new(e) })?;
+                    if n == 0 { break; }
+                    let encrypted = encoder.encrypt_chunk(&buf[..n])
+                        .map_err(|e| -> BoxError { e.to_string().into() })?;
+                    yield bytes::Bytes::from(encrypted);
+                }
+            });
+
+            Body::from_stream(stream)
+        }
+        _ => {
+            // Text / Bytes / Empty: always small, buffer is fine.
+            let raw_payload = match &item.data {
+                ContentData::Text(text) => text.as_bytes().to_vec(),
+                ContentData::Bytes(b) => b.clone(),
+                ContentData::Empty => return Err(StatusCode::NO_CONTENT),
+                ContentData::FilePath(_) => unreachable!(),
+            };
+
+            let original_size = raw_payload.len() as u64;
+            let (payload, compression) = maybe_compress_payload(item, raw_payload);
+            let transfer_size = payload.len() as u64;
+            let total_chunks = (transfer_size / FNX2_CHUNK_SIZE as u64) as u32
+                + if transfer_size % FNX2_CHUNK_SIZE as u64 != 0 { 1 } else { 0 };
+
+            let enc_key = state.identity.enc_key();
+            let mut encoder = ChunkEncoder::new(enc_key, total_chunks, original_size, compression);
+
+            tracing::debug!(
+                "Serving {} — original={} B transfer={} B chunks={} compression={}",
+                id,
+                original_size,
+                transfer_size,
+                total_chunks,
+                compression
+            );
+
+            let mut all_data: Vec<u8> = encoder.header();
+            for chunk in payload.chunks(FNX2_CHUNK_SIZE) {
+                let encrypted = encoder
+                    .encrypt_chunk(chunk)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                all_data.extend_from_slice(&encrypted);
+            }
+
+            Body::from(all_data)
+        }
     };
-
-    let original_size = raw_payload.len() as u64;
-    let (payload, compression) = maybe_compress_payload(item, raw_payload);
-    let transfer_size = payload.len() as u64;
-    let total_chunks = (transfer_size / FNX2_CHUNK_SIZE as u64) as u32
-        + if transfer_size % FNX2_CHUNK_SIZE as u64 != 0 {
-            1
-        } else {
-            0
-        };
-
-    let enc_key = state.identity.enc_key();
-    let mut encoder = ChunkEncoder::new(enc_key, total_chunks, original_size, compression);
-
-    tracing::debug!(
-        "Serving {} — original={} B transfer={} B chunks={} compression={}",
-        id,
-        original_size,
-        transfer_size,
-        total_chunks,
-        compression
-    );
-
-    // ── Build streaming response ─────────────────────────────────────────────
-    let mut all_data = vec![];
-    all_data.push(encoder.header());
-
-    for chunk in payload.chunks(FNX2_CHUNK_SIZE) {
-        let encrypted = encoder
-            .encrypt_chunk(chunk)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        all_data.push(encrypted);
-    }
-
-    let body = Body::from(all_data.into_iter().flatten().collect::<Vec<u8>>());
 
     Ok((resp_headers, body))
 }
