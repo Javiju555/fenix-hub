@@ -154,24 +154,21 @@ class FenixHttpClient {
         if (rawPayload.size < FNX2_HEADER_SIZE) {
             error("FNX2 header too short: ${rawPayload.size} bytes")
         }
-        if (!rawPayload.copyOfRange(0, 4).contentEquals(FNX2_MAGIC)) {
-            error("Invalid FNX2 magic")
+        // Check magic without allocating a copy
+        for (i in 0 until 4) {
+            if (rawPayload[i] != FNX2_MAGIC[i]) error("Invalid FNX2 magic")
         }
 
-        val baseNonce = rawPayload.copyOfRange(4, 16)
+        val baseNonce = rawPayload.copyOfRange(4, 16) // 12 bytes, once
         val totalChunks = readIntBE(rawPayload, 16)
         val originalSize = readLongBE(rawPayload, 20)
         val compression = rawPayload[28].toInt() and 0xff
 
-        if (totalChunks < 0) {
-            error("Invalid FNX2 total_chunks: $totalChunks")
-        }
+        if (totalChunks < 0) error("Invalid FNX2 total_chunks: $totalChunks")
 
         val encryptedLen = rawPayload.size - FNX2_HEADER_SIZE
         if (totalChunks == 0) {
-            if (encryptedLen != 0) {
-                error("Invalid FNX2 payload: header declares 0 chunks but body has data")
-            }
+            if (encryptedLen != 0) error("Invalid FNX2 payload: header declares 0 chunks but body has data")
             return decodeFnx2Compression(ByteArray(0), compression, originalSize)
         }
 
@@ -179,35 +176,49 @@ class FenixHttpClient {
         val minimumCiphertextBytes =
             (totalChunks.toLong() - 1L) * fullChunkEncryptedLen.toLong() + FNX2_GCM_TAG_BYTES.toLong()
         if (encryptedLen.toLong() < minimumCiphertextBytes) {
-            error(
-                "FNX2 payload truncated: expected at least $minimumCiphertextBytes bytes of ciphertext, got $encryptedLen",
-            )
+            error("FNX2 payload truncated: expected at least $minimumCiphertextBytes bytes of ciphertext, got $encryptedLen")
         }
 
-        val plaintextOut = ByteArrayOutputStream()
+        // Pre-allocate output — avoids repeated internal copies inside ByteArrayOutputStream
+        val expectedPlaintext = originalSize.coerceAtMost(
+            (totalChunks.toLong() * FNX2_CHUNK_SIZE).coerceAtMost(Int.MAX_VALUE.toLong())
+        ).toInt()
+        val plaintextOut = ByteArrayOutputStream(expectedPlaintext.coerceAtLeast(FNX2_CHUNK_SIZE))
+
+        // Create cipher once, re-init per chunk — avoids JCA provider lookup × N
+        val secretKey = SecretKeySpec(encKey, "AES")
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+
+        // Reusable nonce buffer — mutated per chunk, avoids 12-byte alloc × N
+        val chunkNonce = baseNonce.copyOf()
+
         var cursor = FNX2_HEADER_SIZE
 
         for (chunkIndex in 0 until totalChunks) {
-            val chunkLen = if (chunkIndex < totalChunks - 1) {
-                fullChunkEncryptedLen
-            } else {
-                rawPayload.size - cursor
+            val chunkLen = if (chunkIndex < totalChunks - 1) fullChunkEncryptedLen else rawPayload.size - cursor
+
+            if (chunkLen < FNX2_GCM_TAG_BYTES) error("FNX2 chunk $chunkIndex too short: $chunkLen bytes")
+
+            // Derive nonce in-place: reset to baseNonce then XOR chunk index into bytes [4..11]
+            baseNonce.copyInto(chunkNonce)
+            val idx = chunkIndex.toLong()
+            for (i in 0 until 8) {
+                chunkNonce[4 + i] = (chunkNonce[4 + i].toInt() xor ((idx ushr ((7 - i) * 8)).toInt() and 0xff)).toByte()
             }
 
-            if (chunkLen < FNX2_GCM_TAG_BYTES) {
-                error("FNX2 chunk $chunkIndex too short: $chunkLen bytes")
+            try {
+                cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, chunkNonce))
+                // doFinal with offset — no copyOfRange allocation
+                val plaintext = cipher.doFinal(rawPayload, cursor, chunkLen)
+                plaintextOut.write(plaintext)
+            } catch (e: GeneralSecurityException) {
+                throw IllegalStateException("FNX2 chunk $chunkIndex decryption failed", e)
             }
 
-            val chunkCiphertext = rawPayload.copyOfRange(cursor, cursor + chunkLen)
-            val chunkNonce = deriveFnx2ChunkNonce(baseNonce, chunkIndex.toLong())
-            val plaintextChunk = decryptAesGcmChunk(encKey, chunkNonce, chunkCiphertext, chunkIndex)
-            plaintextOut.write(plaintextChunk)
             cursor += chunkLen
         }
 
-        if (cursor != rawPayload.size) {
-            error("FNX2 payload malformed: trailing bytes after chunk decode")
-        }
+        if (cursor != rawPayload.size) error("FNX2 payload malformed: trailing bytes after chunk decode")
 
         return decodeFnx2Compression(plaintextOut.toByteArray(), compression, originalSize)
     }
@@ -240,35 +251,6 @@ class FenixHttpClient {
             }
             else -> error("Unsupported FNX2 compression mode: $compression")
         }
-    }
-
-    private fun decryptAesGcmChunk(
-        key: ByteArray,
-        nonce: ByteArray,
-        ciphertext: ByteArray,
-        chunkIndex: Int,
-    ): ByteArray {
-        return try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(
-                Cipher.DECRYPT_MODE,
-                SecretKeySpec(key, "AES"),
-                GCMParameterSpec(GCM_TAG_BITS, nonce),
-            )
-            cipher.doFinal(ciphertext)
-        } catch (e: GeneralSecurityException) {
-            throw IllegalStateException("FNX2 chunk $chunkIndex decryption failed", e)
-        }
-    }
-
-    private fun deriveFnx2ChunkNonce(baseNonce: ByteArray, chunkIndex: Long): ByteArray {
-        val nonce = baseNonce.copyOf()
-        for (i in 0 until 8) {
-            val shift = (7 - i) * 8
-            val indexByte = ((chunkIndex ushr shift) and 0xffL).toInt()
-            nonce[4 + i] = (nonce[4 + i].toInt() xor indexByte).toByte()
-        }
-        return nonce
     }
 
     private fun readIntBE(bytes: ByteArray, offset: Int): Int {
