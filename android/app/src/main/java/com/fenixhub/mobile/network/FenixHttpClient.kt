@@ -89,9 +89,57 @@ class FenixHttpClient {
         }
     }
 
+    /**
+     * Pull de contenido para modo efímero (sin AppSettings).
+     * WiFi Direct ya proporciona seguridad en la capa de transporte.
+     * Usa el puerto efímero por defecto (8766).
+     */
+    suspend fun pullContentEphemeral(
+        targetIp: String,
+        contentId: String,
+        port: Int = EPHEMERAL_DEFAULT_PORT,
+    ): Result<PulledContent> {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder()
+                    .url("http://${urlHost(targetIp)}:$port/content/${URLEncoder.encode(contentId, "UTF-8")}")
+                    .get()
+                    .build()
+
+                val startMs = System.currentTimeMillis()
+                Log.d(TAG, "Ephemeral pull $contentId from $targetIp:$port")
+
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        error("HTTP ${response.code}")
+                    }
+                    val body = response.body ?: error("Empty response body")
+                    val encryptedHeader = response.header(ENCRYPTED_HEADER)
+                    val rawBytes = body.bytes()
+                    val recvMs = System.currentTimeMillis() - startMs
+                    Log.d(TAG, "Ephemeral received ${rawBytes.size / 1024} KB in ${recvMs}ms")
+
+                    // Ephemeral mode: no encryption (WiFi Direct encrypts at link layer)
+                    // But if the server sends encrypted data, try to decrypt
+                    // For now, assume unencrypted in ephemeral mode
+                    val bytes = rawBytes
+                    val decryptMs = System.currentTimeMillis() - startMs - recvMs
+                    Log.i(TAG, "Ephemeral pull complete: ${bytes.size / 1024} KB — recv ${recvMs}ms, decrypt ${decryptMs}ms, total ${System.currentTimeMillis() - startMs}ms")
+
+                    PulledContent(
+                        bytes = bytes,
+                        mimeType = body.contentType()?.toString(),
+                        fileName = fileNameFromDisposition(response.header("Content-Disposition")),
+                    )
+                }
+            }
+        }
+    }
+
     private companion object {
         const val TAG = "FenixHubClient"
         const val ENCRYPTED_HEADER = "X-FenixHub-Encrypted"
+        const val EPHEMERAL_DEFAULT_PORT = 8766
         const val FNX2_HEADER_SIZE = 29
         const val FNX2_CHUNK_SIZE = 64 * 1024
         const val FNX2_GCM_TAG_BYTES = 16

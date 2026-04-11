@@ -102,6 +102,12 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
       if (id) mockPublished.add(id); return undefined as T;
     }
     case 'stop_server': mockPublished.clear(); return undefined as T;
+    case 'start_direct_mode_sender': return undefined as T;
+    case 'accept_direct_peers': return undefined as T;
+    case 'cancel_direct_mode': return undefined as T;
+    case 'toggle_direct_peer': return undefined as T;
+    case 'get_direct_peers': return { peers: [] } as T;
+    case 'get_direct_session_state': return { discovering: false, advertising: false, ephemeral_group_id: '', peer_count: 0 } as T;
     case 'pull_peer_content': {
       const peer = mockPeers.find(p => p.content_id === (a?.content_id as string));
       const item: ContentItem = {
@@ -937,7 +943,8 @@ function renderLocalContent() {
   container.innerHTML = `<div class="card-grid">${localContent.map(item => {
     const pub = publishedIds.has(item.id);
     const actionBtns = pub
-      ? `<button class="btn-stop" data-id="${item.id}" data-action="stop">■ Parar</button>`
+      ? `<button class="btn-direct-mode" data-id="${item.id}" data-action="direct-mode" title="Modo directo AirDrop">${iconWifi(9)} Directo</button>
+          <button class="btn-stop" data-id="${item.id}" data-action="stop">■ Parar</button>`
       : [
           `<button class="btn-broadcast" data-id="${item.id}" data-action="broadcast">${iconBroadcast(9)} Todos</button>`,
           ...onlineDevices.map(d =>
@@ -987,6 +994,8 @@ function renderLocalContent() {
         await invoke('publish_content', { args: { content_id: id, target_device: null } }); publishedIds.add(id);
       } else if (el.dataset.action === 'direct') {
         await invoke('publish_content', { args: { content_id: id, target_device: el.dataset.device! } }); publishedIds.add(id);
+      } else if (el.dataset.action === 'direct-mode') {
+        openDirectModeModal(id);
       }
       renderLocalContent();
     });
@@ -1063,6 +1072,173 @@ function renderLocalContent() {
       }
     });
   });
+}
+
+// ── Direct Mode Modal ─────────────────────────────────────────────────────────
+
+interface DirectPeer {
+  device_id: string;
+  device_name: string;
+  ephemeral_group_id: string;
+  rssi: number;
+  selected: boolean;
+}
+
+let directModalContentId: string | null = null;
+let directModalPeerRefresh: ReturnType<typeof setInterval> | null = null;
+
+async function openDirectModeModal(contentId: string) {
+  directModalContentId = contentId;
+
+  // Start sender mode discovery
+  await invoke('start_direct_mode_sender');
+
+  // Show modal
+  const overlay = createModalOverlay();
+  document.body.appendChild(overlay);
+
+  const modal = document.createElement('div');
+  modal.className = 'direct-modal';
+  modal.innerHTML = `
+    <div class="direct-modal-header">
+      <span>${iconWifi(18)} Modo Directo</span>
+      <button class="modal-close" id="direct-modal-close">${iconX(14)}</button>
+    </div>
+    <div class="direct-modal-body">
+      <p class="direct-hint">Buscando dispositivos cercanos...</p>
+      <div class="direct-peers-list" id="direct-peers-list">
+        <div class="direct-empty">Iniciando...</div>
+      </div>
+    </div>
+    <div class="direct-modal-footer">
+      <button class="btn-cancel" id="direct-cancel">Cancelar</button>
+      <button class="btn-accept" id="direct-accept" disabled>Enviar a 0</button>
+    </div>`;
+
+  overlay.querySelector('.modal-backdrop')!.appendChild(modal);
+
+  document.getElementById('direct-modal-close')!.addEventListener('click', closeDirectModal);
+  document.getElementById('direct-cancel')!.addEventListener('click', closeDirectModal);
+  document.getElementById('direct-accept')!.addEventListener('click', () => {
+    void acceptDirectModal();
+  });
+
+  // Start refreshing peers list
+  directModalPeerRefresh = setInterval(() => {
+    void refreshDirectPeers();
+  }, 1500);
+  void refreshDirectPeers();
+}
+
+async function refreshDirectPeers() {
+  try {
+    const resp = await invoke<{ peers: DirectPeer[] }>('get_direct_peers');
+
+    const list = document.getElementById('direct-peers-list');
+    if (!list) return;
+
+    if (resp.peers.length === 0) {
+      list.innerHTML = `<div class="direct-empty">No hay dispositivos cerca.<br> Asegúrate de que el otro dispositivo también tenga FenixHub abierto en modo directo.</div>`;
+      return;
+    }
+
+    list.innerHTML = resp.peers.map(peer => {
+      const rssiBars = signalBars(peer.rssi);
+      return `
+        <div class="direct-peer-item" data-peer-id="${escapeHtml(peer.device_id)}">
+          <div class="direct-peer-info">
+            <div class="direct-peer-name">${escapeHtml(peer.device_name)}</div>
+            <div class="direct-peer-id">Grupo: ${escapeHtml(peer.ephemeral_group_id)}</div>
+          </div>
+          <div class="direct-peer-signal">${rssiBars}</div>
+          <div class="direct-peer-check">
+            <button class="peer-select-btn" data-peer-id="${escapeHtml(peer.device_id)}">
+              ${peer.selected ? iconCheckmark(16) : iconCircle(16)}
+            </button>
+          </div>
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.peer-select-btn').forEach(btn => {
+      (btn as HTMLElement).addEventListener('click', () => {
+        const peerId = (btn as HTMLElement).dataset.peerId!;
+        toggleDirectPeer(peerId);
+        void refreshDirectPeers();
+      });
+    });
+
+    const selectedCount = resp.peers.filter(p => p.selected).length;
+    const acceptBtn = document.getElementById('direct-accept') as HTMLButtonElement;
+    acceptBtn.textContent = `Enviar a ${selectedCount}`;
+    acceptBtn.disabled = selectedCount === 0;
+
+    // Update header
+    const hint = document.querySelector('.direct-hint');
+    if (hint) {
+      hint.textContent = resp.peers.length > 0
+        ? `${resp.peers.length} dispositivo(s) encontrado(s)`
+        : 'Buscando dispositivos...';
+    }
+  } catch (e) {
+    console.error('Failed to refresh direct peers', e);
+  }
+}
+
+let selectedDirectPeerIds: Set<string> = new Set();
+
+async function toggleDirectPeer(peerId: string) {
+  if (selectedDirectPeerIds.has(peerId)) {
+    selectedDirectPeerIds.delete(peerId);
+  } else {
+    selectedDirectPeerIds.add(peerId);
+  }
+  await invoke('toggle_direct_peer', { peer_id: peerId });
+}
+
+async function acceptDirectModal() {
+  if (selectedDirectPeerIds.size === 0 || !directModalContentId) return;
+
+  const selected = Array.from(selectedDirectPeerIds);
+  await invoke('accept_direct_peers', {
+    args: {
+      selected_peer_ids: selected,
+      content_id: directModalContentId,
+    },
+  });
+
+  showToast(`Enviando a ${selected.length} dispositivo(s)...`);
+  closeDirectModal();
+}
+
+function closeDirectModal() {
+  if (directModalPeerRefresh) {
+    clearInterval(directModalPeerRefresh);
+    directModalPeerRefresh = null;
+  }
+  selectedDirectPeerIds.clear();
+  invoke('cancel_direct_mode').catch(() => {});
+
+  const overlay = document.querySelector('.modal-overlay');
+  if (overlay) overlay.remove();
+
+  renderLocalContent();
+}
+
+function createModalOverlay(): HTMLElement {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal-backdrop"></div>`;
+  overlay.querySelector('.modal-backdrop')!.addEventListener('click', (e) => {
+    if (e.target === overlay.querySelector('.modal-backdrop')) closeDirectModal();
+  });
+  return overlay;
+}
+
+function signalBars(rssi: number): string {
+  if (rssi >= -60) return '●●●';
+  if (rssi >= -75) return '●●○';
+  if (rssi >= -90) return '●○○';
+  return '○○○';
 }
 
 // ── Red panel ─────────────────────────────────────────────────────────────────
@@ -1194,6 +1370,9 @@ function iconHub(s: number) {
 function iconCheckmark(s: number) {
   return svg(s,'0 0 16 16','<polyline points="2.5,8 6.5,12 13.5,4" stroke-width="2.2"/>');
 }
+function iconCircle(s: number) {
+  return svg(s,'0 0 16 16','<circle cx="8" cy="8" r="5.5" stroke-width="1.8"/>');
+}
 function iconInbox(s: number) {
   return svg(s,'0 0 16 16','<rect x="1.5" y="1.5" width="13" height="13" rx="2" stroke-width="1.7"/><polyline points="1.5,10 4.5,10 5.5,12.5 10.5,12.5 11.5,10 14.5,10" stroke-width="1.7"/>');
 }
@@ -1256,6 +1435,16 @@ function humanSize(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1048576) return `${(b/1024).toFixed(1)} KB`;
   return `${(b/1048576).toFixed(1)} MB`;
+}
+function showToast(message: string) {
+  const toast = document.createElement('div');
+  toast.className = 'overlay-toast';
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    setTimeout(() => toast.remove(), 240);
+  }, 1800);
 }
 
 const WARN_SIZE_BYTES = 100 * 1024 * 1024;   // 100 MB — mostrar aviso

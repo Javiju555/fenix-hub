@@ -522,6 +522,7 @@ function renderActions() {
     actions.innerHTML = `
       <div class="overlay-hint">${localHint(targets.length)}</div>
       <div class="overlay-grid">
+        <button class="overlay-action" id="act-wifi-direct">${iconWifi(18)} WiFi Direct</button>
         <button class="overlay-action" id="act-send">${iconSend(18)} Mandar a</button>
         <button class="overlay-action" id="act-publish">${iconBroadcast(18)} ${allPublished ? 'Parar' : anyPublished ? 'Publicar resto' : 'Publicar'}</button>
         <button class="overlay-action danger" id="act-delete">${iconTrash(18)} Borrar</button>
@@ -537,6 +538,9 @@ function renderActions() {
     });
     document.getElementById('act-publish')!.addEventListener('click', () => {
       void togglePublishTargets();
+    });
+    document.getElementById('act-wifi-direct')!.addEventListener('click', () => {
+      void startDirectModeFromOverlay();
     });
     document.getElementById('act-delete')!.addEventListener('click', () => {
       void deleteLocalTargets();
@@ -659,6 +663,20 @@ async function deleteLocalTargets() {
     selectedLocalId = null;
     showToast(targets.length === 1 ? 'Contenido borrado' : 'Lote borrado');
     await refreshState();
+  } catch (error) {
+    showToast(errorMessage(error));
+  }
+}
+
+async function startDirectModeFromOverlay(contentId?: string) {
+  const id = contentId || selectedLocalId || getLocalTargets()[0]?.id;
+  if (!id) {
+    showToast('Añade contenido antes de enviar');
+    return;
+  }
+  try {
+    await invoke('start_direct_mode_sender');
+    showToast('Modo directo activo - buscando dispositivos...');
   } catch (error) {
     showToast(errorMessage(error));
   }
@@ -846,6 +864,10 @@ function iconSend(size = 18) {
 
 function iconBroadcast(size = 18) {
   return icon('<circle cx="5" cy="10" r="1.5"/><circle cx="15" cy="10" r="1.5"/><path d="M7 10c2-4 4-4 6 0"/><path d="M7 10c2 4 4 4 6 0"/>', size);
+}
+
+function iconWifi(size = 18) {
+  return icon('<path d="M5 6 Q12 1 19 6" stroke-width="2" fill="none"/><path d="M7 9 Q12 5.5 17 9" stroke-width="2" fill="none"/><path d="M9 12 Q12 10 15 12" stroke-width="2" fill="none"/><circle cx="12" cy="14" r="1.5"/>', size);
 }
 
 function iconTrash(size = 18) {

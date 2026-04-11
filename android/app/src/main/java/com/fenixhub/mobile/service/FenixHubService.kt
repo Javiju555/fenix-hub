@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -23,6 +24,8 @@ import com.fenixhub.mobile.MainActivity
 import com.fenixhub.mobile.R
 import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.SendMode
+import com.fenixhub.mobile.network.DirectBlePeer
+import com.fenixhub.mobile.network.EphemeralDirectSession
 import com.fenixhub.mobile.network.FenixHttpServer
 import com.fenixhub.mobile.network.NsdController
 import kotlinx.coroutines.CoroutineScope
@@ -56,7 +59,10 @@ class FenixHubService : Service() {
     private val nsdController by lazy { NsdController(this, repository, settingsStore) }
     private val bleIdentityController by lazy { container.bleIdentityController }
     private val wifiDirectController by lazy { container.wifiDirectController }
+    private val bleDirectController by lazy { container.bleDirectController }
+    private val wifiDirectTransferController by lazy { container.wifiDirectTransferController }
     private val hotspotManager by lazy { container.hotspotManager }
+
     private val overlayController by lazy {
         OverlayController(
             context = this,
@@ -66,6 +72,18 @@ class FenixHubService : Service() {
             tempClipboardStore = tempClipboardStore,
             receivedContentHandler = receivedHandler,
             httpClient = httpClient,
+        )
+    }
+
+    private val ephemeralSession by lazy {
+        EphemeralDirectSession(
+            context = this,
+            bleController = bleDirectController,
+            transferController = wifiDirectTransferController,
+            contentRepository = repository,
+            receivedHandler = receivedHandler,
+            httpClient = httpClient,
+            httpServer = httpServer,
         )
     }
 
@@ -139,11 +157,109 @@ class FenixHubService : Service() {
         }
     }
 
+    // ── Direct Mode (AirDrop-like) ──────────────────────────────────────────────
+
+    /**
+     * Inicia modo directo como SENDER. Comienza a descubrir receivers por BLE.
+     */
+    fun startDirectModeSender() {
+        val settings = settingsStore.current()
+        if (!settings.configured) {
+            showToast("Configura FenixHub primero")
+            return
+        }
+        val contentId = repository.selectedLocalContentId.value
+            ?: repository.latestLocalContent()?.contentId
+        if (contentId == null) {
+            showToast("Añade contenido al hub antes de enviar")
+            return
+        }
+        ephemeralSession.startAsSender(settings.deviceName)
+        Log.i(TAG, "Direct mode sender started")
+    }
+
+    /**
+     * Confirma la selección de peers y crea el grupo WiFi Direct.
+     * @param selectedPeerIds IDs de los peers seleccionados
+     * @param contentToSendId ID del contenido a enviar
+     */
+    fun acceptDirectPeers(selectedPeerIds: Set<String>, contentToSendId: String) {
+        selectedPeerIds.forEach { ephemeralSession.togglePeerSelection(it) }
+        ephemeralSession.acceptSelectedPeers(contentToSendId) { ephemeralId, peerCount ->
+            showToast("Grupo creado ($ephemeralId) - esperando $peerCount destinatario(s)")
+        }
+    }
+
+    /**
+     * Cancela el modo directo.
+     */
+    fun cancelDirectMode() {
+        ephemeralSession.cancel()
+    }
+
+    /**
+     * Inicia modo receiver. Escucha invitaciones de senders cercanos.
+     */
+    fun startDirectModeReceiver() {
+        val settings = settingsStore.current()
+        if (!settings.configured) {
+            showToast("Configura FenixHub primero")
+            return
+        }
+        ephemeralSession.startAsReceiver(settings.deviceName)
+        Log.i(TAG, "Direct mode receiver started")
+    }
+
+    /**
+     * Obtiene la invitación entrante actual (si hay).
+     */
+    fun getCurrentInviter() = ephemeralSession.getCurrentInviter()
+
+    /**
+     * Acepta la invitación entrante.
+     * @param onContentReceived callback cuando el contenido llega
+     */
+    fun acceptDirectInvite(onContentReceived: (item: com.fenixhub.mobile.model.LocalContent) -> Unit) {
+        ephemeralSession.acceptIncomingInvite { senderIp, senderPort, contentId ->
+            showToast("Conectando al grupo directo...")
+            serviceScope.launch {
+                val success = ephemeralSession.pullFromSender(senderIp, senderPort, contentId)
+                if (success) {
+                    val latest = repository.localContent.value.firstOrNull()
+                    latest?.let { onContentReceived(it) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Rechaza la invitación entrante.
+     */
+    fun rejectDirectInvite() {
+        ephemeralSession.rejectIncomingInvite()
+    }
+
+    /**
+     * Obtiene el estado de la sesión directa.
+     */
+    val directSessionState get() = ephemeralSession.sessionState
+
+    /**
+     * Obtiene la lista de peers descubiertos en modo directo.
+     */
+    val discoveredDirectPeers get() = ephemeralSession.discoveredPeers
+
+    /**
+     * Obtiene los peers seleccionados.
+     */
+    val selectedDirectPeers get() = ephemeralSession.selectedPeers
+
     override fun onDestroy() {
         overlayController.dismiss()
         stopNetworkStack(clearPeers = true)
         hotspotManager.stop()
         releaseMulticastLock()
+        ephemeralSession.cleanup()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -156,6 +272,7 @@ class FenixHubService : Service() {
         nsdController.startDiscovery()
         bleIdentityController.ensureRunning(settings.groupId, settings.deviceName)
         wifiDirectController.ensureRunning()
+
         startShakeDetection()
         startPublishGuardIfNeeded()
 
@@ -288,9 +405,6 @@ class FenixHubService : Service() {
             setReferenceCounted(false)
             acquire()
         }
-        // Keep the WiFi radio at full performance during transfers — without this
-        // Android throttles TX to ~4 MB/s even on 5 GHz when the radio is in
-        // power-save mode.
         wifiLock = wifiManager.createWifiLock(
             WifiManager.WIFI_MODE_FULL_HIGH_PERF,
             "FenixHubWifiLock",
@@ -360,6 +474,7 @@ class FenixHubService : Service() {
     }
 
     companion object {
+        const val TAG = "FenixHubService"
         const val ACTION_SHOW_OVERLAY = "com.fenixhub.mobile.action.SHOW_OVERLAY"
         const val ACTION_REFRESH_IDENTITY = "com.fenixhub.mobile.action.REFRESH_IDENTITY"
         const val ACTION_START_HOTSPOT = "com.fenixhub.mobile.action.START_HOTSPOT"
