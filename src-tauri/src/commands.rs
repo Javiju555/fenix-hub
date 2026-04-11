@@ -1383,9 +1383,51 @@ fn clipboard_set_image_file(
     clipboard: &mut arboard::Clipboard,
     path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    // On Linux X11: pipe the raw PNG bytes to xclip — avoids 4-second RGBA decode.
-    // xclip stays alive in the background serving clipboard requests until
-    // another app claims ownership.
+    // ── Windows: set CF_PNG directly ────────────────────────────────────────
+    // arboard on Windows requires decoding the image to RGBA8 first, which
+    // takes 4-5 seconds for a large JPEG (pure-Rust decoder + Windows DIB
+    // conversion). Instead, we write CF_PNG (raw PNG bytes) to the clipboard
+    // directly via clipboard-win. Most modern apps (browsers, Office, Photos)
+    // read CF_PNG. We fall back to arboard RGBA only if the PNG write fails.
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Read;
+        // Convert to PNG in memory if not already PNG, then write CF_PNG.
+        let png_bytes: anyhow::Result<Vec<u8>> = (|| {
+            let ext = path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "png" {
+                let mut buf = Vec::new();
+                std::fs::File::open(path)?.read_to_end(&mut buf)?;
+                Ok(buf)
+            } else {
+                // Transcode JPEG/WebP/etc → PNG. Still requires decode, but
+                // image::open + encode_to_memory is ~same cost as full RGBA.
+                // The key saving is that CF_PNG avoids the Windows GDI DIB
+                // conversion that arboard does on top of RGBA, saving ~1-2s.
+                let img = image::open(path)?;
+                let mut buf = std::io::Cursor::new(Vec::new());
+                img.write_to(&mut buf, image::ImageFormat::Png)?;
+                Ok(buf.into_inner())
+            }
+        })();
+
+        if let Ok(bytes) = png_bytes {
+            use clipboard_win::{formats, Clipboard, Setter};
+            if let Ok(_clip) = Clipboard::new_attempts(5) {
+                if formats::RawData(49156).write_clipboard(&bytes).is_ok() {
+                    // 49156 = CF_PNG registered format (most Windows apps use this)
+                    tracing::debug!("Set clipboard via CF_PNG ({} bytes)", bytes.len());
+                    return Ok(());
+                }
+            }
+        }
+        tracing::warn!("CF_PNG clipboard write failed, falling back to arboard RGBA");
+    }
+
+    // ── Linux X11: pipe raw PNG bytes to xclip ───────────────────────────────
     #[cfg(target_os = "linux")]
     {
         if let Ok(file) = std::fs::File::open(path) {
@@ -1396,14 +1438,13 @@ fn clipboard_set_image_file(
                 .stderr(std::process::Stdio::null())
                 .spawn();
             if result.is_ok() {
-                // xclip forks internally — the spawned child exits quickly,
-                // leaving a grandchild to serve clipboard requests.
                 return Ok(());
             }
             tracing::warn!("xclip not found, falling back to arboard RGBA decode");
         }
     }
 
+    // ── Fallback: full RGBA8 decode via arboard ───────────────────────────────
     let img = image::open(path)?.to_rgba8();
     let width = img.width() as usize;
     let height = img.height() as usize;
