@@ -1383,48 +1383,61 @@ fn clipboard_set_image_file(
     clipboard: &mut arboard::Clipboard,
     path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    // ── Windows: set CF_PNG directly ────────────────────────────────────────
-    // arboard on Windows requires decoding the image to RGBA8 first, which
-    // takes 4-5 seconds for a large JPEG (pure-Rust decoder + Windows DIB
-    // conversion). Instead, we write CF_PNG (raw PNG bytes) to the clipboard
-    // directly via clipboard-win. Most modern apps (browsers, Office, Photos)
-    // read CF_PNG. We fall back to arboard RGBA only if the PNG write fails.
+    // ── Windows: fast native clipboard write ────────────────────────────────
+    // arboard on Windows decodes the image to RGBA8 then re-encodes as DIB,
+    // which takes 4-5 s for a large JPEG. Instead we write the raw bytes
+    // directly in a native format (JFIF for JPEG, PNG for PNG/other) using
+    // dynamically-registered clipboard formats so the format ID is always
+    // correct for this Windows session. We call EmptyClipboard first so stale
+    // data from the previous clipboard owner doesn't confuse paste targets.
+    // Falls back to arboard RGBA if the native write fails.
     #[cfg(target_os = "windows")]
     {
-        use std::io::Read;
-        // Convert to PNG in memory if not already PNG, then write CF_PNG.
-        let png_bytes: anyhow::Result<Vec<u8>> = (|| {
-            let ext = path.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if ext == "png" {
-                let mut buf = Vec::new();
-                std::fs::File::open(path)?.read_to_end(&mut buf)?;
-                Ok(buf)
-            } else {
-                // Transcode JPEG/WebP/etc → PNG. Still requires decode, but
-                // image::open + encode_to_memory is ~same cost as full RGBA.
-                // The key saving is that CF_PNG avoids the Windows GDI DIB
-                // conversion that arboard does on top of RGBA, saving ~1-2s.
-                let img = image::open(path)?;
-                let mut buf = std::io::Cursor::new(Vec::new());
-                img.write_to(&mut buf, image::ImageFormat::Png)?;
-                Ok(buf.into_inner())
-            }
-        })();
+        // Declare the two WinAPI functions we need (no extra crate required).
+        extern "system" {
+            fn RegisterClipboardFormatW(lpszFormat: *const u16) -> u32;
+        }
 
-        if let Ok(bytes) = png_bytes {
-            use clipboard_win::{formats, Clipboard, Setter};
-            if let Ok(_clip) = Clipboard::new_attempts(5) {
-                if formats::RawData(49156).write_clipboard(&bytes).is_ok() {
-                    // 49156 = CF_PNG registered format (most Windows apps use this)
-                    tracing::debug!("Set clipboard via CF_PNG ({} bytes)", bytes.len());
-                    return Ok(());
+        let ext = path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        // For JPEG: write raw bytes as JFIF — zero decode/encode cost.
+        // For PNG:  write raw bytes as PNG  — also zero cost.
+        // For other formats: transcode to PNG first (rare in practice).
+        let (format_name, bytes_result): (&str, anyhow::Result<Vec<u8>>) =
+            match ext.as_str() {
+                "jpg" | "jpeg" => ("JFIF", std::fs::read(path).map_err(Into::into)),
+                "png"          => ("PNG",  std::fs::read(path).map_err(Into::into)),
+                _ => {
+                    let img = image::open(path)?;
+                    let mut buf = std::io::Cursor::new(Vec::new());
+                    img.write_to(&mut buf, image::ImageFormat::Png)?;
+                    ("PNG", Ok(buf.into_inner()))
+                }
+            };
+
+        if let Ok(bytes) = bytes_result {
+            let name_w: Vec<u16> = format_name.encode_utf16().chain(Some(0u16)).collect();
+            let format_id = unsafe { RegisterClipboardFormatW(name_w.as_ptr()) };
+
+            if format_id != 0 {
+                use clipboard_win::{formats, Clipboard, Setter, raw};
+                if let Ok(_clip) = Clipboard::new_attempts(10) {
+                    // EmptyClipboard — removes stale CF_DIB/CF_PNG from the
+                    // previous owner so paste targets don't pick up old data.
+                    let _ = raw::empty();
+                    if formats::RawData(format_id).write_clipboard(&bytes).is_ok() {
+                        tracing::debug!(
+                            "Set clipboard via {} ({} bytes)", format_name, bytes.len()
+                        );
+                        return Ok(());
+                    }
                 }
             }
         }
-        tracing::warn!("CF_PNG clipboard write failed, falling back to arboard RGBA");
+        tracing::warn!("Native clipboard write failed, falling back to arboard RGBA");
     }
 
     // ── Linux X11: pipe raw PNG bytes to xclip ───────────────────────────────

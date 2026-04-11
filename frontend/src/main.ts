@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke } from '@tauri-apps/api/core';
+import { invoke as tauriInvoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen as tauriListen } from '@tauri-apps/api/event';
 import './style.css';
 
@@ -1295,13 +1295,11 @@ function renderPeerContent() {
           if (result?.cached_path) {
             const card = btn.closest('.content-card') as HTMLElement | null;
             if (card && !card.querySelector('.card-thumb')) {
-              const rawPath = result.cached_path.replace(/\\/g, '/');
-              const src = rawPath.startsWith('/') ? `file://${rawPath}` : `file:///${rawPath}`;
               const top = card.querySelector('.card-top');
               if (top) {
                 const thumb = document.createElement('img');
                 thumb.className = 'card-thumb';
-                thumb.src = src;
+                thumb.src = convertFileSrc(result.cached_path);
                 card.insertBefore(thumb, top);
                 top.remove();
               }
@@ -1319,13 +1317,11 @@ function renderPeerContent() {
             const card = btn.closest('.content-card') as HTMLElement | null;
             const peerItem = peerContent.find(p => p.content_id === id);
             if (card && peerItem?.content_type === 'image' && !card.querySelector('.card-thumb')) {
-              const rawPath = result.path.replace(/\\/g, '/');
-              const src = rawPath.startsWith('/') ? `file://${rawPath}` : `file:///${rawPath}`;
               const top = card.querySelector('.card-top');
               if (top) {
                 const thumb = document.createElement('img');
                 thumb.className = 'card-thumb';
-                thumb.src = src;
+                thumb.src = convertFileSrc(result.path);
                 card.insertBefore(thumb, top);
                 top.remove();
               }

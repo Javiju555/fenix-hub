@@ -15,7 +15,7 @@ path = "src/main.rs"
 fenix-hub-core = { path = "../crates/fenix-hub-core" }
 fenix-hub-daemon = { path = "../crates/fenix-hub-daemon" }
 
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 
