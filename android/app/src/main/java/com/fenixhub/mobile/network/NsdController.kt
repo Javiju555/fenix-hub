@@ -405,11 +405,6 @@ class NsdController(
         if (item.contentType != HubContentType.IMAGE) {
             return item.preview
         }
-
-        return runCatching {
-            PreviewUtils.imageAnnouncementPreviewDataUrl(File(item.cachePath).readBytes())
-        }.getOrElse {
-            item.fileName?.let { fileName -> "Imagen: ${fileName.take(48)}" } ?: "Imagen lista para descargar"
-        }
+        return item.fileName?.let { "Imagen: ${it.take(48)}" } ?: "Imagen lista para descargar"
     }
 }

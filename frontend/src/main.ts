@@ -928,6 +928,33 @@ function updateHeader() {
   }
 }
 
+// ── Drag-to-scroll ────────────────────────────────────────────────────────────
+
+function attachDragScroll(el: HTMLElement) {
+  let isDown = false;
+  let startX = 0;
+  let scrollLeft = 0;
+
+  el.addEventListener('mousedown', (e) => {
+    if ((e.target as HTMLElement).closest('button, a, input')) return;
+    isDown = true;
+    el.style.cursor = 'grabbing';
+    startX = e.pageX - el.offsetLeft;
+    scrollLeft = el.scrollLeft;
+    e.preventDefault();
+  });
+
+  el.addEventListener('mouseleave', () => { isDown = false; el.style.cursor = ''; });
+  el.addEventListener('mouseup',    () => { isDown = false; el.style.cursor = ''; });
+
+  el.addEventListener('mousemove', (e) => {
+    if (!isDown) return;
+    const x    = e.pageX - el.offsetLeft;
+    const walk = (x - startX) * 1.4;
+    el.scrollLeft = scrollLeft - walk;
+  });
+}
+
 // ── Local panel ───────────────────────────────────────────────────────────────
 
 function renderLocalContent() {
@@ -1081,6 +1108,8 @@ function renderLocalContent() {
       }
     });
   });
+
+  attachDragScroll(document.getElementById('panel-local')!);
 }
 
 // ── Direct Mode Modal ─────────────────────────────────────────────────────────
@@ -1342,6 +1371,8 @@ function renderPeerContent() {
       }
     });
   });
+
+  attachDragScroll(document.getElementById('panel-red')!);
 }
 
 function flashPeerAction(button: HTMLButtonElement, label: string) {

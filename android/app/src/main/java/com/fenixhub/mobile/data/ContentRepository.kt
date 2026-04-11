@@ -7,7 +7,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-class ContentRepository {
+class ContentRepository(
+    private val tempClipboardStore: TempClipboardStore? = null,
+) {
     private val localLock = Any()
     private val peerLock = Any()
     private val localItems = linkedMapOf<String, LocalContent>()
@@ -26,6 +28,7 @@ class ContentRepository {
         synchronized(localLock) {
             localItems[item.contentId] = item
             mutableSelectedLocalContentId.value = item.contentId
+            trimLocalHistoryLocked()
             emitLocalContentLocked()
         }
     }
@@ -107,11 +110,23 @@ class ContentRepository {
         }
     }
 
+    private fun trimLocalHistoryLocked() {
+        while (localItems.size > MAX_HISTORY_ITEMS) {
+            val oldest = localItems.values.minByOrNull { it.createdAt } ?: break
+            localItems.remove(oldest.contentId)
+            tempClipboardStore?.deleteContent(oldest.contentId)
+        }
+    }
+
     private fun emitLocalContentLocked() {
         mutableLocalContent.value = localItems.values.sortedByDescending { it.createdAt }
     }
 
     private fun emitPeersLocked() {
         mutablePeers.value = peerItems.values.sortedByDescending { it.announcement.createdAt }
+    }
+
+    companion object {
+        private const val MAX_HISTORY_ITEMS = 25
     }
 }

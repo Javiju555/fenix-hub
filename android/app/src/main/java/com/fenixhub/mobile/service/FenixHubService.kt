@@ -16,6 +16,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -94,11 +95,14 @@ class FenixHubService : Service() {
     private var accelerometer: Sensor? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var edgeTriggerView: EdgeTriggerView? = null
 
     override fun onCreate() {
         super.onCreate()
         sensorManager = getSystemService(SensorManager::class.java)
         accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        val wm = getSystemService(WindowManager::class.java)
+        edgeTriggerView = EdgeTriggerView(this, wm) { showOverlayIfPermitted() }
     }
 
     override fun onBind(intent: Intent): IBinder = binder
@@ -260,6 +264,7 @@ class FenixHubService : Service() {
         hotspotManager.stop()
         releaseMulticastLock()
         ephemeralSession.cleanup()
+        edgeTriggerView?.stop()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -275,6 +280,7 @@ class FenixHubService : Service() {
 
         startShakeDetection()
         startPublishGuardIfNeeded()
+        edgeTriggerView?.start()
 
         if (syncJob?.isActive != true) {
             syncJob = serviceScope.launch {
@@ -373,7 +379,8 @@ class FenixHubService : Service() {
 
     private fun showOverlayIfPermitted() {
         if (Settings.canDrawOverlays(this)) {
-            overlayController.show()
+            edgeTriggerView?.setOverlayVisible(true)
+            overlayController.show { edgeTriggerView?.setOverlayVisible(false) }
         } else {
             showToast("Concede permiso de overlay para abrir el hub flotante")
         }
