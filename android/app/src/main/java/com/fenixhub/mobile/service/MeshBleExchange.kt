@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
@@ -90,7 +91,7 @@ class MeshBleExchange(
             .build()
 
         runCatching {
-            advertiser.startAdvertising(settings, data, advertiseCallback)
+            advertiser?.startAdvertising(settings, data, advertiseCallback)
             advertising = true
             Log.d(TAG, "Mesh exchange advertising started: meshId=$meshId")
         }.onFailure { e ->
@@ -112,7 +113,7 @@ class MeshBleExchange(
             .build()
 
         runCatching {
-            scanner.startScan(listOf(filter), settings, scanCallback)
+            scanner?.startScan(listOf(filter), settings, scanCallback)
             discovering = true
             Log.d(TAG, "Mesh exchange scanning started: meshId=$meshId")
         }.onFailure { e ->

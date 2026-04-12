@@ -100,7 +100,6 @@ class FenixHubService : Service() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var edgeTriggerView: EdgeTriggerView? = null
-    private var meshHttpServer: FenixHttpServer? = null
 
     override fun onCreate() {
         super.onCreate()

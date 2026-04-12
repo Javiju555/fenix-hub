@@ -28,7 +28,7 @@ class MeshBleBridge(
             },
             discoveryMode = true,
         )
-        bleExchange.start()
+        bleExchange?.start()
         Log.d(TAG, "Mesh BLE discovery started (meshId=${meshId ?: "auto"})")
     }
 

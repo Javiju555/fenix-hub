@@ -205,13 +205,13 @@ object CryptoUtils {
         )
     }
 
-    private fun hkdfExtract(ikm: ByteArray): ByteArray {
+    fun hkdfExtract(ikm: ByteArray): ByteArray {
         val mac = Mac.getInstance(HMAC_SHA256)
         mac.init(SecretKeySpec(HKDF_ZERO_SALT, HMAC_SHA256))
         return mac.doFinal(ikm)
     }
 
-    private fun hkdfExpand(prk: ByteArray, info: ByteArray, outputLen: Int): ByteArray {
+    fun hkdfExpand(prk: ByteArray, info: ByteArray, outputLen: Int): ByteArray {
         require(outputLen > 0) { "outputLen must be > 0" }
 
         val mac = Mac.getInstance(HMAC_SHA256)

@@ -120,7 +120,7 @@ class MeshManager(
 
     private suspend fun startBleMeshDiscovery() {
         bleBridge = MeshBleBridge(context, this)
-        bleBridge.startMeshDiscovery(_state.value.meshId)
+        bleBridge?.startMeshDiscovery(_state.value.meshId)
         bleDiscoveryJob?.cancel()
         bleDiscoveryJob = scope.launch {
             var timeoutMs = MESH_TIMEOUT_MS
@@ -254,7 +254,7 @@ class MeshManager(
                 }
             },
         )
-        bleExchange.start()
+        bleExchange?.start()
     }
 
     private fun startPassphraseReceive(meshId: String) {
@@ -273,7 +273,7 @@ class MeshManager(
                 }
             },
         )
-        bleExchange.start()
+        bleExchange?.start()
     }
 
     private suspend fun handlePassphraseReceived(exchange: MeshPassphraseExchange) {
