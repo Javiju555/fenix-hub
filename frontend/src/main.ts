@@ -842,35 +842,37 @@ function renderHub() {
   // Virtual-file sources (Outlook, OneDrive, ZIP viewer) give empty paths because
   // WebView2 exposes CF_HDROP only. Fall back to Ctrl+V for those.
   if (IS_TAURI) {
-    try {
-      await getCurrentWindow().onDragDropEvent(async (event) => {
-        switch (event.payload.type) {
-          case 'enter':
-          case 'over':
-            hub.classList.add('drag-over');
-            break;
-          case 'leave':
-            hub.classList.remove('drag-over');
-            break;
-          case 'drop': {
-            hub.classList.remove('drag-over');
-            const paths = (event.payload.paths ?? []).filter(
-              (p): p is string => typeof p === 'string' && p.length > 0,
-            );
-            if (paths.length > 0) {
-              await commitDroppedItems(paths.map(p => addFileByPathToHub(p)));
-            } else {
-              // Outlook attachments, unsynced OneDrive files, ZIP entries, etc.:
-              // WebView2 has no path for them. Suggest Ctrl+V.
-              showDragFallbackHint();
+    (async () => {
+      try {
+        await getCurrentWindow().onDragDropEvent(async (event) => {
+          switch (event.payload.type) {
+            case 'enter':
+            case 'over':
+              hub.classList.add('drag-over');
+              break;
+            case 'leave':
+              hub.classList.remove('drag-over');
+              break;
+            case 'drop': {
+              hub.classList.remove('drag-over');
+              const paths = (event.payload.paths ?? []).filter(
+                (p): p is string => typeof p === 'string' && p.length > 0,
+              );
+              if (paths.length > 0) {
+                await commitDroppedItems(paths.map(p => addFileByPathToHub(p)));
+              } else {
+                // Outlook attachments, unsynced OneDrive files, ZIP entries, etc.:
+                // WebView2 has no path for them. Suggest Ctrl+V.
+                showDragFallbackHint();
+              }
+              break;
             }
-            break;
           }
-        }
-      });
-    } catch {
-      // HTML5 drop handler above covers the remaining cases.
-    }
+        });
+      } catch {
+        // HTML5 drop handler above covers the remaining cases.
+      }
+    })();
   }
 
   async function addFileByPathToHub(path: string): Promise<ContentItem> {
