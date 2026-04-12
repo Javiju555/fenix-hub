@@ -1,59 +1,99 @@
 # FenixHub
 
-Portapapeles compartido entre tus dispositivos, cifrado y sin nube.
+Shared clipboard across your devices. Local network, no cloud, real encryption.
 
-## Que es
+Copy something on your phone. It appears on your PC. Paste it. That's it.
 
-FenixHub te permite compartir texto, imagenes y archivos entre Windows, Linux y Android sin cuenta, sin servidor central y sin depender de servicios externos.
+Works with text, images, and files. Windows + Linux + Android.
 
-## Estado actual
+---
 
-- Grupo privado local funcional (mDNS + transferencia cifrada).
-- Seguridad endurecida: firma canonica, anti-replay, passphrase policy.
-- Base AirDrop-like integrada:
-  - Inventario de hardware LAN/BLE/Wi-Fi Direct por llamada.
-  - Discovery BLE + Wi-Fi Direct en Android (handoff base).
-- Android ya soporta decode FNX2 v2 con zstd.
+## How it works
 
-## Quick start (desktop)
+Each device runs its own node. Nodes discover each other via mDNS on the local network and authenticate with a shared `group_id`. Transfers are AES-256-GCM encrypted over authenticated HTTP — no relay, no intermediary, nothing leaves your network.
 
-### Requisitos
-- Rust toolchain
-- Bun
-- Dependencias de Tauri segun plataforma
+The Android overlay lets you drop content into any app without switching windows. On desktop, drag files directly to the hub.
 
-### Desarrollo
+---
+
+## Status
+
+**Working**
+
+- Desktop: Windows and Linux (Tauri v2 + Rust)
+- Android: native app + overlay + drag-and-drop into overlay
+- LAN encrypted transfer: text, image, file
+- Discovery via mDNS, pull via authenticated HTTP
+- Near mode base: BLE discovery + Wi-Fi Direct discovery on Android
+
+**In progress**
+
+- Full payload transfer over Wi-Fi Direct (near mode without LAN)
+
+---
+
+## Building
+
+### Requirements
+
+- [Rust toolchain](https://rustup.rs)
+- [Bun](https://bun.sh)
+- Tauri prerequisites for your platform: [tauri.app/start/prerequisites](https://v2.tauri.app/start/prerequisites/)
+
+### Desktop — dev
 
 ```bash
 bun tauri dev
 ```
 
-### Build frontend
+### Desktop — build
 
 ```bash
-bun run --cwd frontend build
+bun tauri build
 ```
 
-### Check/test Rust
+### Rust tests
 
 ```bash
-cargo check -p fenix-hub-app
 cargo test -p fenix-hub-core
 ```
 
-### Tests Android (unit)
+### Android unit tests
 
 ```bash
-cd android
-./gradlew :app:testDebugUnitTest
+cd android && ./gradlew :app:testDebugUnitTest
 ```
 
-## Documentacion
+---
 
-- Vision producto y copys para redes: [fenixhub.md](fenixhub.md)
-- Roadmap real y checklist de release limpio: [PENDING.md](PENDING.md)
-- Cambios por release/sesion: [CHANGELOG_LAPTOP.md](CHANGELOG_LAPTOP.md)
+## Security
 
-## Licencia
+Not decorative encryption. Each request carries a canonical signature over `method + path + group_id + timestamp + nonce + body_sha256`. Anti-replay protection with time window and unique nonce per request. The `group_id` is HKDF-derived. Passphrases have a minimum complexity policy.
 
-Pendiente de definir antes de release publico.
+Transfers run at ~30 MB/s — encryption uses hardware acceleration (ring crate), no software crypto overhead.
+
+---
+
+## Platforms
+
+| Platform | Stack |
+|---|---|
+| Windows / Linux | Tauri v2, Rust, TypeScript |
+| Android | Native Kotlin app + WebView bridge |
+| iOS | Pending — requires Mac + Xcode + Apple Developer account |
+
+---
+
+## iOS
+
+No functional iOS port. Requires Mac + Xcode + Apple Developer Program ($99/year) + real hardware for testing. When that setup exists, it gets done.
+
+---
+
+## License
+
+[AGPL-3.0-only](LICENSE)
+
+Strong copyleft. Anyone who forks and offers this as a network service must publish their changes under the same terms.
+
+Fenix Motion Systems
