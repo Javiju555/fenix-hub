@@ -5,8 +5,6 @@ dist/
 *.lock
 !bun.lockb
 src-tauri/icons/
-# Personal Android auth integration (NFC/face via fenix-authd).
-# Lives in android/app/src/main/java/personal/ — never committed.
 android/app/src/main/java/personal/
 
 android/local.properties
@@ -16,3 +14,11 @@ android/build/
 .claude/worktrees/
 opencode.json
 scripts/opencode-lmstudio.ps1
+
+# Internal/session docs — not part of the public repo
+docs/PLAN.md
+docs/instagram-announcement-es.md
+docs/cfstr-virtual-drop-impl-prompt.md
+
+# Session logs
+*.log
