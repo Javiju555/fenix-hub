@@ -737,7 +737,6 @@ function renderApp() {
         </div>
         <div class="a-hero-actions">
           <div class="a-header-actions">
-            <button class="a-chip-btn accent" id="btn-clipboard">${iconClipboard(16)} Pegar</button>
             <button class="a-chip-btn" id="btn-share-all">${iconBroadcast(16)} Todo</button>
             <button class="a-chip-btn" id="btn-mesh">${iconMesh(16)} Mesh</button>
             <button class="a-chip-btn" id="btn-overlay">${iconOverlay(16)} Overlay</button>
@@ -782,9 +781,6 @@ function renderApp() {
   });
 
   document.getElementById('fab-add')!.addEventListener('click', openAddSheet);
-  document.getElementById('btn-clipboard')!.addEventListener('click', () => {
-    void window.androidActions?.pasteClipboard();
-  });
   document.getElementById('btn-share-all')!.addEventListener('click', () => {
     void window.androidActions?.broadcastAll();
   });

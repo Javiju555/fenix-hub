@@ -486,6 +486,9 @@ function setupEventListeners() {
         syncDerivedState();
         updateUI();
     });
+    document.getElementById('btn-mesh').addEventListener('click', () => {
+        void window.androidActions?.openMeshSheet();
+    });
     if (IS_NATIVE_ANDROID && pollHandle === null) {
         pollHandle = window.setInterval(() => {
             if (!document.hidden) {
@@ -582,8 +585,8 @@ function renderApp() {
         </div>
         <div class="a-hero-actions">
           <div class="a-header-actions">
-            <button class="a-chip-btn accent" id="btn-clipboard">${iconClipboard(16)} Pegar</button>
             <button class="a-chip-btn" id="btn-share-all">${iconBroadcast(16)} Todo</button>
+            <button class="a-chip-btn" id="btn-mesh">${iconMesh(16)} Mesh</button>
             <button class="a-chip-btn" id="btn-overlay">${iconOverlay(16)} Overlay</button>
             <button class="a-chip-btn" id="btn-settings">${iconSettings(16)} Ajustes</button>
           </div>
@@ -624,9 +627,6 @@ function renderApp() {
         });
     });
     document.getElementById('fab-add').addEventListener('click', openAddSheet);
-    document.getElementById('btn-clipboard').addEventListener('click', () => {
-        void window.androidActions?.pasteClipboard();
-    });
     document.getElementById('btn-share-all').addEventListener('click', () => {
         void window.androidActions?.broadcastAll();
     });
@@ -1411,6 +1411,9 @@ window.androidActions = {
             showToast(errorMessage(error));
         }
     },
+    async openMeshSheet() {
+        await openMeshSheet();
+    },
 };
 function updateLocalItem(id, mutate) {
     localContent = localContent.map(item => (item.id === id ? mutate(item) : item));
@@ -1636,6 +1639,263 @@ async function rejectDirectInviteFromModal() {
 function closeInviteBackdrop(_backdrop) {
     currentIncomingInvite = null;
     _backdrop.remove();
+}
+let meshSheetOpen = false;
+let meshState = {
+    role: 'none',
+    status: 'idle',
+    mesh_id: null,
+    passphrase_set: false,
+    pending_devices: [],
+    active_devices: [],
+    local_content_pool: [],
+    is_active: false,
+    can_add_devices: false,
+    can_leave: false,
+    pending_count: 0,
+};
+let meshRefreshInterval = null;
+async function openMeshSheet() {
+    if (meshSheetOpen)
+        return;
+    meshSheetOpen = true;
+    await refreshMeshState();
+    renderMeshSheet();
+    meshRefreshInterval = window.setInterval(async () => {
+        await refreshMeshState();
+        updateMeshSheetState();
+    }, 1500);
+}
+async function refreshMeshState() {
+    try {
+        meshState = await invoke('mesh_get_state');
+    }
+    catch {
+        // ignore
+    }
+}
+function closeMeshSheet() {
+    meshSheetOpen = false;
+    if (meshRefreshInterval) {
+        clearInterval(meshRefreshInterval);
+        meshRefreshInterval = null;
+    }
+    const backdrop = document.getElementById('a-sheet-backdrop');
+    backdrop?.remove();
+}
+function renderMeshSheet() {
+    const backdrop = createSheet(`
+    <div class="a-sheet-handle"></div>
+    <div class="a-mesh-header">
+      <div class="a-mesh-icon">${iconMesh(28)}</div>
+      <div class="a-mesh-title">Mesh WiFi Direct</div>
+      <button class="a-mesh-close" id="mesh-close">${iconX(16)}</button>
+    </div>
+    <div class="a-mesh-hint" id="mesh-hint">Elige cómo participar</div>
+    <div class="a-mesh-tabs" id="mesh-tabs">
+      <button class="a-mesh-tab ${meshState.role === 'none' ? 'active' : ''}" data-mesh-role="host">${iconHost(20)} Host</button>
+      <button class="a-mesh-tab ${meshState.role === 'none' ? '' : 'active'}" data-mesh-role="device">${iconDevice(20)} Device</button>
+    </div>
+    <div class="a-mesh-devices" id="mesh-devices-list">
+      <div class="a-mesh-empty" id="mesh-empty">Pulsa Host o Device para empezar a buscar.</div>
+    </div>
+    <div class="a-mesh-actions" id="mesh-actions"></div>
+  `);
+    document.getElementById('mesh-close').addEventListener('click', closeMeshSheet);
+    document.querySelectorAll('.a-mesh-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const role = tab.dataset.meshRole;
+            void selectMeshRole(role);
+        });
+    });
+    backdrop.addEventListener('click', (e) => {
+        if (e.target === backdrop)
+            closeMeshSheet();
+    });
+}
+async function selectMeshRole(role) {
+    document.querySelectorAll('.a-mesh-tab').forEach(t => t.classList.remove('active'));
+    document.querySelector(`[data-mesh-role="${role}"]`)?.classList.add('active');
+    if (role === 'host') {
+        if (localContent.length === 0) {
+            showToast('Añade contenido al hub antes de crear mesh');
+            return;
+        }
+        const contentPool = localContent.map(i => i.id);
+        await invoke('mesh_start_host', { content_pool: contentPool });
+        showToast('Creando mesh como host...');
+    }
+    else {
+        await invoke('mesh_start_device');
+        showToast('Buscando meshes...');
+    }
+    await refreshMeshState();
+    updateMeshSheetState();
+}
+function updateMeshSheetState() {
+    const hint = document.getElementById('mesh-hint');
+    const deviceList = document.getElementById('mesh-devices-list');
+    const actions = document.getElementById('mesh-actions');
+    if (!hint || !deviceList || !actions)
+        return;
+    if (meshState.role === 'none') {
+        hint.textContent = 'Elige cómo participar';
+        deviceList.innerHTML = '<div class="a-mesh-empty">Pulsa Host o Device para empezar a buscar.</div>';
+        actions.innerHTML = '';
+        return;
+    }
+    if (meshState.status === 'idle') {
+        hint.textContent = meshState.role === 'host' ? 'Iniciando host...' : 'Iniciando...';
+        deviceList.innerHTML = '<div class="a-mesh-empty">Buscando...</div>';
+        actions.innerHTML = '';
+        return;
+    }
+    if (meshState.status === 'discovering') {
+        hint.textContent = meshState.role === 'host'
+            ? `${meshState.pending_count} dispositivo(s) encontrado(s)`
+            : 'Buscando meshes...';
+        if (meshState.pending_devices.length > 0) {
+            deviceList.innerHTML = meshState.pending_devices.map(d => {
+                if (meshState.role === 'host') {
+                    return `
+        <div class="a-mesh-device">
+          <div class="a-mesh-device-info">
+            <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+            <span class="a-mesh-device-signal">${signalBars(d.rssi)}</span>
+          </div>
+          <div class="a-mesh-device-actions">
+            <button class="a-mesh-btn-accept" data-device-id="${d.id}">${iconCheck(16)}</button>
+            <button class="a-mesh-btn-reject" data-device-id="${d.id}">${iconX(16)}</button>
+          </div>
+        </div>`;
+                }
+                else {
+                    return `
+        <div class="a-mesh-device a-mesh-device-pending">
+          <div class="a-mesh-device-info">
+            <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+          </div>
+          <span class="a-mesh-device-badge pending">Esperando...</span>
+        </div>`;
+                }
+            }).join('');
+            if (meshState.role === 'host') {
+                deviceList.querySelectorAll('.a-mesh-btn-accept').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const id = btn.dataset.deviceId;
+                        void invoke('mesh_accept_device', { device_id: id });
+                        void refreshMeshState().then(updateMeshSheetState);
+                    });
+                });
+                deviceList.querySelectorAll('.a-mesh-btn-reject').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const id = btn.dataset.deviceId;
+                        void invoke('mesh_reject_device', { device_id: id });
+                        void refreshMeshState().then(updateMeshSheetState);
+                    });
+                });
+            }
+        }
+        else {
+            deviceList.innerHTML = `<div class="a-mesh-empty">${meshState.role === 'host' ? 'Esperando dispositivos...' : 'Buscando meshes...'}</div>`;
+        }
+        if (meshState.role === 'host' && meshState.pending_count > 0) {
+            const allAccepted = meshState.pending_devices.every(d => d.status === 'connected');
+            if (allAccepted) {
+                actions.innerHTML = `<button class="a-btn a-btn-primary" id="mesh-close-btn">Crear grupo</button>`;
+                document.getElementById('mesh-close-btn')?.addEventListener('click', () => {
+                    void invoke('mesh_close_modal').then(closeMeshSheet);
+                });
+            }
+            else {
+                actions.innerHTML = `<div class="a-mesh-hint" style="text-align:center;color:var(--yellow);">Acepta o rechaza los dispositivos primero</div>`;
+            }
+        }
+        else if (meshState.role === 'host') {
+            actions.innerHTML = '';
+        }
+        else {
+            actions.innerHTML = `<button class="a-btn a-btn-secondary" id="mesh-close-btn">Cancelar</button>`;
+            document.getElementById('mesh-close-btn')?.addEventListener('click', () => {
+                void invoke('mesh_cancel_discovery').then(closeMeshSheet);
+            });
+        }
+        return;
+    }
+    if (meshState.status === 'forming') {
+        hint.textContent = meshState.role === 'host' ? 'Formando grupo WiFi Direct...' : 'Conectando al grupo...';
+        deviceList.innerHTML = meshState.active_devices.length > 0
+            ? meshState.active_devices.map(d => `
+        <div class="a-mesh-device a-mesh-device-active">
+          <div class="a-mesh-device-info">
+            <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+          </div>
+          <span class="a-mesh-device-badge">Conectando...</span>
+        </div>`).join('')
+            : '<div class="a-mesh-empty">Estableciendo conexión...</div>';
+        actions.innerHTML = '';
+        return;
+    }
+    if (meshState.status === 'active' || meshState.status === 'transferring') {
+        hint.textContent = meshState.role === 'host'
+            ? `Mesh activo · ${meshState.active_devices.length} dispositivo(s)`
+            : `Conectado al mesh de ${meshState.mesh_id || 'host'}`;
+        deviceList.innerHTML = meshState.active_devices.length > 0
+            ? meshState.active_devices.map(d => `
+        <div class="a-mesh-device a-mesh-device-active">
+          <div class="a-mesh-device-info">
+            <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+          </div>
+          <span class="a-mesh-device-badge">Conectado</span>
+        </div>`).join('')
+            : '<div class="a-mesh-empty">Mesh establecido</div>';
+        if (meshState.role === 'host') {
+            actions.innerHTML = `
+        <button class="a-btn a-btn-primary" id="mesh-finalize-btn">Finalizar envío</button>
+        <button class="a-btn a-btn-secondary" id="mesh-leave-btn">Disolver mesh</button>`;
+        }
+        else {
+            actions.innerHTML = `<button class="a-btn a-btn-danger" id="mesh-leave-btn">Salir del mesh</button>`;
+        }
+        const leaveBtn = document.getElementById('mesh-leave-btn');
+        leaveBtn?.addEventListener('click', async () => {
+            if (confirm('¿Seguro que quieres salir del mesh?')) {
+                await invoke('mesh_leave');
+                closeMeshSheet();
+            }
+        });
+        const finalizeBtn = document.getElementById('mesh-finalize-btn');
+        finalizeBtn?.addEventListener('click', async () => {
+            await invoke('mesh_finalize');
+            closeMeshSheet();
+        });
+        return;
+    }
+    if (meshState.status === 'destroying') {
+        hint.textContent = 'Cerrando mesh...';
+        deviceList.innerHTML = '<div class="a-mesh-empty">Dissolviendo grupo...</div>';
+        actions.innerHTML = '';
+        return;
+    }
+    hint.textContent = `Estado: ${meshState.status}`;
+    deviceList.innerHTML = '<div class="a-mesh-empty">—</div>';
+    actions.innerHTML = '';
+}
+function iconMesh(size) {
+    return svg(size, '0 0 24 24', '<circle cx="5" cy="5" r="2.5" stroke-width="1.8" fill="none"/><circle cx="19" cy="5" r="2.5" stroke-width="1.8" fill="none"/><circle cx="5" cy="19" r="2.5" stroke-width="1.8" fill="none"/><circle cx="19" cy="19" r="2.5" stroke-width="1.8" fill="none"/><line x1="7" y1="5" x2="17" y2="19" stroke-width="1.8"/><line x1="17" y1="5" x2="7" y2="19" stroke-width="1.8"/>');
+}
+function iconHost(size) {
+    return svg(size, '0 0 24 24', '<circle cx="12" cy="8" r="4" stroke-width="1.8" fill="none"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" stroke-width="1.8" fill="none"/><circle cx="12" cy="12" r="9" stroke-width="1.5" fill="none" stroke-dasharray="2 2"/>');
+}
+function iconDevice(size) {
+    return svg(size, '0 0 24 24', '<rect x="5" y="2" width="14" height="20" rx="3" stroke-width="1.8" fill="none"/><line x1="9" y1="18" x2="15" y2="18" stroke-width="1.8"/>');
+}
+function signalBars(rssi) {
+    if (rssi > -60)
+        return '●●●';
+    if (rssi > -75)
+        return '●●○';
+    return '●○○';
 }
 function iconDirect(size) {
     return svg(size, '0 0 16 16', '<circle cx="4" cy="8" r="1.5" stroke-width="1.6"/><circle cx="12" cy="8" r="1.5" stroke-width="1.6"/><path d="M5.5,8 Q10,3 10.5,8" stroke-width="1.6"/>');

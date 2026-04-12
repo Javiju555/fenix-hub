@@ -275,9 +275,9 @@ textarea {
 }
 
 .a-header-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
   width: 100%;
 }
 
@@ -1110,14 +1110,6 @@ textarea {
   .a-brand-row {
     flex-direction: column;
     align-items: flex-start;
-  }
-
-  .a-header-actions {
-    flex-direction: column;
-  }
-
-  .a-chip-btn {
-    width: 100%;
   }
 
   .a-settings-grid.two {
