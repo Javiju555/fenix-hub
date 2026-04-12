@@ -19,6 +19,9 @@ import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.PulledContent
 import com.fenixhub.mobile.model.SendMode
+import com.fenixhub.mobile.model.MeshRole
+import com.fenixhub.mobile.model.MeshStatus
+import com.fenixhub.mobile.model.MeshDevice
 import com.fenixhub.mobile.network.BleDirectController
 import com.fenixhub.mobile.network.DirectBleListener
 import com.fenixhub.mobile.network.DirectBlePeer
@@ -176,6 +179,7 @@ class AndroidHubBridge(
             "get_direct_session_state" -> {
                 getDirectSessionStateJson().toString()
             }
+            "get_mesh_state" -> getMeshStateJson().toString()
             "refresh_direct_peers" -> getDirectPeersJson().toString()
             "stop_server" -> {
                 container.contentRepository.unpublishAll()
@@ -193,6 +197,70 @@ class AndroidHubBridge(
                 "null"
             }
             "open_overlay" -> if (openOverlay()) "true" else "false"
+            "publish_all_local" -> {
+                publishAllLocal()
+                "null"
+            }
+            "mesh_start_host" -> {
+                val contentPool = args?.optJSONArray("content_pool")?.let { arr ->
+                    (0 until arr.length()).map { arr.getString(it) }
+                } ?: emptyList()
+                container.meshManager.dispatch(
+                    com.fenixhub.mobile.service.MeshManager.MeshCommand.StartAsHost(contentPool)
+                )
+                "null"
+            }
+            "mesh_start_device" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.StartAsDevice)
+                "null"
+            }
+            "mesh_accept_device" -> {
+                val deviceId = args?.optString("device_id").orEmpty()
+                if (deviceId.isNotBlank()) {
+                    container.meshManager.dispatch(
+                        com.fenixhub.mobile.service.MeshManager.MeshCommand.AcceptDevice(deviceId)
+                    )
+                }
+                "null"
+            }
+            "mesh_reject_device" -> {
+                val deviceId = args?.optString("device_id").orEmpty()
+                if (deviceId.isNotBlank()) {
+                    container.meshManager.dispatch(
+                        com.fenixhub.mobile.service.MeshManager.MeshCommand.RejectDevice(deviceId)
+                    )
+                }
+                "null"
+            }
+            "mesh_request_join" -> {
+                val hostMeshId = args?.optString("host_mesh_id").orEmpty()
+                val hostName = args?.optString("host_name").orEmpty()
+                container.meshManager.dispatch(
+                    com.fenixhub.mobile.service.MeshManager.MeshCommand.RequestJoin(hostMeshId, hostName)
+                )
+                "null"
+            }
+            "mesh_cancel_discovery" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.CancelDiscovery)
+                "null"
+            }
+            "mesh_close_modal" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.CloseModal)
+                "null"
+            }
+            "mesh_leave" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.LeaveMesh)
+                "null"
+            }
+            "mesh_finalize" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.FinalizeTransfer)
+                "null"
+            }
+            "mesh_confirm_received" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.ConfirmAllReceived)
+                "null"
+            }
+            "mesh_get_state" -> getMeshStateJson().toString()
             else -> error("Comando no soportado: $command")
         }
     }
@@ -622,6 +690,41 @@ class AndroidHubBridge(
             .put("peer_count", container.bleDirectController.snapshotPeers().size)
     }
 
+    private fun getMeshStateJson(): JSONObject {
+        val state = container.meshManager.state.value
+        return JSONObject()
+            .put("role", state.role.name.lowercase())
+            .put("status", state.status.name.lowercase())
+            .put("mesh_id", state.meshId ?: JSONObject.NULL)
+            .put("passphrase_set", state.passphrase != null)
+            .put("pending_devices", JSONArray().apply {
+                state.pendingDevices.forEach { device ->
+                    put(JSONObject()
+                        .put("id", device.id)
+                        .put("name", device.name)
+                        .put("rssi", device.rssi)
+                        .put("status", device.status.name.lowercase()))
+                }
+            })
+            .put("active_devices", JSONArray().apply {
+                state.activeDevices.forEach { device ->
+                    put(JSONObject()
+                        .put("id", device.id)
+                        .put("name", device.name)
+                        .put("rssi", device.rssi)
+                        .put("status", device.status.name.lowercase())
+                        .put("joined_at", device.joinedAt ?: JSONObject.NULL))
+                }
+            })
+            .put("local_content_pool", JSONArray().apply {
+                state.localContentPool.forEach { put(it) }
+            })
+            .put("is_active", state.isActive)
+            .put("can_add_devices", state.canAddDevices)
+            .put("can_leave", state.canLeave)
+            .put("pending_count", state.pendingCount)
+    }
+
     private fun getCurrentInviterJson(): JSONObject {
         val inviter = container.ephemeralSession.getCurrentInviter()
         return if (inviter != null) {
@@ -682,6 +785,17 @@ class AndroidHubBridge(
             } else {
                 openOverlayPermissionSettings()
                 false
+            }
+        }
+    }
+
+    private fun publishAllLocal() {
+        FenixHubService.start(activity)
+        val items = container.contentRepository.localContent.value
+        if (items.isEmpty()) return
+        items.forEach { item ->
+            if (!item.isPublished) {
+                container.contentRepository.publish(item.contentId, SendMode.Broadcast)
             }
         }
     }

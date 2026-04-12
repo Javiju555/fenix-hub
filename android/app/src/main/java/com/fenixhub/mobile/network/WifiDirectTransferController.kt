@@ -77,8 +77,13 @@ class WifiDirectTransferController(private val context: Context) {
      * SENDER: Crea un grupo WiFi Direct. Este dispositivo será el Group Owner.
      * El HTTP server debe arrancar DESPUÉS de que el grupo se cree,
      * escuchando en la interfaz p2p (normalmente p2p-wlan0).
+     * 
+     * Nota: passphrase es para uso futuro. Android WiFi P2P genera la clave internamente.
+     * Por ahora usa WPS PBC que permite a cualquier dispositivo con Push Button unirse.
+     * La passphrase real del grupo se obtiene de WifiP2pGroup.passphrase después de crear.
      */
-    fun createGroup(onGroupCreated: (WifiDirectGroupInfo) -> Unit) {
+    @Suppress("DEPRECATION")
+    fun createGroup(passphrase: String? = null, onGroupCreated: (WifiDirectGroupInfo) -> Unit) {
         val manager = wifiP2pManager ?: return
         val ch = channel ?: return
 

@@ -247,6 +247,9 @@ async function invokeMock<T>(cmd: string, args?: unknown): Promise<T> {
       );
       return undefined as T;
     }
+    case 'publish_all_local':
+      mockLocal = mockLocal.map(item => ({ ...item, is_published: true }));
+      return undefined as T;
     case 'remove_content':
       mockLocal = mockLocal.filter(item => item.id !== (a?.id as string));
       return undefined as T;
@@ -390,6 +393,7 @@ function render() {
       <section class="overlay-stack" id="overlay-stack"></section>
       <footer class="overlay-footer-bar">
         <button class="overlay-footer-btn" id="act-paste">${iconClipboard(16)} Pegar</button>
+        <button class="overlay-footer-btn accent" id="act-share-all">${iconBroadcast(16)} Todo</button>
         <button class="overlay-footer-btn subtle" id="act-close-overlay">${iconX(16)} Cerrar</button>
       </footer>
     </div>
@@ -418,6 +422,7 @@ function render() {
   });
 
   document.getElementById('act-paste')!.addEventListener('click', () => void copyOrPasteLocal());
+  document.getElementById('act-share-all')!.addEventListener('click', () => void publishAllLocal());
   document.getElementById('act-close-overlay')!.addEventListener('click', async () => {
     await invoke('close_overlay');
   });
@@ -548,6 +553,16 @@ async function copyOrPasteLocal() {
   try {
     await invoke('paste_clipboard_text');
     showToast('Portapapeles añadido al hub');
+    await refreshState();
+  } catch (error) {
+    showToast(errorMessage(error));
+  }
+}
+
+async function publishAllLocal() {
+  try {
+    await invoke('publish_all_local');
+    showToast('Todo publicado en la red');
     await refreshState();
   } catch (error) {
     showToast(errorMessage(error));
@@ -729,6 +744,10 @@ function iconMinus(size = 18) {
 
 function iconX(size = 18) {
   return icon('<path d="M5 5l10 10"/><path d="M15 5L5 15"/>', size);
+}
+
+function iconBroadcast(size = 18) {
+  return icon('<circle cx="9" cy="5" r="1.5"/><circle cx="16" cy="5" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><path d="M9 5 L16 12"/><path d="M16 5 L9 12"/>', size);
 }
 
 initOverlay();

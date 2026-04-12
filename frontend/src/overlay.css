@@ -456,6 +456,12 @@ textarea {
   color: var(--overlay-dim);
 }
 
+.overlay-footer-btn.accent {
+  background: var(--overlay-accent-soft);
+  color: var(--overlay-accent);
+  border-color: rgba(94, 140, 244, 0.3);
+}
+
 @media (orientation: landscape) {
   .overlay-shell {
     grid-template-rows: auto auto 1fr;
