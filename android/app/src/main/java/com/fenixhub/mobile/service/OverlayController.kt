@@ -78,20 +78,20 @@ class OverlayController(
         )
         bridge = currentBridge
         val view = createWebView(currentBridge)
-        val params = minimizedLayoutParams()
+        val params = baseLayoutParams()
         webView = view
         layoutParams = params
-        minimized = true
+        minimized = false
         currentBridge.attach(view)
+        view.alpha = 0f
+        windowManager.addView(view, params)
 
         view.viewTreeObserver.addOnGlobalLayoutListener(
             object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
                 override fun onGlobalLayout() {
+                    if (view.width == 0) return
                     view.viewTreeObserver.removeOnGlobalLayoutListener(this)
-                    val panelWidth = view.width.toFloat()
-                    view.translationX = panelWidth
-                    view.alpha = 0f
-                    windowManager.addView(view, params)
+                    view.translationX = view.width.toFloat()
                     view.animate()
                         .translationX(0f)
                         .alpha(1f)
@@ -107,6 +107,7 @@ class OverlayController(
     fun minimize() {
         val current = webView ?: return
         if (minimized) return
+        if (current.parent == null) return
 
         val params = minimizedLayoutParams()
         layoutParams = params
@@ -118,6 +119,7 @@ class OverlayController(
     fun expand() {
         val current = webView ?: return
         if (!minimized) return
+        if (current.parent == null) return
 
         val params = baseLayoutParams()
         layoutParams = params
