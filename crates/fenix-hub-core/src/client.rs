@@ -16,7 +16,7 @@ use crate::identity::GroupIdentity;
 use crate::protocol::{
     canonical_auth_message, AUTH_BODY_SHA256_HEADER, AUTH_NONCE_HEADER, AUTH_TIMESTAMP_HEADER,
     EMPTY_BODY_SHA256_HEX,
-    ENCRYPTED_HEADER, FNX2_COMPRESSION_NONE, FNX2_COMPRESSION_ZSTD, FNX2_HEADER_SIZE,
+    ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, FNX2_COMPRESSION_NONE, FNX2_COMPRESSION_ZSTD, FNX2_HEADER_SIZE,
     HMAC_HEADER,
 };
 use crate::content::ContentType;
@@ -267,15 +267,19 @@ pub async fn pull_content_to_file(
     let mut body = response.bytes_stream();
     let enc_key = identity.enc_key();
 
-    // Read FNX2 header first
+    // Read FNX2 header first, keeping any leftover bytes from the same TCP chunk.
     let mut header_buf = vec![0u8; FNX2_HEADER_SIZE];
     let mut header_read = 0usize;
+    let mut leftover: Vec<u8> = Vec::new();
     while header_read < FNX2_HEADER_SIZE {
         if let Some(chunk) = body.next().await {
             let chunk = chunk?;
             let take = (FNX2_HEADER_SIZE - header_read).min(chunk.len());
             header_buf[header_read..header_read + take].copy_from_slice(&chunk[..take]);
             header_read += take;
+            if chunk.len() > take {
+                leftover.extend_from_slice(&chunk[take..]);
+            }
         } else {
             anyhow::bail!("Incomplete FNX2 header");
         }
@@ -295,18 +299,43 @@ pub async fn pull_content_to_file(
     // after collecting compressed plaintext.
     let mut file = File::create(output_path).await?;
     let mut compressed_plaintext = Vec::new();
+    // pending accumulates ciphertext bytes until we have a full encrypted chunk.
+    let full_chunk = FNX2_CHUNK_SIZE + 16; // 16 = GCM tag
+    let mut pending: Vec<u8> = leftover;
+
+    let flush_pending = |pending: &mut Vec<u8>,
+                         decoder: &mut ChunkDecoder,
+                         is_final: bool|
+     -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        while pending.len() >= full_chunk || (is_final && !pending.is_empty()) {
+            let end = if pending.len() >= full_chunk { full_chunk } else { pending.len() };
+            let plaintext = decoder.decrypt_chunk(&pending[..end])?;
+            out.extend_from_slice(&plaintext);
+            pending.drain(..end);
+        }
+        Ok(out)
+    };
 
     while let Some(chunk) = body.next().await {
         let chunk = chunk?;
         if chunk.is_empty() {
             continue;
         }
-        let plaintext = decoder.decrypt_chunk(&chunk)?;
+        pending.extend_from_slice(&chunk);
+        let plaintext = flush_pending(&mut pending, &mut decoder, false)?;
         if decoder.compression == FNX2_COMPRESSION_NONE {
             file.write_all(&plaintext).await?;
         } else {
             compressed_plaintext.extend_from_slice(&plaintext);
         }
+    }
+    // Flush final (potentially short) chunk
+    let plaintext = flush_pending(&mut pending, &mut decoder, true)?;
+    if decoder.compression == FNX2_COMPRESSION_NONE {
+        file.write_all(&plaintext).await?;
+    } else {
+        compressed_plaintext.extend_from_slice(&plaintext);
     }
 
     if decoder.compression != FNX2_COMPRESSION_NONE {
@@ -339,30 +368,35 @@ async fn pull_v2_body_to_bytes(
 ) -> Result<Vec<u8>> {
     let mut body = response.bytes_stream();
 
-    // Read FNX2 header first.
-    let mut header_buf = vec![0u8; FNX2_HEADER_SIZE];
-    let mut header_read = 0usize;
-    while header_read < FNX2_HEADER_SIZE {
-        if let Some(chunk) = body.next().await {
-            let chunk = chunk?;
-            let take = (FNX2_HEADER_SIZE - header_read).min(chunk.len());
-            header_buf[header_read..header_read + take].copy_from_slice(&chunk[..take]);
-            header_read += take;
-        } else {
-            anyhow::bail!("Incomplete FNX2 header");
-        }
+    // Accumulate the full response into a buffer first, then parse.
+    // The bytes_stream yields raw TCP chunks — if we try to read the 29-byte
+    // FNX2 header and the first chunk is larger, leftover bytes would be lost.
+    // Buffering avoids that without holding two copies (collect then slice).
+    let mut raw: Vec<u8> = Vec::new();
+    while let Some(chunk) = body.next().await {
+        raw.extend_from_slice(&chunk?);
     }
 
-    let mut decoder = ChunkDecoder::new(enc_key, &header_buf)?;
-    let mut decrypted = Vec::new();
+    if raw.len() < FNX2_HEADER_SIZE {
+        anyhow::bail!("Incomplete FNX2 header: {} bytes", raw.len());
+    }
 
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk?;
-        if chunk.is_empty() {
-            continue;
+    let mut decoder = ChunkDecoder::new(enc_key, &raw[..FNX2_HEADER_SIZE])?;
+    let mut decrypted = Vec::new();
+    let mut pos = FNX2_HEADER_SIZE;
+
+    // Walk the remaining bytes chunk by chunk (each chunk is FNX2_CHUNK_SIZE +
+    // GCM_TAG_BYTES, except the last which may be shorter).
+    let full_chunk = FNX2_CHUNK_SIZE + 16; // 16 = GCM tag
+    for chunk_index in 0..decoder.total_chunks {
+        let is_last = chunk_index == decoder.total_chunks - 1;
+        let end = if is_last { raw.len() } else { pos + full_chunk };
+        if end > raw.len() {
+            anyhow::bail!("FNX2 body truncated at chunk {chunk_index}");
         }
-        let plaintext = decoder.decrypt_chunk(&chunk)?;
+        let plaintext = decoder.decrypt_chunk(&raw[pos..end])?;
         decrypted.extend_from_slice(&plaintext);
+        pos = end;
     }
 
     let bytes = decode_compressed_payload(decrypted, decoder.compression, decoder.original_size)?;
