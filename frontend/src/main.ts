@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke, convertFileSrc } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen as tauriListen } from '@tauri-apps/api/event';
 import './style.css';
 
@@ -812,7 +813,7 @@ function renderHub() {
     await closeApp();
   });
 
-  // Drag-to-hub
+  // Drag-to-hub (HTML5 — browser files and text)
   const hub = document.getElementById('hub-root')!;
   hub.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer!.dropEffect = 'copy'; hub.classList.add('drag-over'); });
   hub.addEventListener('dragleave', (e) => {
@@ -836,6 +837,63 @@ function renderHub() {
       if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
     }
   });
+
+  // Native drag-drop (Tauri onDragDropEvent — filesystem paths via WebView2).
+  // Virtual-file sources (Outlook, OneDrive, ZIP viewer) give empty paths because
+  // WebView2 exposes CF_HDROP only. Fall back to Ctrl+V for those.
+  if (IS_TAURI) {
+    try {
+      await getCurrentWindow().onDragDropEvent(async (event) => {
+        switch (event.payload.type) {
+          case 'enter':
+          case 'over':
+            hub.classList.add('drag-over');
+            break;
+          case 'leave':
+            hub.classList.remove('drag-over');
+            break;
+          case 'drop': {
+            hub.classList.remove('drag-over');
+            const paths = (event.payload.paths ?? []).filter(
+              (p): p is string => typeof p === 'string' && p.length > 0,
+            );
+            if (paths.length > 0) {
+              await commitDroppedItems(paths.map(p => addFileByPathToHub(p)));
+            } else {
+              // Outlook attachments, unsynced OneDrive files, ZIP entries, etc.:
+              // WebView2 has no path for them. Suggest Ctrl+V.
+              showDragFallbackHint();
+            }
+            break;
+          }
+        }
+      });
+    } catch {
+      // HTML5 drop handler above covers the remaining cases.
+    }
+  }
+
+  async function addFileByPathToHub(path: string): Promise<ContentItem> {
+    return invoke<ContentItem>('add_file_by_path', { path });
+  }
+
+  async function commitDroppedItems(tasks: Array<Promise<ContentItem>>) {
+    if (tasks.length === 0) return;
+    const settled = await Promise.allSettled(tasks);
+    const items = settled
+      .filter((r): r is PromiseFulfilledResult<ContentItem> => r.status === 'fulfilled')
+      .map(r => r.value);
+    if (items.length > 0) {
+      localContent = [...items, ...localContent];
+      updateHeader();
+      if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
+    }
+    const firstError = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (firstError) {
+      const msg = firstError.reason instanceof Error ? firstError.reason.message : String(firstError.reason);
+      showToast(msg);
+    }
+  }
 
   // Ctrl+V → add to hub
   document.addEventListener('paste', async (e) => {

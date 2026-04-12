@@ -29,7 +29,7 @@
         "visible": false,
         "skipTaskbar": true,
         "shadow": false,
-        "dragDropEnabled": false
+        "dragDropEnabled": true
       },
       {
         "label": "settings",
