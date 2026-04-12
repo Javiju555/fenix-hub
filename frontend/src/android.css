@@ -24,6 +24,9 @@
   --danger-soft: rgba(244, 94, 94, 0.15);
   --green: #4ecb71;
   --green-soft: rgba(78, 203, 113, 0.16);
+  --yellow: #ffc85a;
+  --yellow-soft: rgba(255, 200, 90, 0.15);
+  --red: #f45e5e;
   --radius-xl: 30px;
   --radius-lg: 24px;
   --radius-md: 18px;
@@ -1163,4 +1166,240 @@ textarea {
   color: var(--text-dim);
   font-size: 12px;
   margin-bottom: 16px;
+}
+
+/* ── Mesh Sheet ──────────────────────────────────────────── */
+
+.a-mesh-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.a-mesh-icon {
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+}
+
+.a-mesh-title {
+  flex: 1;
+  font-size: 18px;
+  font-weight: 700;
+  color: white;
+}
+
+.a-mesh-close {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.a-mesh-close:hover {
+  background: var(--panel-strong);
+  color: var(--text);
+}
+
+.a-mesh-hint {
+  color: var(--text-mid);
+  font-size: 13px;
+  text-align: center;
+  margin-bottom: 12px;
+}
+
+.a-mesh-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.a-mesh-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  color: var(--text-mid);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.a-mesh-tab:hover {
+  background: rgba(94, 140, 244, 0.08);
+  color: var(--text);
+}
+
+.a-mesh-tab.active {
+  background: var(--accent-soft);
+  border-color: rgba(94, 140, 244, 0.3);
+  color: var(--accent);
+}
+
+.a-mesh-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 60px;
+  margin-bottom: 16px;
+}
+
+.a-mesh-empty {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 16px 8px;
+}
+
+.a-mesh-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.a-mesh-device-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.a-mesh-device-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: white;
+}
+
+.a-mesh-device-signal {
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+
+.a-mesh-device-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.a-mesh-btn-accept,
+.a-mesh-btn-reject {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.a-mesh-btn-accept {
+  background: rgba(94, 244, 150, 0.15);
+  color: var(--green);
+}
+
+.a-mesh-btn-accept:hover {
+  background: rgba(94, 244, 150, 0.25);
+}
+
+.a-mesh-btn-reject {
+  background: rgba(244, 94, 94, 0.15);
+  color: var(--red);
+}
+
+.a-mesh-btn-reject:hover {
+  background: rgba(244, 94, 94, 0.25);
+}
+
+.a-mesh-device-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.a-mesh-device-badge.pending {
+  background: rgba(255, 200, 90, 0.15);
+  color: var(--yellow);
+}
+
+.a-mesh-device-active {
+  border-color: rgba(94, 244, 150, 0.2);
+  background: rgba(94, 244, 150, 0.05);
+}
+
+.a-mesh-device-pending {
+  border-color: rgba(255, 200, 90, 0.2);
+}
+
+.a-mesh-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.a-btn {
+  width: 100%;
+  padding: 12px;
+  border-radius: 14px;
+  border: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.a-btn-primary {
+  background: var(--accent-gradient);
+  color: white;
+}
+
+.a-btn-primary:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+.a-btn-secondary {
+  background: var(--panel-soft);
+  color: var(--text-mid);
+  border: 1px solid var(--border);
+}
+
+.a-btn-secondary:hover {
+  background: var(--panel-strong);
+  color: var(--text);
+}
+
+.a-btn-danger {
+  background: rgba(244, 94, 94, 0.15);
+  color: var(--red);
+  border: 1px solid rgba(244, 94, 94, 0.3);
+}
+
+.a-btn-danger:hover {
+  background: rgba(244, 94, 94, 0.25);
 }

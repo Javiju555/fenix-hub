@@ -23,6 +23,8 @@ import androidx.core.content.ContextCompat
 import com.fenixhub.mobile.FenixHubApplication
 import com.fenixhub.mobile.MainActivity
 import com.fenixhub.mobile.R
+import com.fenixhub.mobile.model.MeshEvent
+import com.fenixhub.mobile.model.MeshRole
 import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.SendMode
 import com.fenixhub.mobile.network.DirectBlePeer
@@ -63,6 +65,8 @@ class FenixHubService : Service() {
     private val bleDirectController by lazy { container.bleDirectController }
     private val wifiDirectTransferController by lazy { container.wifiDirectTransferController }
     private val hotspotManager by lazy { container.hotspotManager }
+    private val meshManager by lazy { container.meshManager }
+    private var meshHttpServer: FenixHttpServer? = null
 
     private val overlayController by lazy {
         OverlayController(
@@ -96,6 +100,7 @@ class FenixHubService : Service() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var edgeTriggerView: EdgeTriggerView? = null
+    private var meshHttpServer: FenixHttpServer? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -103,6 +108,26 @@ class FenixHubService : Service() {
         accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val wm = getSystemService(WindowManager::class.java)
         edgeTriggerView = EdgeTriggerView(this, wm) { showOverlayIfPermitted() }
+
+        serviceScope.launch {
+            meshManager.events.collect { event ->
+                when (event) {
+                    is MeshEvent.GroupFormed -> {
+                        val state = meshManager.state.value
+                        if (state.role == MeshRole.HOST) {
+                            onMeshActive(state.localContentPool, isHost = true)
+                        }
+                    }
+                    is MeshEvent.MeshDestroyed -> {
+                        stopMeshHttpServer()
+                    }
+                    is MeshEvent.Error -> {
+                        showToast(event.message)
+                    }
+                    else -> {}
+                }
+            }
+        }
     }
 
     override fun onBind(intent: Intent): IBinder = binder
@@ -257,6 +282,54 @@ class FenixHubService : Service() {
      * Obtiene los peers seleccionados.
      */
     val selectedDirectPeers get() = ephemeralSession.selectedPeers
+
+    /**
+     * Obtiene el estado actual del mesh.
+     */
+    val meshState get() = meshManager.state
+
+    /**
+     * Inicia el HTTP server del mesh en la interfaz p2p.
+     * Se llama después de crear el grupo WiFi Direct.
+     */
+    fun startMeshHttpServer(contentIds: List<String>): Int {
+        val server = FenixHttpServer(settingsStore, repository)
+        meshHttpServer = server
+        contentIds.forEach { contentId ->
+            repository.publish(contentId, SendMode.Broadcast)
+        }
+        val port = server.startIfNeededEphemeral()
+        Log.i(TAG, "Mesh HTTP server started on port $port")
+        return port
+    }
+
+    /**
+     * Detiene el HTTP server del mesh.
+     */
+    fun stopMeshHttpServer() {
+        meshHttpServer?.stop()
+        meshHttpServer = null
+        repository.unpublishAll()
+        Log.d(TAG, "Mesh HTTP server stopped, content unpublished")
+    }
+
+    /**
+     * Callback cuando el mesh se activa. Inicia el servidor HTTP con el content pool.
+     */
+    private fun onMeshActive(contentPool: List<String>, isHost: Boolean) {
+        if (!isHost) return
+        serviceScope.launch {
+            try {
+                val port = startMeshHttpServer(contentPool)
+                val localItems = repository.localContent.value.filter { contentPool.contains(it.contentId) }
+                nsdController.syncPublishedContent(localItems, port)
+                showToast("Mesh activo. Publicando ${contentPool.size} contenido(s).")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start mesh HTTP server", e)
+                showToast("Error al iniciar mesh: ${e.message}")
+            }
+        }
+    }
 
     override fun onDestroy() {
         overlayController.dismiss()

@@ -13,6 +13,7 @@ import com.fenixhub.mobile.network.FenixHttpServer
 import com.fenixhub.mobile.network.WifiDirectController
 import com.fenixhub.mobile.network.WifiDirectTransferController
 import com.fenixhub.mobile.service.HotspotManager
+import com.fenixhub.mobile.service.MeshManager
 import com.fenixhub.mobile.util.LocalContentFactory
 
 class FenixHubApplication : Application() {
@@ -33,6 +34,7 @@ class AppContainer(application: Application) {
     val wifiDirectTransferController = WifiDirectTransferController(application)
     val bleDirectController = BleDirectController(application)
     val hotspotManager = HotspotManager(application)
+    val meshManager = MeshManager(application, bleDirectController, wifiDirectTransferController)
     val ephemeralSession: EphemeralDirectSession by lazy {
         EphemeralDirectSession(
             context = application,

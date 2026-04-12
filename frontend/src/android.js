@@ -583,6 +583,7 @@ function renderApp() {
         <div class="a-hero-actions">
           <div class="a-header-actions">
             <button class="a-chip-btn accent" id="btn-clipboard">${iconClipboard(16)} Pegar</button>
+            <button class="a-chip-btn" id="btn-share-all">${iconBroadcast(16)} Todo</button>
             <button class="a-chip-btn" id="btn-overlay">${iconOverlay(16)} Overlay</button>
             <button class="a-chip-btn" id="btn-settings">${iconSettings(16)} Ajustes</button>
           </div>
@@ -625,6 +626,9 @@ function renderApp() {
     document.getElementById('fab-add').addEventListener('click', openAddSheet);
     document.getElementById('btn-clipboard').addEventListener('click', () => {
         void window.androidActions?.pasteClipboard();
+    });
+    document.getElementById('btn-share-all').addEventListener('click', () => {
+        void window.androidActions?.broadcastAll();
     });
     document.getElementById('btn-overlay').addEventListener('click', () => {
         void window.androidActions?.openOverlay();
@@ -1394,6 +1398,19 @@ window.androidActions = {
             showToast(errorMessage(error));
         }
     },
+    async broadcastAll() {
+        try {
+            await invoke('publish_all_local');
+            localContent = localContent.map(item => ({ ...item, is_published: true }));
+            publishedIds = new Set(localContent.map(item => item.id));
+            updateUI();
+            showToast('Todo publicado en la red');
+            await refreshStateIfNative();
+        }
+        catch (error) {
+            showToast(errorMessage(error));
+        }
+    },
 };
 function updateLocalItem(id, mutate) {
     localContent = localContent.map(item => (item.id === id ? mutate(item) : item));
@@ -1521,6 +1538,9 @@ function iconSettings(size) {
 }
 function iconCheck(size) {
     return svg(size, '0 0 20 20', '<polyline points="4.5,10.5 8.2,14.2 15.5,6.8" stroke-width="2"/>');
+}
+function iconBroadcast(size) {
+    return svg(size, '0 0 20 20', '<circle cx="9" cy="5" r="2" fill="none" stroke-width="1.6"/><circle cx="16" cy="5" r="2" fill="none" stroke-width="1.6"/><circle cx="9" cy="12" r="2" fill="none" stroke-width="1.6"/><circle cx="16" cy="12" r="2" fill="none" stroke-width="1.6"/><line x1="10.5" y1="5" x2="14.5" y2="11.5" stroke-width="1.6"/><line x1="14.5" y1="5" x2="10.5" y2="11.5" stroke-width="1.6"/>');
 }
 function typeIcon(type) {
     if (type === 'text') {
