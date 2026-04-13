@@ -1,0 +1,45 @@
+# Commercial License — FenixHub
+
+This file accompanies the AGPL-3.0-only license (`LICENSE`) and describes
+additional rights available to organizations that wish to use FenixHub
+in ways not permitted by AGPL.
+
+---
+
+## Open Source Use
+
+FenixHub is free software under AGPL-3.0-only. You may use, modify, and
+redistribute it under the terms of that license. If you operate a
+network service based on FenixHub, you must release the source code of
+your modifications under the same license.
+
+---
+
+## Commercial Use
+
+Organizations that wish to use FenixHub in proprietary software, private
+deployments, or any context that does not comply with AGPL-3.0 (including
+but not limited to embedding the code into closed-source products, using
+it internally without publishing changes, or building commercial services
+on top of it without sharing modifications) may contact the author to
+negotiate a commercial license.
+
+Reasonable commercial licensing options include:
+
+- **Internal use license** — for companies using FenixHub within their
+  organization without distributing it externally.
+- **Product embedding license** — for embedding FenixHub or derived work
+  into a proprietary product or service offered to end users.
+- **Service provider license** — for operating FenixHub as a network
+  service without the AGPL source disclosure requirement.
+
+Licensing is designed to be simple and fair. Contact to discuss terms.
+
+---
+
+## Contribution
+
+If you contribute code to the FenixHub project (via pull requests,
+patches, or other contributions), you retain your copyright. By submitting
+contributions, you agree that they will be licensed under AGPL-3.0-only
+(and, where applicable, a commercial license granted to the author).

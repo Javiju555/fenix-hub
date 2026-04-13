@@ -21,7 +21,6 @@
 ## 0.2.3 — docs + branding + AGPL (2026-04-12)
 
 - Docs reorganized to `docs/`
-- "Fenix Motion Systems" added to window titles, tray tooltip, Android notification
 - License: AGPL-3.0-only
 - Version bump to 0.2.3
 

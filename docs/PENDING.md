@@ -45,4 +45,3 @@
 ### Preparacion release OSS
 - [ ] CI minima: build desktop + tests Rust + tests Android unitarios en cada PR.
 - [ ] Politica de versionado y changelog de release estable.
-- [x] Historial limpio para repo publico.

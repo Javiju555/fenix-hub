@@ -93,7 +93,6 @@ dependencies {
     implementation("io.ktor:ktor-server-core:2.3.12")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.lambdapioneer.argon2kt:argon2kt:1.4.0")
-    implementation("com.github.luben:zstd-jni:1.5.7-3")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     testImplementation("junit:junit:4.13.2")

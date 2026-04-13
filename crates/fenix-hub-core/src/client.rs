@@ -16,7 +16,7 @@ use crate::identity::GroupIdentity;
 use crate::protocol::{
     canonical_auth_message, AUTH_BODY_SHA256_HEADER, AUTH_NONCE_HEADER, AUTH_TIMESTAMP_HEADER,
     EMPTY_BODY_SHA256_HEX,
-    ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, FNX2_COMPRESSION_NONE, FNX2_COMPRESSION_ZSTD, FNX2_HEADER_SIZE,
+    ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, FNX2_HEADER_SIZE,
     HMAC_HEADER,
 };
 use crate::content::ContentType;
@@ -27,7 +27,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
-use zstd::bulk::decompress;
 
 pub struct PulledContent {
     pub bytes: Vec<u8>,
@@ -295,10 +294,8 @@ pub async fn pull_content_to_file(
         decoder.original_size
     );
 
-    // Open output file and decrypt chunks. If compression is enabled, we decode
-    // after collecting compressed plaintext.
+    // Open output file and decrypt chunks.
     let mut file = File::create(output_path).await?;
-    let mut compressed_plaintext = Vec::new();
     // pending accumulates ciphertext bytes until we have a full encrypted chunk.
     let full_chunk = FNX2_CHUNK_SIZE + 16; // 16 = GCM tag
     let mut pending: Vec<u8> = leftover;
@@ -324,28 +321,11 @@ pub async fn pull_content_to_file(
         }
         pending.extend_from_slice(&chunk);
         let plaintext = flush_pending(&mut pending, &mut decoder, false)?;
-        if decoder.compression == FNX2_COMPRESSION_NONE {
-            file.write_all(&plaintext).await?;
-        } else {
-            compressed_plaintext.extend_from_slice(&plaintext);
-        }
+        file.write_all(&plaintext).await?;
     }
     // Flush final (potentially short) chunk
     let plaintext = flush_pending(&mut pending, &mut decoder, true)?;
-    if decoder.compression == FNX2_COMPRESSION_NONE {
-        file.write_all(&plaintext).await?;
-    } else {
-        compressed_plaintext.extend_from_slice(&plaintext);
-    }
-
-    if decoder.compression != FNX2_COMPRESSION_NONE {
-        let decoded = decode_compressed_payload(
-            compressed_plaintext,
-            decoder.compression,
-            decoder.original_size,
-        )?;
-        file.write_all(&decoded).await?;
-    }
+    file.write_all(&plaintext).await?;
 
     file.flush().await?;
 
@@ -399,32 +379,11 @@ async fn pull_v2_body_to_bytes(
         pos = end;
     }
 
-    let bytes = decode_compressed_payload(decrypted, decoder.compression, decoder.original_size)?;
     tracing::debug!(
         "Pulled {} from {} via FNX2 — {} B",
         content_id,
         peer_ip,
-        bytes.len()
+        decrypted.len()
     );
-    Ok(bytes)
-}
-
-fn decode_compressed_payload(
-    payload: Vec<u8>,
-    compression: u8,
-    original_size: u64,
-) -> Result<Vec<u8>> {
-    match compression {
-        FNX2_COMPRESSION_NONE => Ok(payload),
-        FNX2_COMPRESSION_ZSTD => {
-            let expected = usize::try_from(original_size)
-                .map_err(|_| anyhow::anyhow!("Original size too large for decompression"))?;
-            decompress(&payload, expected)
-                .map_err(|e| anyhow::anyhow!("zstd decompression failed: {}", e))
-        }
-        unknown => Err(anyhow::anyhow!(
-            "Unsupported FNX2 compression mode: {}",
-            unknown
-        )),
-    }
+    Ok(decrypted)
 }
