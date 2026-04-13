@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.7 — experimental Windows native drop interception (2026-04-13)
+
+### Windows — experimental ⚠️ **(no testeada)**
+- Custom `IDropTarget` COM interceptor registered on WebView2 child HWND (`Chrome_RenderWidgetHostHWND`)
+- Disables WebView2 external drop via `SetAllowExternalDrop(false)` on `ICoreWebView2Controller4` (raw COM QI)
+- Extracts `CF_HDROP` (real filesystem files) and `CFSTR_FILEDESCRIPTORW` + `CFSTR_FILECONTENTS` (virtual files: Outlook attachments, cloud-drive shells, ZIP viewers)
+- Virtual files saved to `%TEMP%/fenix-hub-drag/` with timestamp deduplication
+- Frontend notified via `fenix://drag-received` event with `{ paths, source }`
+- **Estado:** implementación completa, compila limpio, sin pruebas reales de uso
+
+---
+
 ## 0.2.6 — overlay UX + drag-drop + FNX2 parsing (2026-04-13)
 
 ### Android overlay
