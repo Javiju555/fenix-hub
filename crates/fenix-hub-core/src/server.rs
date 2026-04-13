@@ -35,7 +35,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, RwLock};
-use zstd::bulk::compress;
 
 use crate::content::{ContentData, ContentItem};
 use crate::crypto::ChunkEncoder;
@@ -43,11 +42,8 @@ use crate::identity::GroupIdentity;
 use crate::protocol::{
     canonical_auth_message, AUTH_BODY_SHA256_HEADER, AUTH_MAX_SKEW_MS, AUTH_NONCE_HEADER,
     AUTH_TIMESTAMP_HEADER, EMPTY_BODY_SHA256_HEX,
-    ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, FNX2_COMPRESSION_NONE, FNX2_COMPRESSION_ZSTD, HMAC_HEADER,
+    ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, HMAC_HEADER,
 };
-
-const COMPRESS_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
-const COMPRESS_MIN_RATIO: f64 = 0.95;
 const MAX_REPLAY_CACHE_ENTRIES: usize = 8_192;
 
 pub type ContentStore = Arc<RwLock<HashMap<String, ContentItem>>>;
@@ -201,7 +197,6 @@ async fn serve_content(
                 &enc_key,
                 total_chunks as u32,
                 item_size,
-                FNX2_COMPRESSION_NONE,
             );
             let header = encoder.header();
 
@@ -245,21 +240,20 @@ async fn serve_content(
             };
 
             let original_size = raw_payload.len() as u64;
-            let (payload, compression) = maybe_compress_payload(item, raw_payload);
+            let payload = raw_payload;
             let transfer_size = payload.len() as u64;
             let total_chunks = (transfer_size / FNX2_CHUNK_SIZE as u64) as u32
                 + if transfer_size % FNX2_CHUNK_SIZE as u64 != 0 { 1 } else { 0 };
 
             let enc_key = state.identity.enc_key();
-            let mut encoder = ChunkEncoder::new(enc_key, total_chunks, original_size, compression);
+            let mut encoder = ChunkEncoder::new(enc_key, total_chunks, original_size);
 
             tracing::debug!(
-                "Serving {} — original={} B transfer={} B chunks={} compression={}",
+                "Serving {} — original={} B transfer={} B chunks={}",
                 id,
                 original_size,
                 transfer_size,
-                total_chunks,
-                compression
+                total_chunks
             );
 
             let mut all_data: Vec<u8> = encoder.header();
@@ -299,77 +293,4 @@ fn unix_time_ms() -> Option<u64> {
             .ok()?
             .as_millis() as u64,
     )
-}
-
-fn maybe_compress_payload(item: &ContentItem, payload: Vec<u8>) -> (Vec<u8>, u8) {
-    if (payload.len() as u64) < COMPRESS_THRESHOLD_BYTES {
-        return (payload, FNX2_COMPRESSION_NONE);
-    }
-    if !is_compressible(item) {
-        return (payload, FNX2_COMPRESSION_NONE);
-    }
-
-    let Ok(compressed) = compress(&payload, 3) else {
-        return (payload, FNX2_COMPRESSION_NONE);
-    };
-
-    let ratio = compressed.len() as f64 / payload.len() as f64;
-    if ratio >= COMPRESS_MIN_RATIO {
-        return (payload, FNX2_COMPRESSION_NONE);
-    }
-
-    (compressed, FNX2_COMPRESSION_ZSTD)
-}
-
-fn is_compressible(item: &ContentItem) -> bool {
-    if let Some(mime) = item.mime_type.as_deref() {
-        if mime.starts_with("video/")
-            || mime.starts_with("audio/")
-            || mime == "application/zip"
-            || mime == "application/x-7z-compressed"
-            || mime == "application/x-rar-compressed"
-            || mime == "application/gzip"
-            || mime == "application/x-xz"
-            || mime == "application/zstd"
-            || mime == "application/vnd.rar"
-            || mime == "application/pdf"
-            || mime == "image/jpeg"
-            || mime == "image/jpg"
-            || mime == "image/webp"
-            || mime == "image/png"
-            || mime == "image/gif"
-            || mime == "image/avif"
-        {
-            return false;
-        }
-    }
-
-    if let Some(name) = item.file_name.as_deref() {
-        let lower = name.to_ascii_lowercase();
-        if lower.ends_with(".zip")
-            || lower.ends_with(".7z")
-            || lower.ends_with(".rar")
-            || lower.ends_with(".gz")
-            || lower.ends_with(".xz")
-            || lower.ends_with(".zst")
-            || lower.ends_with(".jpg")
-            || lower.ends_with(".jpeg")
-            || lower.ends_with(".png")
-            || lower.ends_with(".webp")
-            || lower.ends_with(".gif")
-            || lower.ends_with(".avif")
-            || lower.ends_with(".mp4")
-            || lower.ends_with(".mkv")
-            || lower.ends_with(".mov")
-            || lower.ends_with(".mp3")
-            || lower.ends_with(".aac")
-            || lower.ends_with(".flac")
-            || lower.ends_with(".ogg")
-            || lower.ends_with(".pdf")
-        {
-            return false;
-        }
-    }
-
-    true
 }

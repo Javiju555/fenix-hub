@@ -15,7 +15,7 @@
 ///
 /// `protocol_version` in `Announcement` allows future capability negotiation.
 /// Version 0: legacy, unencrypted. Version 1+: mandatory AES-256-GCM.
-/// Version 2: FNX2 chunked-AEAD wire format. Version 3 (current): zstd compression support.
+/// Version 2: FNX2 chunked-AEAD wire format. Version 3 (current): protocol stable.
 /// Devices running v1+ refuse to pull from peers advertising version 0.
 use crate::content::ContentType;
 use serde::{Deserialize, Serialize};

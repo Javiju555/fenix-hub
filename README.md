@@ -24,11 +24,11 @@ The Android overlay lets you drop content into any app without switching windows
 - Android: native app + overlay + drag-and-drop into overlay
 - LAN encrypted transfer: text, image, file
 - Discovery via mDNS, pull via authenticated HTTP
-- Near mode base: BLE discovery + Wi-Fi Direct discovery on Android
 
 **In progress**
 
 - Full payload transfer over Wi-Fi Direct (near mode without LAN)
+- Android identity/profile parity with desktop
 
 ---
 
@@ -86,7 +86,7 @@ Transfers run at ~30 MB/s — encryption uses hardware acceleration (ring crate)
 
 ## iOS
 
-No functional iOS port. Requires Mac + Xcode + Apple Developer Program ($99/year) + real hardware for testing. When that setup exists, it gets done.
+No functional iOS port. Requires Mac + Xcode + Apple Developer Program ($99/year) + real hardware for testing.
 
 ---
 
@@ -95,5 +95,3 @@ No functional iOS port. Requires Mac + Xcode + Apple Developer Program ($99/year
 [AGPL-3.0-only](LICENSE)
 
 Strong copyleft. Anyone who forks and offers this as a network service must publish their changes under the same terms.
-
-Fenix Motion Systems

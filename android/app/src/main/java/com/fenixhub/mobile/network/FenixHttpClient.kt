@@ -1,6 +1,5 @@
 package com.fenixhub.mobile.network
 
-import com.github.luben.zstd.ZstdInputStream
 import com.fenixhub.mobile.model.AppSettings
 import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.PulledContent
@@ -11,7 +10,6 @@ import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okio.BufferedSource
-import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.security.GeneralSecurityException
 import java.net.URLEncoder
@@ -144,8 +142,6 @@ class FenixHttpClient {
         const val FNX2_HEADER_SIZE = 29
         const val FNX2_CHUNK_SIZE = 64 * 1024
         const val FNX2_GCM_TAG_BYTES = 16
-        const val FNX2_COMPRESSION_NONE = 0x00
-        const val FNX2_COMPRESSION_ZSTD = 0x01
         const val GCM_TAG_BITS = 128
         val FNX2_MAGIC = byteArrayOf('F'.code.toByte(), 'N'.code.toByte(), 'X'.code.toByte(), '2'.code.toByte())
     }
@@ -170,12 +166,11 @@ class FenixHttpClient {
         val baseNonce = header.copyOfRange(4, 16)
         val totalChunks = readIntBE(header, 16)
         val originalSize = readLongBE(header, 20)
-        val compression = header[28].toInt() and 0xff
 
         if (totalChunks < 0) error("Invalid FNX2 total_chunks: $totalChunks")
         if (totalChunks == 0) {
             Log.i(TAG, "Pull complete (FNX2 stream): 0 chunks — ${System.currentTimeMillis() - startMs}ms")
-            return decodeFnx2Compression(ByteArray(0), compression, originalSize)
+            return ByteArray(0)
         }
 
         val fullChunkEncryptedLen = FNX2_CHUNK_SIZE + FNX2_GCM_TAG_BYTES
@@ -219,37 +214,7 @@ class FenixHttpClient {
         val mbps = if (totalMs > 0) (plaintextOut.size().toLong() * 8 / totalMs / 1000.0) else 0.0
         Log.i(TAG, "Pull complete (FNX2 stream): ${kb} KB in ${totalMs}ms (%.1f Mbps)".format(mbps))
 
-        return decodeFnx2Compression(plaintextOut.toByteArray(), compression, originalSize)
-    }
-
-    private fun decodeFnx2Compression(payload: ByteArray, compression: Int, originalSize: Long): ByteArray {
-        return when (compression) {
-            FNX2_COMPRESSION_NONE -> payload
-            FNX2_COMPRESSION_ZSTD -> {
-                val out = ByteArrayOutputStream(payload.size)
-                ByteArrayInputStream(payload).use { input ->
-                    ZstdInputStream(input).use { zstd ->
-                        val buffer = ByteArray(16 * 1024)
-                        while (true) {
-                            val read = zstd.read(buffer)
-                            if (read < 0) {
-                                break
-                            }
-                            if (read == 0) {
-                                continue
-                            }
-                            out.write(buffer, 0, read)
-                        }
-                    }
-                }
-                val decoded = out.toByteArray()
-                if (originalSize >= 0 && decoded.size.toLong() != originalSize) {
-                    error("FNX2 zstd size mismatch: expected $originalSize bytes, got ${decoded.size}")
-                }
-                decoded
-            }
-            else -> error("Unsupported FNX2 compression mode: $compression")
-        }
+        return plaintextOut.toByteArray()
     }
 
     private fun readIntBE(bytes: ByteArray, offset: Int): Int {

@@ -1,5 +1,6 @@
 mod commands;
 mod discovery;
+mod drop_target;
 mod network;
 mod persist;
 mod state;
@@ -53,6 +54,17 @@ pub fn run() {
                 windowing::attach_hub_window_handlers(&window, &app_handle);
             }
             let _ = windowing::show_or_create_hub_window(&app_handle);
+
+            // Register custom Windows drop target on the hub window.
+            // This intercepts drag-and-drop at the HWND level BEFORE WebView2
+            // consumes the IDataObject, enabling virtual file support (Outlook
+            // attachments, cloud-drive shells, ZIP viewers, etc.).
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(win) = app_handle.get_webview_window("hub") {
+                    drop_target::register_fenix_drop_target(&win);
+                }
+            }
 
             // Tray icon menu: left-click opens hub, right-click shows menu.
             let open_item = MenuItem::with_id(app, "open", "Abrir FenixHub", true, None::<&str>)?;
