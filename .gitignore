@@ -8,6 +8,9 @@ src-tauri/icons/
 android/app/src/main/java/personal/
 
 android/local.properties
+android/signing.properties
+packaging/*.jks
+packaging/release-output/
 android/.gradle/
 android/app/build/
 android/build/
