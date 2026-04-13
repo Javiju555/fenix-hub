@@ -47,7 +47,7 @@ rfd = "0.15"
 # Windows clipboard: set CF_PNG directly — avoids JPEG→RGBA8 decode (was 4-5s per image)
 clipboard-win = "5"
 # Native drag-and-drop interception at window level (IDropTarget, IDataObject, CF_HDROP, virtual files)
-windows = { version = "0.58", features = [
+windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Ole",
@@ -58,7 +58,8 @@ windows = { version = "0.58", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
-]}
+] }
+windows-core = "0.61"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # GTK is already a transitive dep of Tauri on Linux; we expose it directly

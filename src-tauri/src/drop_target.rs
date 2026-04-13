@@ -2,37 +2,24 @@
 //! consumes the `IDataObject`.
 
 use std::cell::RefCell;
-use std::ffi::c_void;
-use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::SystemTime;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
-
-use windows::core::w;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINTL};
+use tauri::{AppHandle, Emitter, Manager};
+use windows::core::{implement, w, Interface, BOOL, IUnknownImpl, Result as WinResult};
+use windows::Win32::Foundation::{HWND, LPARAM, POINTL};
 use windows::Win32::System::Com::{
-    DVASPECT_CONTENT, FORMATETC, IDataObject, IStream, STGMEDIUM, TYMED_HGLOBAL, TYMED_ISTREAM,
+    DVASPECT_CONTENT, FORMATETC, IDataObject, IStream, TYMED_HGLOBAL, TYMED_ISTREAM,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{
-    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, IDropTarget, IDropTarget_Vtbl,
+    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl,
     RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop, CF_HDROP,
 };
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::{DragQueryFileW, FILEDESCRIPTORW, FILEGROUPDESCRIPTORW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
-
-// IID_IUnknown
-const IID_IUNKNOWN: windows::core::GUID =
-    windows::core::GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
-// IID_IUnknown alias (same)
-const IID_IUNKNOWN_ALT: windows::core::GUID =
-    windows::core::GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
-// IID_IDropTarget
-const IID_IDROPTARGET: windows::core::GUID =
-    windows::core::GUID::from_u128(0x00000122_0000_0000_c000_000000000046);
 
 // ── Drag-received payload sent to the frontend ──────────────────────────────
 
@@ -58,154 +45,81 @@ fn ensure_virtual_formats_registered() {
     }
 }
 
-// ── Manual COM implementation of IDropTarget ────────────────────────────────
+// ── FenixDropTarget ─────────────────────────────────────────────────────────
 
-/// Raw COM object that implements IDropTarget.
-/// Stored on the heap; lifetime managed by refcount.
-#[repr(C)]
-struct FenixDropTargetRaw {
-    vtable: &'static IDropTarget_Vtbl,
-    refcount: AtomicIsize,
-    app: AppHandle,
+#[implement(IDropTarget)]
+pub struct FenixDropTarget {
+    app: RefCell<AppHandle>,
 }
 
-impl FenixDropTargetRaw {
-    fn new(app: AppHandle) -> *mut Self {
-        Box::into_raw(Box::new(Self {
-            vtable: &VTABLE,
-            refcount: AtomicIsize::new(1),
-            app,
-        }))
-    }
-
-    fn add_ref(this: *mut Self) {
-        unsafe {
-            let old = (*this).refcount.fetch_add(1, Ordering::Relaxed);
-            // Refcount goes 1→2, 2→3, etc.
-            if old == 0 {
-                // Object was being destroyed; restore
-                (*this).refcount.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    fn release(this: *mut Self) -> u32 {
-        unsafe {
-            let old = (*this).refcount.fetch_sub(1, Ordering::AcqRel);
-            if old == 1 {
-                let _ = Box::from_raw(this);
-                return 0;
-            }
-            (old - 1) as u32
+impl FenixDropTarget {
+    pub fn new(app: AppHandle) -> Self {
+        Self {
+            app: RefCell::new(app),
         }
     }
 }
 
-static VTABLE: IDropTarget_Vtbl = IDropTarget_Vtbl {
-    base__: windows::core::IUnknown_Vtbl {
-        QueryInterface: fenix_droptarget_query_interface,
-        AddRef: fenix_droptarget_addref,
-        Release: fenix_droptarget_release,
-    },
-    DragEnter: fenix_droptarget_dragenter,
-    DragOver: fenix_droptarget_dragover,
-    DragLeave: fenix_droptarget_dragleave,
-    Drop: fenix_droptarget_drop,
-};
-
-unsafe extern "system" fn fenix_droptarget_query_interface(
-    this: *mut c_void,
-    iid: *const windows::core::GUID,
-    interface: *mut *mut c_void,
-) -> windows::core::HRESULT {
-    if iid.is_null() || interface.is_null() {
-        return windows::core::HRESULT(-2147467261); // E_POINTER
-    }
-    let iid = &*iid;
-    let this = this as *mut FenixDropTargetRaw;
-
-    if *iid == IID_IUNKNOWN || *iid == IID_IDROPTARGET {
-        *interface = this as *mut c_void;
-        FenixDropTargetRaw::add_ref(this);
-        return windows::core::HRESULT(0); // S_OK
+impl IDropTarget_Impl for FenixDropTarget_Impl {
+    fn DragEnter(
+        &self,
+        pdataobj: windows::core::Ref<'_, IDataObject>,
+        _grfkeystate: MODIFIERKEYS_FLAGS,
+        pt: &POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> WinResult<()> {
+        let data_obj = match pdataobj.as_ref() {
+            Some(obj) => obj,
+            None => {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+                return Ok(());
+            }
+        };
+        if can_accept_drop(data_obj) {
+            unsafe { *pdweffect = DROPEFFECT_COPY };
+        } else {
+            unsafe { *pdweffect = DROPEFFECT_NONE };
+        }
+        let _ = pt;
+        Ok(())
     }
 
-    *interface = std::ptr::null_mut();
-    windows::core::HRESULT(-2147467262) // E_NOINTERFACE
-}
-
-unsafe extern "system" fn fenix_droptarget_addref(this: *mut c_void) -> u32 {
-    FenixDropTargetRaw::add_ref(this as *mut FenixDropTargetRaw);
-    1 // We don't track exact count for simplicity; just ensure > 0
-}
-
-unsafe extern "system" fn fenix_droptarget_release(this: *mut c_void) -> u32 {
-    FenixDropTargetRaw::release(this as *mut FenixDropTargetRaw);
-    0
-}
-
-unsafe extern "system" fn fenix_droptarget_dragenter(
-    this: *mut c_void,
-    pdataobj: *mut c_void,
-    _grfkeystate: MODIFIERKEYS_FLAGS,
-    _pt: POINTL,
-    pdweffect: *mut DROPEFFECT,
-) -> windows::core::HRESULT {
-    let this = &*(this as *mut FenixDropTargetRaw);
-    if pdataobj.is_null() || pdweffect.is_null() {
-        return windows::core::HRESULT(-2147467261);
-    }
-    let data_obj: IDataObject = std::mem::transmute(pdataobj);
-    if can_accept_drop(&data_obj) {
-        *pdweffect = DROPEFFECT_COPY;
-    } else {
-        *pdweffect = DROPEFFECT_NONE;
-    }
-    windows::core::HRESULT(0)
-}
-
-unsafe extern "system" fn fenix_droptarget_dragover(
-    _this: *mut c_void,
-    _grfkeystate: MODIFIERKEYS_FLAGS,
-    _pt: POINTL,
-    pdweffect: *mut DROPEFFECT,
-) -> windows::core::HRESULT {
-    if pdweffect.is_null() {
-        return windows::core::HRESULT(-2147467261);
-    }
-    *pdweffect = DROPEFFECT_COPY;
-    windows::core::HRESULT(0)
-}
-
-unsafe extern "system" fn fenix_droptarget_dragleave(
-    _this: *mut c_void,
-) -> windows::core::HRESULT {
-    windows::core::HRESULT(0)
-}
-
-unsafe extern "system" fn fenix_droptarget_drop(
-    this: *mut c_void,
-    pdataobj: *mut c_void,
-    _grfkeystate: MODIFIERKEYS_FLAGS,
-    _pt: POINTL,
-    pdweffect: *mut DROPEFFECT,
-) -> windows::core::HRESULT {
-    if pdweffect.is_null() {
-        return windows::core::HRESULT(-2147467261);
-    }
-    *pdweffect = DROPEFFECT_COPY;
-
-    if pdataobj.is_null() {
-        return windows::core::HRESULT(0);
+    fn DragOver(
+        &self,
+        _grfkeystate: MODIFIERKEYS_FLAGS,
+        _pt: &POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> WinResult<()> {
+        unsafe { *pdweffect = DROPEFFECT_COPY };
+        Ok(())
     }
 
-    let this = &*(this as *mut FenixDropTargetRaw);
-    let data_obj: IDataObject = std::mem::transmute(pdataobj);
-    let payload = extract_dropped_data(&data_obj);
+    fn DragLeave(&self) -> WinResult<()> {
+        Ok(())
+    }
 
-    let _ = this.app.emit("fenix://drag-received", &payload);
-
-    windows::core::HRESULT(0)
+    fn Drop(
+        &self,
+        pdataobj: windows::core::Ref<'_, IDataObject>,
+        _grfkeystate: MODIFIERKEYS_FLAGS,
+        _pt: &POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> WinResult<()> {
+        let data_obj = match pdataobj.as_ref() {
+            Some(obj) => obj,
+            None => {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+                return Ok(());
+            }
+        };
+        let payload = unsafe { extract_dropped_data(data_obj) };
+        let inner = self.get_impl();
+        if let Ok(app) = inner.app.try_borrow() {
+            let _ = app.emit("fenix://drag-received", &payload);
+        }
+        unsafe { *pdweffect = DROPEFFECT_COPY };
+        Ok(())
+    }
 }
 
 // ── Acceptance check ────────────────────────────────────────────────────────
@@ -219,7 +133,7 @@ fn can_accept_drop(data_obj: &IDataObject) -> bool {
     let cf_desc = unsafe { CF_FILE_DESCRIPTOR };
     if cf_desc != 0 {
         let fmt_desc = FORMATETC {
-            cfFormat: cf_desc,
+            cfFormat: cf_desc as u16,
             ptd: std::ptr::null_mut(),
             dwAspect: DVASPECT_CONTENT.0,
             lindex: -1,
@@ -234,10 +148,10 @@ fn can_accept_drop(data_obj: &IDataObject) -> bool {
 
 // ── Extraction ──────────────────────────────────────────────────────────────
 
-fn extract_dropped_data(data_obj: &IDataObject) -> DragReceivedPayload {
+unsafe fn extract_dropped_data(data_obj: &IDataObject) -> DragReceivedPayload {
     let fmt_hdrop = make_hdrop_fmtetc();
-    if unsafe { data_obj.QueryGetData(&fmt_hdrop) }.is_ok() {
-        if let Ok(paths) = unsafe { extract_hdrop_paths(data_obj) } {
+    if data_obj.QueryGetData(&fmt_hdrop).is_ok() {
+        if let Ok(paths) = extract_hdrop_paths(data_obj) {
             if !paths.is_empty() {
                 return DragReceivedPayload {
                     paths,
@@ -246,7 +160,7 @@ fn extract_dropped_data(data_obj: &IDataObject) -> DragReceivedPayload {
             }
         }
     }
-    if let Some(virtual_files) = unsafe { extract_virtual_files(data_obj) } {
+    if let Some(virtual_files) = extract_virtual_files(data_obj) {
         if !virtual_files.is_empty() {
             return DragReceivedPayload {
                 paths: virtual_files,
@@ -270,9 +184,9 @@ fn make_hdrop_fmtetc() -> FORMATETC {
     }
 }
 
-unsafe fn extract_hdrop_paths(data_obj: &IDataObject) -> windows::core::Result<Vec<String>> {
-    let mut medium = STGMEDIUM::default();
-    data_obj.GetData(&make_hdrop_fmtetc(), &mut medium)?;
+unsafe fn extract_hdrop_paths(data_obj: &IDataObject) -> WinResult<Vec<String>> {
+    let fmt = make_hdrop_fmtetc();
+    let mut medium = data_obj.GetData(&fmt)?;
     let hdrop = HDROP(medium.u.hGlobal.0 as _);
     let count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
     let mut paths = Vec::with_capacity(count as usize);
@@ -303,16 +217,13 @@ unsafe fn extract_virtual_files(data_obj: &IDataObject) -> Option<Vec<String>> {
     }
 
     let fmt_desc = FORMATETC {
-        cfFormat: cf_desc,
+        cfFormat: cf_desc as u16,
         ptd: std::ptr::null_mut(),
         dwAspect: DVASPECT_CONTENT.0,
         lindex: -1,
         tymed: TYMED_HGLOBAL.0 as u32,
     };
-    let mut medium = STGMEDIUM::default();
-    if data_obj.GetData(&fmt_desc, &mut medium).is_err() {
-        return None;
-    }
+    let mut medium = data_obj.GetData(&fmt_desc).ok()?;
 
     let hglobal = medium.u.hGlobal;
     let lock_ptr = GlobalLock(hglobal);
@@ -323,49 +234,48 @@ unsafe fn extract_virtual_files(data_obj: &IDataObject) -> Option<Vec<String>> {
 
     let group = &*(lock_ptr as *const FILEGROUPDESCRIPTORW);
     let count = group.cItems;
-    let descriptors: &[FILEDESCRIPTORW] = std::slice::from_raw_parts(
-        (lock_ptr as *const FILEDESCRIPTORW).add(1),
-        count as usize,
-    );
+    let descriptors_start = (lock_ptr as *const FILEDESCRIPTORW).add(1);
 
     let temp_dir = std::env::temp_dir().join("fenix-hub-drag");
     let _ = std::fs::create_dir_all(&temp_dir);
     let mut saved_paths = Vec::with_capacity(count as usize);
 
-    for (index, desc) in descriptors.iter().enumerate() {
-        let name_len = desc
-            .cFileName
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(desc.cFileName.len());
-        let name = String::from_utf16_lossy(&desc.cFileName[..name_len]);
+    for index in 0..count as usize {
+        // FILEDESCRIPTORW is packed — use raw pointers for field access
+        let desc_ptr = unsafe { descriptors_start.add(index) };
+        let c_file_name: [u16; 260] = unsafe {
+            std::ptr::read_unaligned(std::ptr::addr_of!((*desc_ptr).cFileName))
+        };
+        let name_len = c_file_name.iter().position(|&c| c == 0).unwrap_or(c_file_name.len());
+        let name = String::from_utf16_lossy(&c_file_name[..name_len]);
         if name.is_empty() {
             continue;
         }
 
         let fmt_content = FORMATETC {
-            cfFormat: cf_content,
+            cfFormat: cf_content as u16,
             ptd: std::ptr::null_mut(),
             dwAspect: DVASPECT_CONTENT.0,
             lindex: index as i32,
             tymed: TYMED_ISTREAM.0 as u32,
         };
-        let mut medium_content = STGMEDIUM::default();
-        if data_obj.GetData(&fmt_content, &mut medium_content).is_ok()
-            && medium_content.tymed == TYMED_ISTREAM.0 as u32
-        {
-            let stream: IStream = (*medium_content.u.pstm).clone();
-            let data = read_istream_to_vec(&stream).unwrap_or_default();
-            let unique_name = dedup_file_name(&name, &temp_dir);
-            let save_path = temp_dir.join(&unique_name);
-            if std::fs::write(&save_path, &data).is_ok() {
-                saved_paths.push(save_path.to_string_lossy().to_string());
+        if let Ok(mut medium_content) = data_obj.GetData(&fmt_content) {
+            if medium_content.tymed == TYMED_ISTREAM.0 as u32 {
+                let pstm_ptr = &medium_content.u.pstm as *const _ as *const Option<IStream>;
+                if let Some(stream) = (*pstm_ptr).as_ref() {
+                    let data = read_istream_to_vec(stream).unwrap_or_default();
+                    let unique_name = dedup_file_name(&name, &temp_dir);
+                    let save_path = temp_dir.join(&unique_name);
+                    if std::fs::write(&save_path, &data).is_ok() {
+                        saved_paths.push(save_path.to_string_lossy().to_string());
+                    }
+                }
+                ReleaseStgMedium(&mut medium_content);
             }
-            ReleaseStgMedium(&mut medium_content);
         }
     }
 
-    GlobalUnlock(hglobal);
+    let _ = GlobalUnlock(hglobal);
     ReleaseStgMedium(&mut medium);
 
     if saved_paths.is_empty() {
@@ -375,12 +285,19 @@ unsafe fn extract_virtual_files(data_obj: &IDataObject) -> Option<Vec<String>> {
     }
 }
 
-fn read_istream_to_vec(stream: &IStream) -> windows::core::Result<Vec<u8>> {
+fn read_istream_to_vec(stream: &IStream) -> WinResult<Vec<u8>> {
     let mut data = Vec::new();
     let mut buf = [0u8; 8192];
     loop {
         let mut read = 0u32;
-        stream.Read(&mut buf, Some(&mut read))?;
+        let hr = unsafe {
+            stream.Read(
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len() as u32,
+                Some(&mut read),
+            )
+        };
+        hr.ok()?;
         if read == 0 {
             break;
         }
@@ -421,10 +338,10 @@ thread_local! {
 
 pub fn find_webview2_hwnd(parent: HWND) -> Option<HWND> {
     FOUND_HWND.with(|r| *r.borrow_mut() = None);
-    unsafe {
-        EnumChildWindows(parent, Some(enum_child_proc), LPARAM(0));
-    }
-    FOUND_HWND.with(|r| *r.borrow())
+    let _ = unsafe {
+        EnumChildWindows(Some(parent), Some(enum_child_proc), LPARAM(0))
+    };
+    FOUND_HWND.with(|r: &RefCell<Option<HWND>>| *r.borrow())
 }
 
 unsafe extern "system" fn enum_child_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
@@ -453,48 +370,52 @@ pub fn register_fenix_drop_target(window: &tauri::WebviewWindow) {
     {
         // Step 1: Disable WebView2's built-in external drop handler via raw COM.
         let _ = window.with_webview(|webview| {
-            let controller_raw = webview.controller();
-            if controller_raw.is_null() {
-                tracing::warn!("WebView2 controller is null — external drop may not be intercepted");
+            let controller = webview.controller();
+            // ICoreWebView2Controller4 IID
+            let iid = windows::core::GUID::from_u128(0x3191c66b_9f7b_4d7b_9d35_93cb9d2d766d);
+
+            let raw = Interface::as_raw(&controller) as *mut std::ffi::c_void;
+            if raw.is_null() {
+                tracing::warn!("WebView2 controller raw pointer is null");
                 return;
             }
 
-            // IID_ICoreWebView2Controller4
-            let iid = windows::core::GUID::from_u128(0x3191c66b_9f7b_4d7b_9d35_93cb9d2d766d);
+            // QI for ICoreWebView2Controller4
             let mut ppv: *mut std::ffi::c_void = std::ptr::null_mut();
-
-            // QI for ICoreWebView2Controller4 from the raw IUnknown pointer
             let hr = unsafe {
-                let iunknown = &*(controller_raw as *const *const *const std::ffi::c_void);
+                let vtable = &*(raw as *const *const *const std::ffi::c_void);
                 let qi: unsafe extern "system" fn(
                     *mut std::ffi::c_void,
                     *const windows::core::GUID,
                     *mut *mut std::ffi::c_void,
-                ) -> windows::core::HRESULT = std::mem::transmute((*iunknown)[0]);
-                qi(controller_raw as *mut std::ffi::c_void, &iid, &mut ppv)
+                ) -> windows::core::HRESULT = std::mem::transmute(
+                    (*vtable).wrapping_add(0).read()
+                );
+                qi(raw, &iid, &mut ppv)
             };
 
             if hr.is_err() || ppv.is_null() {
                 tracing::debug!(
-                    "QI for ICoreWebView2Controller4 failed (hr={hr:?}) — proceeding without SetAllowExternalDrop"
+                    "QI for ICoreWebView2Controller4 failed (hr={hr:?})"
                 );
                 return;
             }
 
             // SetAllowExternalDrop(BOOL) is vtable slot 8 on ICoreWebView2Controller4
             let set_hr = unsafe {
-                type SetFn =
-                    unsafe extern "system" fn(*mut std::ffi::c_void, i32) -> windows::core::HRESULT;
+                type SetFn = unsafe extern "system" fn(*mut std::ffi::c_void, i32) -> windows::core::HRESULT;
                 let vtable = &*(ppv as *const *const *const std::ffi::c_void);
-                let func: SetFn = std::mem::transmute((*vtable)[8]);
-                func(ppv, 0) // FALSE = disable
+                let func: SetFn = std::mem::transmute(
+                    (*vtable).wrapping_add(8).read()
+                );
+                func(ppv, 0) // FALSE
             };
 
             // Release the QI'd pointer
             unsafe {
                 let vtable = &*(ppv as *const *const *const std::ffi::c_void);
                 let release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32 =
-                    std::mem::transmute((*vtable)[2]);
+                    std::mem::transmute((*vtable).wrapping_add(2).read());
                 release(ppv);
             }
 
@@ -507,7 +428,7 @@ pub fn register_fenix_drop_target(window: &tauri::WebviewWindow) {
 
         // Step 2: Find the WebView2 child HWND
         let parent_hwnd = match window.hwnd() {
-            Ok(h) => HWND(h as *mut _),
+            Ok(h) => h,
             Err(_) => {
                 tracing::warn!("Cannot get window HWND — drop interception disabled");
                 return;
@@ -525,14 +446,8 @@ pub fn register_fenix_drop_target(window: &tauri::WebviewWindow) {
         // Step 3: Revoke any existing drop target, then register ours
         let _ = unsafe { RevokeDragDrop(child_hwnd) };
 
-        let drop_target_ptr = FenixDropTargetRaw::new(window.app_handle().clone());
-
-        // RegisterDragDrop takes ownership of an AddRef'd IDropTarget pointer
-        if let Err(e) = unsafe {
-            RegisterDragDrop(child_hwnd, &IDropTarget::from_raw_borrowed(&drop_target_ptr))
-        } {
-            // Registration failed — release our reference
-            FenixDropTargetRaw::release(drop_target_ptr);
+        let drop_target: IDropTarget = FenixDropTarget::new(window.app_handle().clone()).into();
+        if let Err(e) = unsafe { RegisterDragDrop(child_hwnd, &drop_target) } {
             tracing::warn!("Failed to register custom drop target: {e:?}");
         } else {
             tracing::info!("FenixDropTarget registered on WebView2 child HWND");
