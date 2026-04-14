@@ -6,6 +6,7 @@ data class MeshDevice(
     val rssi: Int = 0,
     val status: MeshDeviceStatus = MeshDeviceStatus.PENDING,
     val joinedAt: Long? = null,
+    val meshId: String? = null,
 )
 
 enum class MeshDeviceStatus {

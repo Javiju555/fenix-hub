@@ -53,7 +53,10 @@ class MeshManager(
         data object StartAsDevice : MeshCommand()
         data class AcceptDevice(val deviceId: String) : MeshCommand()
         data class RejectDevice(val deviceId: String) : MeshCommand()
+        data class ExpelDevice(val deviceId: String) : MeshCommand()
         data class RequestJoin(val hostMeshId: String, val hostName: String) : MeshCommand()
+        data object ModalOpened : MeshCommand()
+        data object ModalClosed : MeshCommand()
         data object CancelDiscovery : MeshCommand()
         data object CloseModal : MeshCommand()
         data object LeaveMesh : MeshCommand()
@@ -69,7 +72,10 @@ class MeshManager(
                     is MeshCommand.StartAsDevice -> startAsDevice()
                     is MeshCommand.AcceptDevice -> acceptDevice(command.deviceId)
                     is MeshCommand.RejectDevice -> rejectDevice(command.deviceId)
+                    is MeshCommand.ExpelDevice -> expelDevice(command.deviceId)
                     is MeshCommand.RequestJoin -> requestJoin(command.hostMeshId, command.hostName)
+                    is MeshCommand.ModalOpened -> onModalOpened()
+                    is MeshCommand.ModalClosed -> onModalClosed()
                     is MeshCommand.CancelDiscovery -> cancelDiscovery()
                     is MeshCommand.CloseModal -> closeModal()
                     is MeshCommand.LeaveMesh -> leaveMesh()
@@ -118,27 +124,46 @@ class MeshManager(
         startBleMeshDiscovery()
     }
 
-    private suspend fun startBleMeshDiscovery() {
+    private suspend fun startBleMeshDiscovery(timeoutMs: Long = MESH_TIMEOUT_MS) {
         bleBridge = MeshBleBridge(context, this)
-        bleBridge?.startMeshDiscovery(_state.value.meshId)
+        bleBridge?.startMeshDiscovery(
+            meshId = _state.value.meshId,
+            asHost = _state.value.role == MeshRole.HOST,
+        )
         bleDiscoveryJob?.cancel()
+        if (timeoutMs <= 0L) {
+            bleDiscoveryJob = null
+            return
+        }
         bleDiscoveryJob = scope.launch {
-            var timeoutMs = MESH_TIMEOUT_MS
-            while (timeoutMs > 0 && _state.value.status == MeshStatus.DISCOVERING) {
+            var remaining = timeoutMs
+            while (remaining > 0 && _state.value.status == MeshStatus.DISCOVERING) {
                 delay(1000)
-                timeoutMs -= 1000
+                remaining -= 1000
                 if (_state.value.status != MeshStatus.DISCOVERING) break
             }
             if (_state.value.status == MeshStatus.DISCOVERING) {
-                val currentState = _state.value
-                if (currentState.role == MeshRole.HOST && currentState.pendingDevices.isNotEmpty()) {
-                    closeModal()
-                } else if (currentState.role == MeshRole.DEVICE && currentState.pendingDevices.isNotEmpty()) {
-                    closeModal()
-                } else {
-                    cancelDiscovery()
-                }
+                cancelDiscovery()
             }
+        }
+    }
+
+    private suspend fun onModalOpened() {
+        val current = _state.value
+        if (current.role == MeshRole.HOST && (current.status == MeshStatus.ACTIVE || current.status == MeshStatus.TRANSFERRING)) {
+            startBleMeshDiscovery(timeoutMs = 0)
+        }
+    }
+
+    private suspend fun onModalClosed() {
+        val current = _state.value
+        bleDiscoveryJob?.cancel()
+        bleDiscoveryJob = null
+        bleBridge?.stopMeshDiscovery()
+        bleBridge = null
+
+        if (current.status == MeshStatus.DISCOVERING || current.status == MeshStatus.PENDING) {
+            cancelDiscovery()
         }
     }
 
@@ -151,8 +176,20 @@ class MeshManager(
         if (index == -1) return
 
         val device = pending[index]
-        pending[index] = device.copy(status = MeshDeviceStatus.CONNECTED, joinedAt = System.currentTimeMillis())
-        _state.value = current.copy(pendingDevices = pending)
+        val connected = device.copy(status = MeshDeviceStatus.CONNECTED, joinedAt = System.currentTimeMillis())
+
+        if (current.status == MeshStatus.ACTIVE || current.status == MeshStatus.TRANSFERRING) {
+            pending.removeAt(index)
+            val active = (current.activeDevices + connected).distinctBy { it.id }
+            _state.value = current.copy(
+                pendingDevices = pending,
+                activeDevices = active,
+            )
+            renegotiatePassphraseForActiveGroup()
+        } else {
+            pending[index] = connected
+            _state.value = current.copy(pendingDevices = pending)
+        }
         _events.emit(MeshEvent.DeviceAccepted(deviceId))
     }
 
@@ -165,22 +202,63 @@ class MeshManager(
         _events.emit(MeshEvent.DeviceRejected(deviceId))
     }
 
+    private suspend fun expelDevice(deviceId: String) {
+        val current = _state.value
+        if (current.role != MeshRole.HOST) return
+        if (current.status != MeshStatus.ACTIVE && current.status != MeshStatus.TRANSFERRING) return
+
+        val nextActive = current.activeDevices.filterNot { it.id == deviceId }
+        val nextPending = current.pendingDevices.filterNot { it.id == deviceId }
+        if (nextActive.size == current.activeDevices.size && nextPending.size == current.pendingDevices.size) {
+            return
+        }
+
+        _state.value = current.copy(
+            activeDevices = nextActive,
+            pendingDevices = nextPending,
+        )
+        _events.emit(MeshEvent.DeviceExpelled(deviceId))
+        renegotiatePassphraseForActiveGroup()
+    }
+
     private suspend fun requestJoin(hostMeshId: String, hostName: String) {
         val current = _state.value
         if (current.role != MeshRole.DEVICE) return
+        if (current.status != MeshStatus.DISCOVERING) return
+        if (hostMeshId.isBlank()) return
 
-        val deviceId = UUID.randomUUID().toString().take(8)
-        val device = MeshDevice(
-            id = deviceId,
+        val host = current.pendingDevices.firstOrNull { it.meshId == hostMeshId } ?: MeshDevice(
+            id = UUID.randomUUID().toString().take(8),
             name = hostName,
+            rssi = 0,
             status = MeshDeviceStatus.PENDING,
-            joinedAt = System.currentTimeMillis(),
-        )
-        _state.value = current.copy(
             meshId = hostMeshId,
-            pendingDevices = listOf(device),
         )
-        _events.emit(MeshEvent.DeviceAccepted(deviceId))
+
+        bleDiscoveryJob?.cancel()
+        bleDiscoveryJob = null
+        bleBridge?.stopMeshDiscovery()
+        bleBridge = null
+
+        _state.value = current.copy(
+            status = MeshStatus.PENDING,
+            meshId = hostMeshId,
+            pendingDevices = listOf(host),
+        )
+
+        // Publicar solicitud de unión por BLE y escuchar passphrase cifrada del host.
+        startPassphraseReceive(hostMeshId)
+    }
+
+    private fun renegotiatePassphraseForActiveGroup() {
+        val current = _state.value
+        if (current.role != MeshRole.HOST) return
+        if (current.status != MeshStatus.ACTIVE && current.status != MeshStatus.TRANSFERRING) return
+
+        val passphrase = generatePassphrase()
+        _state.value = current.copy(passphrase = passphrase)
+        startPassphraseExchange(passphrase)
+        Log.i(TAG, "Mesh passphrase renegotiated for active group")
     }
 
     private suspend fun cancelDiscovery() {
@@ -206,7 +284,12 @@ class MeshManager(
         bleBridge = null
 
         if (current.role == MeshRole.HOST) {
-            if (current.pendingDevices.isEmpty() && current.activeDevices.isEmpty()) {
+            if (current.status != MeshStatus.DISCOVERING) {
+                return
+            }
+
+            val accepted = current.pendingDevices.filter { it.status == MeshDeviceStatus.CONNECTED }
+            if (accepted.isEmpty()) {
                 _state.value = MeshState()
                 return
             }
@@ -215,25 +298,14 @@ class MeshManager(
             _state.value = current.copy(
                 status = MeshStatus.FORMING,
                 passphrase = passphrase,
-                activeDevices = current.pendingDevices.map {
-                    it.copy(status = MeshDeviceStatus.CONNECTED, joinedAt = System.currentTimeMillis())
-                },
+                activeDevices = accepted,
                 pendingDevices = emptyList(),
             )
 
             startPassphraseExchange(passphrase)
             formWifiDirectGroup()
         } else if (current.role == MeshRole.DEVICE) {
-            if (current.pendingDevices.isEmpty()) {
-                _state.value = MeshState()
-                return
-            }
-
-            bleExchange?.stop()
-            bleExchange = null
-
-            _state.value = current.copy(status = MeshStatus.FORMING)
-            _events.emit(MeshEvent.GroupFormed(current.meshId ?: "unknown"))
+            cancelDiscovery()
         }
     }
 
@@ -267,11 +339,15 @@ class MeshManager(
             isHost = false,
             listener = object : MeshPassphraseListener {
                 override fun onPassphraseReceived(exchange: MeshPassphraseExchange) {
+                    if (exchange.encryptedPassphrase.isBlank()) {
+                        return
+                    }
                     scope.launch {
                         handlePassphraseReceived(exchange)
                     }
                 }
             },
+            discoveryMode = true,
         )
         bleExchange?.start()
     }
@@ -279,6 +355,9 @@ class MeshManager(
     private suspend fun handlePassphraseReceived(exchange: MeshPassphraseExchange) {
         val meshId = _state.value.meshId ?: return
         val passphrase = decryptPassphrase(exchange.encryptedPassphrase, meshId) ?: return
+
+        bleExchange?.stop()
+        bleExchange = null
 
         _state.value = _state.value.copy(
             passphrase = passphrase,
@@ -365,19 +444,22 @@ class MeshManager(
         _events.emit(MeshEvent.MeshDestroyed)
     }
 
-    fun onBleDeviceFound(deviceId: String, deviceName: String, rssi: Int, meshId: String?) {
+    fun onBleDeviceFound(deviceId: String, deviceName: String, rssi: Int, meshId: String?, role: MeshBleRole) {
         val current = _state.value
-        if (current.status != MeshStatus.DISCOVERING) return
 
         val newDevice = MeshDevice(
             id = deviceId,
             name = deviceName,
             rssi = rssi,
             status = MeshDeviceStatus.PENDING,
+            meshId = meshId,
         )
 
         when (current.role) {
             MeshRole.HOST -> {
+                if (current.status != MeshStatus.DISCOVERING && current.status != MeshStatus.ACTIVE && current.status != MeshStatus.TRANSFERRING) return
+                if (role != MeshBleRole.DEVICE) return
+
                 val exists = current.pendingDevices.any { it.id == deviceId } ||
                     current.activeDevices.any { it.id == deviceId }
                 if (!exists && current.pendingDevices.size + current.activeDevices.size < current.maxDevices) {
@@ -388,12 +470,14 @@ class MeshManager(
                 }
             }
             MeshRole.DEVICE -> {
+                if (current.status != MeshStatus.DISCOVERING) return
+                if (role != MeshBleRole.HOST) return
                 if (current.meshId == null && meshId != null) {
                     val exists = current.pendingDevices.any { it.id == deviceId }
                     if (!exists) {
                         _state.value = current.copy(
                             pendingDevices = current.pendingDevices + newDevice.copy(
-                                name = "$deviceName ($meshId)",
+                                name = deviceName,
                             ),
                         )
                         scope.launch { _events.emit(MeshEvent.DeviceDiscovered(newDevice)) }
@@ -406,12 +490,15 @@ class MeshManager(
 
     fun onBleDeviceLost(deviceId: String) {
         val current = _state.value
-        if (current.status != MeshStatus.DISCOVERING) return
+        if (current.status != MeshStatus.DISCOVERING && current.status != MeshStatus.ACTIVE && current.status != MeshStatus.TRANSFERRING) return
 
         if (current.role == MeshRole.HOST) {
             val pending = current.pendingDevices.filterNot { it.id == deviceId }
             val active = current.activeDevices.filterNot { it.id == deviceId }
             _state.value = current.copy(pendingDevices = pending, activeDevices = active)
+            if (active.size != current.activeDevices.size) {
+                renegotiatePassphraseForActiveGroup()
+            }
         }
     }
 
