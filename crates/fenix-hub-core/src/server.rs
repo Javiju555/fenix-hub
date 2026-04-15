@@ -219,12 +219,29 @@ async fn serve_content(
                 let mut buf = vec![0u8; FNX2_CHUNK_SIZE];
                 loop {
                     use tokio::io::AsyncReadExt;
-                    let n = file.read(&mut buf).await
-                        .map_err(|e| -> BoxError { Box::new(e) })?;
-                    if n == 0 { break; }
-                    let encrypted = encoder.encrypt_chunk(&buf[..n])
+                    // Read exactly one logical FNX2 chunk unless EOF is reached.
+                    let mut read_total = 0usize;
+                    while read_total < FNX2_CHUNK_SIZE {
+                        let n = file.read(&mut buf[read_total..]).await
+                            .map_err(|e| -> BoxError { Box::new(e) })?;
+                        if n == 0 {
+                            break;
+                        }
+                        read_total += n;
+                    }
+
+                    if read_total == 0 {
+                        break;
+                    }
+
+                    let encrypted = encoder.encrypt_chunk(&buf[..read_total])
                         .map_err(|e| -> BoxError { e.to_string().into() })?;
                     yield bytes::Bytes::from(encrypted);
+
+                    // EOF reached mid-chunk: this was the last chunk.
+                    if read_total < FNX2_CHUNK_SIZE {
+                        break;
+                    }
                 }
             });
 

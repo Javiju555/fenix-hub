@@ -139,6 +139,10 @@ fn nearest_hub_preset(logical_width: f64, logical_height: f64) -> (f64, f64) {
 }
 
 fn enforce_hub_window_constraints(window: &WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = window.set_skip_taskbar(true);
+    }
     let _ = window.set_always_on_top(true);
     let _ = window.set_resizable(false);
     let _ = window.set_maximizable(false);

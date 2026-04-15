@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 /// Tauri IPC commands — callable from the frontend via invoke().
-use std::time::{Duration, Instant};
+#[cfg(not(target_os = "windows"))]
+use std::path::Path;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+use std::time::{Duration, Instant, SystemTime};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
@@ -22,6 +26,10 @@ const MAX_ANNOUNCEMENT_FILE_NAME_CHARS: usize = 80;
 const MIN_ANNOUNCEMENT_PREVIEW_CHARS: usize = 24;
 const MAX_PUBLISH_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const SERVER_GUARD_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const RECEIVED_CACHE_MAX_FILES: usize = 25;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 // ── Identity ──────────────────────────────────────────────────────────────────
 
@@ -536,10 +544,12 @@ fn wifi_direct_transport_details() -> TransportRadioDetails {
 
 #[cfg(target_os = "windows")]
 fn windows_script_lines(script: &str) -> (Vec<String>, Option<String>) {
-    let output = match std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-    {
+    let mut command = std::process::Command::new("powershell");
+    command
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-NoProfile", "-NonInteractive", "-Command", script]);
+
+    let output = match command.output() {
         Ok(output) => output,
         Err(error) => return (Vec::new(), Some(error.to_string())),
     };
@@ -1118,10 +1128,7 @@ pub async fn save_local_content_as(
 /// Returns the temp path where a received peer file is cached.
 /// `~/.cache/fenix-hub/received/<content_id>[.<ext>]`
 fn peer_received_path(content_id: &str, announcement: &Announcement) -> std::path::PathBuf {
-    let dir = dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("fenix-hub")
-        .join("received");
+    let dir = received_cache_dir();
     let _ = std::fs::create_dir_all(&dir);
 
     // Derive extension from the file name or MIME type.
@@ -1149,6 +1156,51 @@ fn peer_received_path(content_id: &str, announcement: &Announcement) -> std::pat
     match ext {
         Some(e) => dir.join(format!("{content_id}.{e}")),
         None => dir.join(content_id),
+    }
+}
+
+fn received_cache_dir() -> std::path::PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("fenix-hub")
+        .join("received")
+}
+
+fn prune_received_cache_fifo(max_files: usize) {
+    let dir = received_cache_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    let mut files: Vec<(SystemTime, std::path::PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_file() {
+                return None;
+            }
+
+            let path = entry.path();
+            let metadata = entry.metadata().ok()?;
+            let timestamp = metadata
+                .modified()
+                .or_else(|_| metadata.created())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            Some((timestamp, path))
+        })
+        .collect();
+
+    if files.len() <= max_files {
+        return;
+    }
+
+    files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let remove_count = files.len().saturating_sub(max_files);
+    for (_, path) in files.into_iter().take(remove_count) {
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::warn!("Failed to remove old received cache file {:?}: {}", path, error);
+        }
     }
 }
 
@@ -1208,6 +1260,7 @@ async fn ensure_peer_cached(
         )
         .await
         .map_err(|e| e.to_string())?;
+        prune_received_cache_fifo(RECEIVED_CACHE_MAX_FILES);
         fenix_hub_core::client::PulledContent {
             bytes: vec![],
             file_path: Some(temp_path.clone()),
@@ -1223,6 +1276,7 @@ async fn ensure_peer_cached(
             tracing::warn!("Failed to cache {content_id} to {:?}: {e}", temp_path);
         } else {
             tracing::debug!("Cached {content_id} → {:?}", temp_path);
+            prune_received_cache_fifo(RECEIVED_CACHE_MAX_FILES);
         }
         p
     };
@@ -1792,10 +1846,7 @@ fn announcement_preview_fallback(announcement: &Announcement) -> String {
 /// Delete all files in the peer received cache (~/.cache/fenix-hub/received/).
 #[tauri::command]
 pub fn clear_received_cache() -> Result<(), String> {
-    let dir = dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("fenix-hub")
-        .join("received");
+    let dir = received_cache_dir();
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
     }
@@ -1821,10 +1872,8 @@ pub async fn reset_all_data(state: State<'_, HubState>) -> Result<(), String> {
         }
     }
     // Remove received cache
-    if let Ok(received_dir) = dirs::cache_dir()
-        .ok_or("no cache dir")
-        .map(|d| d.join("fenix-hub").join("received"))
     {
+        let received_dir = received_cache_dir();
         if received_dir.exists() {
             std::fs::remove_dir_all(&received_dir).ok();
         }
