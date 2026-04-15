@@ -35,15 +35,19 @@ class SetupViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var groupIdPreview by mutableStateOf("")
         private set
+    var validationError by mutableStateOf<String?>(null)
+        private set
     var isSaving by mutableStateOf(false)
         private set
 
     fun onDeviceNameChange(value: String) {
         deviceName = value
+        validationError = null
     }
 
     fun onPassphraseChange(value: String) {
         passphrase = value
+        validationError = null
         if (value.isBlank()) {
             derivePreviewJob?.cancel()
             groupIdPreview = ""
@@ -62,11 +66,28 @@ class SetupViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveIdentity() {
-        if (deviceName.isBlank() || passphrase.isBlank() || isSaving) return
+        if (isSaving) return
+
+        if (deviceName.isBlank()) {
+            validationError = "El nombre del dispositivo es obligatorio"
+            return
+        }
+
+        CryptoUtils.validatePassphraseStrength(passphrase)?.let { message ->
+            validationError = message
+            return
+        }
+
         viewModelScope.launch {
             isSaving = true
-            withContext(Dispatchers.Default) {
-                settingsStore.saveIdentity(passphrase, deviceName)
+            runCatching {
+                withContext(Dispatchers.Default) {
+                    settingsStore.saveIdentity(passphrase, deviceName)
+                }
+            }.onFailure { error ->
+                validationError = error.message ?: "No se pudo guardar la identidad"
+            }.onSuccess {
+                validationError = null
             }
             isSaving = false
         }

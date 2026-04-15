@@ -1,5 +1,7 @@
 mod commands;
 mod discovery;
+#[cfg(target_os = "windows")]
+mod drop_target;
 mod network;
 mod persist;
 mod state;
@@ -48,12 +50,22 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let state = app.state::<state::HubState>();
             temp_store::prepare().ok();
-            windowing::ensure_keepalive_window(&app_handle).ok();
 
             if let Some(window) = app_handle.get_webview_window("hub") {
                 windowing::attach_hub_window_handlers(&window, &app_handle);
             }
             let _ = windowing::show_or_create_hub_window(&app_handle);
+
+            // Register custom Windows drop target on the hub window.
+            // This intercepts drag-and-drop at the HWND level BEFORE WebView2
+            // consumes the IDataObject, enabling virtual file support (Outlook
+            // attachments, cloud-drive shells, ZIP viewers, etc.).
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(win) = app_handle.get_webview_window("hub") {
+                    drop_target::register_fenix_drop_target(&win);
+                }
+            }
 
             // Tray icon menu: left-click opens hub, right-click shows menu.
             let open_item = MenuItem::with_id(app, "open", "Abrir FenixHub", true, None::<&str>)?;
@@ -109,6 +121,61 @@ pub fn run() {
                         state.peer_content.clone(),
                     );
                     tracing::info!("Identity loaded from disk, discovery started");
+
+                    // Re-announce all shared content every 15 s so late-joining peers
+                    // discover it. mDNS-SD does not respond to PTR queries for services
+                    // that have been registered for a long time.
+                    let reannounce_map = state.active_announcements.clone();
+                    let reannounce_mdns = mdns.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let mut interval = tokio::time::interval(
+                            std::time::Duration::from_secs(15),
+                        );
+                        interval.tick().await; // skip the immediate first tick
+                        loop {
+                            interval.tick().await;
+                            let records: Vec<crate::state::AnnouncementRecord> = {
+                                reannounce_map.read().await.values().cloned().collect()
+                            };
+                            if records.is_empty() {
+                                continue;
+                            }
+                            tracing::debug!(
+                                "mDNS re-announce: refreshing {} service(s)",
+                                records.len()
+                            );
+                            for rec in &records {
+                                fenix_hub_daemon::mdns::unannounce_content(
+                                    &reannounce_mdns,
+                                    &rec.instance_name,
+                                )
+                                .ok();
+                            }
+                            for rec in &records {
+                                // Only re-announce if still active (remove_content may have
+                                // taken it out between our snapshot and here).
+                                if !reannounce_map
+                                    .read()
+                                    .await
+                                    .contains_key(&rec.announcement.content_id)
+                                {
+                                    continue;
+                                }
+                                if let std::net::IpAddr::V4(ipv4) = rec.local_ip {
+                                    if let Err(e) = fenix_hub_daemon::mdns::announce_content(
+                                        &reannounce_mdns,
+                                        &rec.announcement,
+                                        ipv4,
+                                    ) {
+                                        tracing::warn!(
+                                            "mDNS re-announce failed for {}: {e}",
+                                            rec.announcement.content_id
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    });
                 } else {
                     tracing::info!("No saved identity — waiting for first-run setup");
                 }
@@ -119,6 +186,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_identity,
             commands::setup_identity,
+            commands::update_identity,
+            commands::delete_identity_only,
+            commands::list_identity_profiles,
+            commands::save_current_identity_profile,
+            commands::activate_identity_profile,
+            commands::delete_identity_profile,
+            commands::get_transport_capabilities,
+            commands::get_transport_hardware,
             commands::get_local_content,
             commands::add_text_content,
             commands::add_binary_content,
@@ -135,6 +210,8 @@ pub fn run() {
             commands::resize_hub,
             commands::close_hub_window,
             commands::open_settings,
+            commands::close_settings,
+            commands::confirm_reset,
             commands::add_file_by_path,
             commands::clear_received_cache,
             commands::reset_all_data,

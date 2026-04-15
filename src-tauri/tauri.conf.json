@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FenixHub",
-  "version": "0.1.0",
+  "version": "0.2.3",
   "identifier": "dev.fenix.hub",
   "build": {
     "frontendDist": "../frontend/dist",
     "devUrl": "http://localhost:1421",
     "beforeDevCommand": { "script": "bun run dev", "cwd": "../frontend" },
-    "beforeBuildCommand": "cd ../frontend && bun run build"
+    "beforeBuildCommand": { "script": "bun run build", "cwd": "../frontend" }
   },
   "app": {
     "windows": [
@@ -18,26 +18,31 @@
         "height": 185,
         "minWidth": 280,
         "minHeight": 34,
-        "resizable": true,
+        "maxWidth": 820,
+        "maxHeight": 185,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
         "visible": false,
         "skipTaskbar": true,
         "shadow": false,
-        "dragDropEnabled": false
+        "dragDropEnabled": true
       },
       {
         "label": "settings",
         "title": "FenixHub — Ajustes",
         "url": "/#settings",
-        "width": 620,
-        "height": 480,
-        "minWidth": 480,
-        "minHeight": 380,
-        "resizable": true,
-        "decorations": true,
-        "transparent": false,
+        "width": 560,
+        "height": 560,
+        "minWidth": 560,
+        "minHeight": 560,
+        "resizable": false,
+        "maximizable": false,
+        "decorations": false,
+        "transparent": true,
         "alwaysOnTop": false,
         "visible": false,
         "skipTaskbar": false,
@@ -45,11 +50,15 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPLOCAL/**", "$APPDATA/**", "$HOME/**"]
+      }
     },
     "trayIcon": {
       "id": "main",
-      "iconPath": "icons/logo-mark.png",
+      "iconPath": "icons/32x32.png",
       "iconAsTemplate": false,
       "tooltip": "FenixHub — portapapeles efímero"
     }

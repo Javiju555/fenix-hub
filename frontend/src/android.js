@@ -1,4 +1,11 @@
 import './android.css';
+const DEVICE_TYPES = [
+    { id: 'desktop', label: 'Desktop' },
+    { id: 'laptop', label: 'Laptop' },
+    { id: 'phone', label: 'Phone' },
+    { id: 'tablet', label: 'Tablet' },
+    { id: 'server', label: 'Server' },
+];
 const IS_TAURI = '__TAURI_INTERNALS__' in window;
 const IS_NATIVE_ANDROID = 'FenixHubBridge' in window;
 const POLL_INTERVAL_MS = 10000;
@@ -45,13 +52,21 @@ let mockPeers = [
 ];
 let mockPublished = new Set();
 let mockId = 100;
-let configured = false;
+let mockIdentity = {
+    device_name: 'Mi Movil',
+    group_id: 'demo',
+    configured: false,
+    device_type: 'phone',
+};
+let mockProfiles = [];
 let identity = null;
 let localContent = [];
 let peerContent = [];
 let publishedIds = new Set();
 let onlineDevices = [];
 let activeTab = 'local';
+let receiverModeInterval = null;
+let currentIncomingInvite = null;
 function localFingerprint(item) {
     return [
         item.id,
@@ -108,6 +123,9 @@ export async function initAndroid() {
     await loadContent();
     renderApp();
     setupEventListeners();
+    if (IS_NATIVE_ANDROID) {
+        startReceiverModePolling();
+    }
 }
 async function invoke(cmd, args) {
     if (IS_TAURI) {
@@ -163,7 +181,7 @@ async function invokeMock(cmd, args) {
     await new Promise(resolve => setTimeout(resolve, 120));
     switch (cmd) {
         case 'get_identity':
-            return { device_name: 'Mi Móvil', group_id: 'demo', configured };
+            return mockIdentity;
         case 'get_local_content':
             return mockLocal.map(item => ({
                 ...item,
@@ -251,6 +269,18 @@ async function invokeMock(cmd, args) {
         case 'stop_server':
             mockPublished.clear();
             return undefined;
+        case 'start_direct_mode_sender':
+            return undefined;
+        case 'accept_direct_peers':
+            return undefined;
+        case 'cancel_direct_mode':
+            return undefined;
+        case 'toggle_direct_peer':
+            return undefined;
+        case 'get_direct_peers':
+            return { peers: [] };
+        case 'get_direct_session_state':
+            return { discovering: false, advertising: false, ephemeral_group_id: '', peer_count: 0 };
         case 'pull_peer_content': {
             const contentId = a?.content_id;
             const peer = mockPeers.find(item => item.content_id === contentId);
@@ -269,12 +299,148 @@ async function invokeMock(cmd, args) {
         }
         case 'open_overlay':
             return true;
-        case 'setup_identity':
-            configured = true;
-            return {
-                device_name: a?.args?.device_name ?? 'Device',
-                group_id: 'demo',
+        case 'setup_identity': {
+            const payload = a?.args ?? { device_name: 'Device' };
+            mockIdentity = {
+                device_name: payload.device_name,
+                group_id: payload.passphrase ? `grp-${mockId++}` : (mockIdentity.group_id || 'demo'),
                 configured: true,
+                device_type: payload.device_type || mockIdentity.device_type || 'phone',
+            };
+            return mockIdentity;
+        }
+        case 'update_identity': {
+            const payload = a?.args ?? { device_name: mockIdentity.device_name || 'Device' };
+            const oldGroup = mockIdentity.group_id;
+            const nextGroup = payload.passphrase ? `grp-${mockId++}` : oldGroup;
+            mockIdentity = {
+                device_name: payload.device_name,
+                group_id: nextGroup,
+                configured: true,
+                device_type: payload.device_type || mockIdentity.device_type || 'phone',
+            };
+            return {
+                identity: mockIdentity,
+                group_changed: Boolean(oldGroup) && oldGroup !== nextGroup,
+                requires_restart: Boolean(oldGroup) && oldGroup !== nextGroup,
+            };
+        }
+        case 'delete_identity_only': {
+            mockIdentity = {
+                device_name: '',
+                group_id: '',
+                configured: false,
+                device_type: 'phone',
+            };
+            return undefined;
+        }
+        case 'list_identity_profiles':
+            return { profiles: mockProfiles };
+        case 'save_current_identity_profile': {
+            const payload = a?.args ?? { name: '' };
+            const name = payload.name.trim();
+            if (name) {
+                const existing = mockProfiles.find(profile => profile.name === name);
+                if (existing) {
+                    existing.device_name = mockIdentity.device_name;
+                    existing.group_id = mockIdentity.group_id;
+                    existing.device_type = mockIdentity.device_type;
+                }
+                else {
+                    mockProfiles.push({
+                        name,
+                        device_name: mockIdentity.device_name,
+                        group_id: mockIdentity.group_id,
+                        device_type: mockIdentity.device_type,
+                        active: false,
+                    });
+                }
+                if (payload.make_active) {
+                    mockProfiles = mockProfiles.map(profile => ({
+                        ...profile,
+                        active: profile.name === name,
+                    }));
+                }
+            }
+            return { profiles: mockProfiles };
+        }
+        case 'activate_identity_profile': {
+            const name = (a?.args?.name || '').trim();
+            const selected = mockProfiles.find(profile => profile.name === name);
+            if (!selected) {
+                throw new Error('Profile not found');
+            }
+            const oldGroup = mockIdentity.group_id;
+            mockProfiles = mockProfiles.map(profile => ({ ...profile, active: profile.name === name }));
+            mockIdentity = {
+                device_name: selected.device_name,
+                group_id: selected.group_id,
+                configured: true,
+                device_type: selected.device_type,
+            };
+            return {
+                identity: mockIdentity,
+                group_changed: Boolean(oldGroup) && oldGroup !== selected.group_id,
+                requires_restart: true,
+            };
+        }
+        case 'delete_identity_profile': {
+            const name = (a?.args?.name || '').trim();
+            mockProfiles = mockProfiles.filter(profile => profile.name !== name);
+            if (!mockProfiles.some(profile => profile.active) && mockProfiles.length > 0) {
+                mockProfiles[0].active = true;
+            }
+            return { profiles: mockProfiles };
+        }
+        case 'clear_received_cache': {
+            mockLocal = [];
+            mockPublished.clear();
+            return undefined;
+        }
+        case 'confirm_reset':
+            return true;
+        case 'reset_all_data': {
+            mockLocal = [];
+            mockPeers = [];
+            mockPublished.clear();
+            mockProfiles = [];
+            mockIdentity = {
+                device_name: '',
+                group_id: '',
+                configured: false,
+                device_type: 'phone',
+            };
+            return undefined;
+        }
+        case 'start_direct_mode_receiver':
+            return undefined;
+        case 'get_current_inviter':
+            return { has_invite: false };
+        case 'accept_direct_invite':
+            return undefined;
+        case 'reject_direct_invite':
+            return undefined;
+        case 'get_transport_hardware':
+            return {
+                lan: true,
+                lan_ip: '192.168.1.10',
+                ble: {
+                    supported: true,
+                    enabled: true,
+                    permissions_ready: true,
+                    adapters: ['Mock BLE'],
+                },
+                wifi_direct: {
+                    supported: true,
+                    enabled: true,
+                    permissions_ready: true,
+                    adapters: ['Mock WiFi Direct'],
+                },
+                airdrop_ready: true,
+                flow: 'ble_discovery_then_wifi_direct_transfer',
+                ble_peers: [],
+                wifi_direct_peers: [],
+                handoff_candidates: [],
             };
         default:
             return undefined;
@@ -319,6 +485,9 @@ function setupEventListeners() {
         activeTab = 'red';
         syncDerivedState();
         updateUI();
+    });
+    document.getElementById('btn-mesh').addEventListener('click', () => {
+        void window.androidActions?.openMeshSheet();
     });
     if (IS_NATIVE_ANDROID && pollHandle === null) {
         pollHandle = window.setInterval(() => {
@@ -416,8 +585,10 @@ function renderApp() {
         </div>
         <div class="a-hero-actions">
           <div class="a-header-actions">
-            <button class="a-chip-btn accent" id="btn-clipboard">${iconClipboard(16)} Capturar</button>
+            <button class="a-chip-btn" id="btn-share-all">${iconBroadcast(16)} Todo</button>
+            <button class="a-chip-btn" id="btn-mesh">${iconMesh(16)} Mesh</button>
             <button class="a-chip-btn" id="btn-overlay">${iconOverlay(16)} Overlay</button>
+            <button class="a-chip-btn" id="btn-settings">${iconSettings(16)} Ajustes</button>
           </div>
         </div>
         <div class="a-stat-strip">
@@ -456,11 +627,14 @@ function renderApp() {
         });
     });
     document.getElementById('fab-add').addEventListener('click', openAddSheet);
-    document.getElementById('btn-clipboard').addEventListener('click', () => {
-        void window.androidActions?.pasteClipboard();
+    document.getElementById('btn-share-all').addEventListener('click', () => {
+        void window.androidActions?.broadcastAll();
     });
     document.getElementById('btn-overlay').addEventListener('click', () => {
         void window.androidActions?.openOverlay();
+    });
+    document.getElementById('btn-settings').addEventListener('click', () => {
+        void reloadSettingsView();
     });
     document.getElementById('android-file-picker').addEventListener('change', event => {
         const file = event.currentTarget.files?.[0];
@@ -470,6 +644,272 @@ function renderApp() {
         event.currentTarget.value = '';
     });
     updateUI();
+}
+async function loadTransportCapabilities() {
+    return invoke('get_transport_hardware')
+        .catch(() => ({
+        lan: false,
+        airdrop_ready: false,
+        flow: '',
+        ble: {
+            supported: false,
+            enabled: false,
+            permissions_ready: false,
+            adapters: [],
+        },
+        wifi_direct: {
+            supported: false,
+            enabled: false,
+            permissions_ready: false,
+            adapters: [],
+        },
+        ble_peers: [],
+        wifi_direct_peers: [],
+        handoff_candidates: [],
+    }));
+}
+async function returnToHubView() {
+    identity = await invoke('get_identity');
+    if (!identity?.configured) {
+        renderSetup();
+        return;
+    }
+    await loadContent();
+    renderApp();
+}
+async function reloadSettingsView(feedback) {
+    identity = await invoke('get_identity');
+    if (!identity?.configured) {
+        renderSetup();
+        if (feedback) {
+            showToast(feedback.message);
+        }
+        return;
+    }
+    const [profilesPayload, transport] = await Promise.all([
+        invoke('list_identity_profiles').catch(() => ({ profiles: [] })),
+        loadTransportCapabilities(),
+    ]);
+    renderSettingsView(profilesPayload.profiles, transport, feedback);
+}
+function renderSettingsView(profiles, transport, feedback) {
+    const app = document.getElementById('app');
+    const selectedType = identity?.device_type || 'phone';
+    const profileOptions = profiles.map(profile => `<option value="${escapeHtml(profile.name)}"${profile.active ? ' selected' : ''}>${escapeHtml(profile.name)}${profile.active ? ' - activo' : ''}</option>`).join('');
+    app.innerHTML = `
+    <div class="a-settings-shell">
+      <header class="a-settings-head">
+        <div class="a-settings-title">${iconSettings(18)} Ajustes</div>
+        <button class="a-settings-close" id="btn-settings-close" title="Cerrar">${iconX(12)}</button>
+      </header>
+      <div class="a-settings-body">
+        ${feedback ? `<div class="a-settings-feedback ${feedback.tone}">${escapeHtml(feedback.message)}</div>` : ''}
+
+        <section class="a-settings-section">
+          <h3>Identidad</h3>
+          <div class="a-settings-grid two">
+            <label class="a-settings-field">
+              <span>Nombre del dispositivo</span>
+              <input id="settings-device-name" type="text" value="${escapeAttribute(identity?.device_name || '')}" placeholder="Nombre de este movil" />
+            </label>
+            <label class="a-settings-field">
+              <span>Tipo</span>
+              <select id="settings-device-type">
+                ${DEVICE_TYPES.map(dt => `<option value="${dt.id}"${dt.id === selectedType ? ' selected' : ''}>${dt.label}</option>`).join('')}
+              </select>
+            </label>
+          </div>
+
+          <div class="a-settings-row">
+            <span>Grupo (ID)</span>
+            <span class="mono">${escapeHtml(identity?.group_id || '---')}</span>
+            <button class="a-settings-btn" id="btn-copy-gid">Copiar</button>
+          </div>
+
+          <div class="a-settings-actions">
+            <button class="a-settings-btn" id="btn-apply-identity">Guardar nombre/tipo</button>
+          </div>
+
+          <label class="a-settings-field">
+            <span>Cambiar identidad (nuevo grupo, mantiene cache)</span>
+            <input id="settings-passphrase" type="password" placeholder="Nueva passphrase del grupo" />
+          </label>
+
+          <div class="a-settings-actions">
+            <button class="a-settings-btn" id="btn-change-group">Cambiar identidad</button>
+          </div>
+        </section>
+
+        <section class="a-settings-section">
+          <h3>Perfiles</h3>
+          <div class="a-settings-grid two">
+            <label class="a-settings-field">
+              <span>Perfil guardado</span>
+              <select id="settings-profile-select" ${profiles.length === 0 ? 'disabled' : ''}>
+                ${profileOptions || '<option value="">Sin perfiles</option>'}
+              </select>
+            </label>
+            <label class="a-settings-field">
+              <span>Guardar perfil actual como</span>
+              <input id="settings-profile-name" type="text" placeholder="ej. trabajo" />
+            </label>
+          </div>
+          <div class="a-settings-actions split">
+            <button class="a-settings-btn" id="btn-save-profile">Guardar perfil</button>
+            <button class="a-settings-btn" id="btn-activate-profile" ${profiles.length === 0 ? 'disabled' : ''}>Activar perfil</button>
+            <button class="a-settings-btn danger" id="btn-delete-profile" ${profiles.length === 0 ? 'disabled' : ''}>Eliminar perfil</button>
+          </div>
+        </section>
+
+        <section class="a-settings-section">
+          <h3>Transporte</h3>
+          <div class="a-settings-transport">
+            <div>LAN: <strong>${transport.lan ? 'Disponible' : 'No disponible'}</strong></div>
+            <div>IP: ${escapeHtml(transport.lan_ip || 'sin enlace LAN')}</div>
+            <div>Bluetooth LE: <strong>${transport.ble?.supported && transport.ble?.enabled ? 'Disponible' : 'No disponible'}</strong></div>
+            <div>Adaptadores BLE: ${escapeHtml((transport.ble?.adapters || []).join(', ') || 'ninguno')}</div>
+            <div>Wi-Fi Direct: <strong>${transport.wifi_direct?.supported && transport.wifi_direct?.enabled ? 'Disponible' : 'No disponible'}</strong></div>
+            <div>Adaptadores Wi-Fi: ${escapeHtml((transport.wifi_direct?.adapters || []).join(', ') || 'ninguno')}</div>
+            <div>Flujo: ${escapeHtml(transport.flow || 'ble_discovery_then_wifi_direct_transfer')}</div>
+            <div>Modo AirDrop-like: <strong>${transport.airdrop_ready ? 'listo' : 'parcial'}</strong></div>
+          </div>
+        </section>
+
+        <section class="a-settings-section">
+          <h3>Cache</h3>
+          <div class="a-settings-actions">
+            <button class="a-settings-btn" id="btn-clear-cache">Limpiar cache</button>
+          </div>
+        </section>
+
+        <section class="a-settings-section danger-zone">
+          <h3>Zona de peligro</h3>
+          <div class="a-settings-actions split">
+            <button class="a-settings-btn danger" id="btn-delete-identity">Eliminar identidad</button>
+            <button class="a-settings-btn danger solid" id="btn-reset">Eliminar todos los datos</button>
+          </div>
+        </section>
+      </div>
+    </div>`;
+    document.getElementById('btn-settings-close').addEventListener('click', () => {
+        void returnToHubView();
+    });
+    document.getElementById('btn-copy-gid')?.addEventListener('click', () => {
+        if (identity?.group_id) {
+            void navigator.clipboard.writeText(identity.group_id);
+            showToast('ID de grupo copiado');
+        }
+    });
+    document.getElementById('btn-apply-identity')?.addEventListener('click', async () => {
+        if (!identity?.configured) {
+            await reloadSettingsView({ message: 'No hay identidad activa.', tone: 'error' });
+            return;
+        }
+        const deviceName = document.getElementById('settings-device-name').value.trim();
+        const deviceType = document.getElementById('settings-device-type').value;
+        if (!deviceName) {
+            await reloadSettingsView({ message: 'El nombre del dispositivo no puede estar vacio.', tone: 'error' });
+            return;
+        }
+        const result = await invoke('update_identity', {
+            args: {
+                device_name: deviceName,
+                device_type: deviceType,
+                passphrase: null,
+            },
+        });
+        await reloadSettingsView({
+            message: result.group_changed
+                ? 'Identidad actualizada. Reinicia la app para completar cambio de grupo.'
+                : 'Nombre y tipo actualizados al instante.',
+            tone: result.group_changed ? 'warn' : 'ok',
+        });
+    });
+    document.getElementById('btn-change-group')?.addEventListener('click', async () => {
+        const passphrase = document.getElementById('settings-passphrase').value.trim();
+        const deviceName = document.getElementById('settings-device-name').value.trim() || identity?.device_name || '';
+        const deviceType = document.getElementById('settings-device-type').value;
+        if (!passphrase) {
+            await reloadSettingsView({ message: 'Introduce una passphrase para cambiar de identidad.', tone: 'error' });
+            return;
+        }
+        let result;
+        if (identity?.configured) {
+            result = await invoke('update_identity', {
+                args: {
+                    passphrase,
+                    device_name: deviceName,
+                    device_type: deviceType,
+                },
+            });
+        }
+        else {
+            const created = await invoke('setup_identity', {
+                args: {
+                    passphrase,
+                    device_name: deviceName || 'Dispositivo',
+                    device_type: deviceType,
+                },
+            });
+            result = {
+                identity: created,
+                group_changed: true,
+                requires_restart: false,
+            };
+        }
+        await reloadSettingsView({
+            message: result.requires_restart
+                ? 'Identidad cambiada sin borrar cache. Reinicia la app para completar el cambio.'
+                : 'Identidad cambiada.',
+            tone: result.requires_restart ? 'warn' : 'ok',
+        });
+    });
+    document.getElementById('btn-save-profile')?.addEventListener('click', async () => {
+        const name = document.getElementById('settings-profile-name').value.trim();
+        if (!name) {
+            await reloadSettingsView({ message: 'Escribe un nombre de perfil.', tone: 'error' });
+            return;
+        }
+        await invoke('save_current_identity_profile', { args: { name, make_active: false } });
+        await reloadSettingsView({ message: `Perfil "${name}" guardado.`, tone: 'ok' });
+    });
+    document.getElementById('btn-activate-profile')?.addEventListener('click', async () => {
+        const select = document.getElementById('settings-profile-select');
+        const name = select?.value?.trim();
+        if (!name)
+            return;
+        await invoke('activate_identity_profile', { args: { name } });
+        await reloadSettingsView({
+            message: `Perfil "${name}" activado. Reinicia la app para reinicializar discovery con total limpieza.`,
+            tone: 'warn',
+        });
+    });
+    document.getElementById('btn-delete-profile')?.addEventListener('click', async () => {
+        const select = document.getElementById('settings-profile-select');
+        const name = select?.value?.trim();
+        if (!name)
+            return;
+        await invoke('delete_identity_profile', { args: { name } });
+        await reloadSettingsView({ message: `Perfil "${name}" eliminado.`, tone: 'ok' });
+    });
+    document.getElementById('btn-clear-cache')?.addEventListener('click', async () => {
+        await invoke('clear_received_cache');
+        await loadContent();
+        await reloadSettingsView({ message: 'Cache local limpiada.', tone: 'ok' });
+    });
+    document.getElementById('btn-delete-identity')?.addEventListener('click', async () => {
+        await invoke('delete_identity_only');
+        await returnToHubView();
+        showToast('Identidad eliminada. La cache local se mantiene intacta.');
+    });
+    document.getElementById('btn-reset')?.addEventListener('click', async () => {
+        const ok = await invoke('confirm_reset').catch(() => window.confirm('Se eliminaran todos los datos locales. Deseas continuar?'));
+        if (!ok)
+            return;
+        await invoke('reset_all_data');
+        await returnToHubView();
+        showToast('Todos los datos locales han sido eliminados.');
+    });
 }
 function switchTab(tab) {
     activeTab = tab;
@@ -958,6 +1398,22 @@ window.androidActions = {
             showToast(errorMessage(error));
         }
     },
+    async broadcastAll() {
+        try {
+            await invoke('publish_all_local');
+            localContent = localContent.map(item => ({ ...item, is_published: true }));
+            publishedIds = new Set(localContent.map(item => item.id));
+            updateUI();
+            showToast('Todo publicado en la red');
+            await refreshStateIfNative();
+        }
+        catch (error) {
+            showToast(errorMessage(error));
+        }
+    },
+    async openMeshSheet() {
+        await openMeshSheet();
+    },
 };
 function updateLocalItem(id, mutate) {
     localContent = localContent.map(item => (item.id === id ? mutate(item) : item));
@@ -1080,8 +1536,14 @@ function iconClipboard(size) {
 function iconOverlay(size) {
     return svg(size, '0 0 20 20', '<rect x="3" y="4" width="11" height="11" rx="2" stroke-width="1.7"/><path d="M8,15 h7 a2,2 0 0 0 2,-2 V6" stroke-width="1.7"/>');
 }
+function iconSettings(size) {
+    return svg(size, '0 0 20 20', '<circle cx="10" cy="10" r="3" stroke-width="1.8"/><path d="M10 2.3v2.1M10 15.6v2.1M2.3 10h2.1M15.6 10h2.1M4.6 4.6l1.5 1.5M13.9 13.9l1.5 1.5M15.4 4.6l-1.5 1.5M6.1 13.9l-1.5 1.5" stroke-width="1.6"/>');
+}
 function iconCheck(size) {
     return svg(size, '0 0 20 20', '<polyline points="4.5,10.5 8.2,14.2 15.5,6.8" stroke-width="2"/>');
+}
+function iconBroadcast(size) {
+    return svg(size, '0 0 20 20', '<circle cx="9" cy="5" r="2" fill="none" stroke-width="1.6"/><circle cx="16" cy="5" r="2" fill="none" stroke-width="1.6"/><circle cx="9" cy="12" r="2" fill="none" stroke-width="1.6"/><circle cx="16" cy="12" r="2" fill="none" stroke-width="1.6"/><line x1="10.5" y1="5" x2="14.5" y2="11.5" stroke-width="1.6"/><line x1="14.5" y1="5" x2="10.5" y2="11.5" stroke-width="1.6"/>');
 }
 function typeIcon(type) {
     if (type === 'text') {
@@ -1091,4 +1553,350 @@ function typeIcon(type) {
         return svg(24, '0 0 24 24', '<rect x="3" y="4" width="18" height="16" rx="3" stroke-width="2"/><circle cx="9" cy="10" r="2" stroke-width="2"/><polyline points="3,16 8,11 11,14 15,10 21,16" stroke-width="2"/>');
     }
     return svg(24, '0 0 24 24', '<path d="M14,3 H6 a2,2 0 0 0 -2,2 v14 a2,2 0 0 0 2,2 h12 a2,2 0 0 0 2,-2 V9 Z" stroke-width="2"/><polyline points="14,3 14,9 20,9" stroke-width="2"/>');
+}
+// ── Direct Mode Receiver (Incoming Invites) ──────────────────────────────────
+function startReceiverModePolling() {
+    if (receiverModeInterval !== null)
+        return;
+    receiverModeInterval = window.setInterval(() => {
+        if (document.hidden)
+            return;
+        void pollIncomingInvite();
+    }, 3000);
+    void pollIncomingInvite();
+}
+async function pollIncomingInvite() {
+    if (currentIncomingInvite !== null)
+        return;
+    try {
+        const resp = await invoke('get_current_inviter');
+        if (resp.has_invite && resp.device_name) {
+            currentIncomingInvite = {
+                deviceName: resp.device_name,
+                ephemeralGroupId: resp.ephemeral_group_id || '',
+                senderIp: resp.sender_ip || '',
+                senderPort: resp.sender_port || 0,
+                contentId: resp.content_id || '',
+            };
+            showIncomingInviteModal(currentIncomingInvite);
+        }
+    }
+    catch {
+        // Silently ignore polling errors
+    }
+}
+function showIncomingInviteModal(invite) {
+    const backdrop = createSheet(`
+    <div class="a-sheet-handle"></div>
+    <div class="a-direct-invite-header">
+      <div class="a-direct-invite-icon">${iconDirect(32)}</div>
+      <div class="a-direct-invite-title">Transferencia directa</div>
+    </div>
+    <p class="a-direct-invite-body">
+      <strong>${escapeHtml(invite.deviceName)}</strong> quiere<br/>
+      enviarte contenido por WiFi Direct.
+    </p>
+    <p class="a-direct-invite-sub">Grupo: ${escapeHtml(invite.ephemeralGroupId)}</p>
+    <div class="a-sheet-row">
+      <button class="a-sheet-btn danger" data-action="reject">Rechazar</button>
+      <button class="a-sheet-btn" data-action="accept">${iconCheck(16)} Unirse y recibir</button>
+    </div>
+  `);
+    backdrop.querySelectorAll('.a-sheet-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const action = btn.dataset.action;
+            closeInviteBackdrop(backdrop);
+            if (action === 'accept') {
+                void acceptDirectInviteFromModal();
+            }
+            else {
+                void rejectDirectInviteFromModal();
+            }
+        });
+    });
+}
+async function acceptDirectInviteFromModal() {
+    showToast('Conectando al grupo...');
+    try {
+        await invoke('accept_direct_invite');
+        showToast('Recibiendo contenido...');
+        await refreshState();
+        activeTab = 'red';
+        updateUI();
+    }
+    catch (error) {
+        showToast(errorMessage(error));
+    }
+}
+async function rejectDirectInviteFromModal() {
+    try {
+        await invoke('reject_direct_invite');
+    }
+    catch {
+        // Silently ignore
+    }
+}
+function closeInviteBackdrop(_backdrop) {
+    currentIncomingInvite = null;
+    _backdrop.remove();
+}
+let meshSheetOpen = false;
+let meshState = {
+    role: 'none',
+    status: 'idle',
+    mesh_id: null,
+    passphrase_set: false,
+    pending_devices: [],
+    active_devices: [],
+    local_content_pool: [],
+    is_active: false,
+    can_add_devices: false,
+    can_leave: false,
+    pending_count: 0,
+};
+let meshRefreshInterval = null;
+async function openMeshSheet() {
+    if (meshSheetOpen)
+        return;
+    meshSheetOpen = true;
+    await refreshMeshState();
+    renderMeshSheet();
+    meshRefreshInterval = window.setInterval(async () => {
+        await refreshMeshState();
+        updateMeshSheetState();
+    }, 1500);
+}
+async function refreshMeshState() {
+    try {
+        meshState = await invoke('mesh_get_state');
+    }
+    catch {
+        // ignore
+    }
+}
+function closeMeshSheet() {
+    meshSheetOpen = false;
+    if (meshRefreshInterval) {
+        clearInterval(meshRefreshInterval);
+        meshRefreshInterval = null;
+    }
+    const backdrop = document.getElementById('a-sheet-backdrop');
+    backdrop?.remove();
+}
+function renderMeshSheet() {
+    const backdrop = createSheet(`
+    <div class="a-sheet-handle"></div>
+    <div class="a-mesh-header">
+      <div class="a-mesh-icon">${iconMesh(28)}</div>
+      <div class="a-mesh-title">Mesh WiFi Direct</div>
+      <button class="a-mesh-close" id="mesh-close">${iconX(16)}</button>
+    </div>
+    <div class="a-mesh-hint" id="mesh-hint">Elige cómo participar</div>
+    <div class="a-mesh-tabs" id="mesh-tabs">
+      <button class="a-mesh-tab ${meshState.role === 'none' ? 'active' : ''}" data-mesh-role="host">${iconHost(20)} Host</button>
+      <button class="a-mesh-tab ${meshState.role === 'none' ? '' : 'active'}" data-mesh-role="device">${iconDevice(20)} Device</button>
+    </div>
+    <div class="a-mesh-devices" id="mesh-devices-list">
+      <div class="a-mesh-empty" id="mesh-empty">Pulsa Host o Device para empezar a buscar.</div>
+    </div>
+    <div class="a-mesh-actions" id="mesh-actions"></div>
+  `);
+    document.getElementById('mesh-close').addEventListener('click', closeMeshSheet);
+    document.querySelectorAll('.a-mesh-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const role = tab.dataset.meshRole;
+            void selectMeshRole(role);
+        });
+    });
+    backdrop.addEventListener('click', (e) => {
+        if (e.target === backdrop)
+            closeMeshSheet();
+    });
+}
+async function selectMeshRole(role) {
+    document.querySelectorAll('.a-mesh-tab').forEach(t => t.classList.remove('active'));
+    document.querySelector(`[data-mesh-role="${role}"]`)?.classList.add('active');
+    if (role === 'host') {
+        if (localContent.length === 0) {
+            showToast('Añade contenido al hub antes de crear mesh');
+            return;
+        }
+        const contentPool = localContent.map(i => i.id);
+        await invoke('mesh_start_host', { content_pool: contentPool });
+        showToast('Creando mesh como host...');
+    }
+    else {
+        await invoke('mesh_start_device');
+        showToast('Buscando meshes...');
+    }
+    await refreshMeshState();
+    updateMeshSheetState();
+}
+function updateMeshSheetState() {
+    const hint = document.getElementById('mesh-hint');
+    const deviceList = document.getElementById('mesh-devices-list');
+    const actions = document.getElementById('mesh-actions');
+    if (!hint || !deviceList || !actions)
+        return;
+    if (meshState.role === 'none') {
+        hint.textContent = 'Elige cómo participar';
+        deviceList.innerHTML = '<div class="a-mesh-empty">Pulsa Host o Device para empezar a buscar.</div>';
+        actions.innerHTML = '';
+        return;
+    }
+    if (meshState.status === 'idle') {
+        hint.textContent = meshState.role === 'host' ? 'Iniciando host...' : 'Iniciando...';
+        deviceList.innerHTML = '<div class="a-mesh-empty">Buscando...</div>';
+        actions.innerHTML = '';
+        return;
+    }
+    if (meshState.status === 'discovering') {
+        hint.textContent = meshState.role === 'host'
+            ? `${meshState.pending_count} dispositivo(s) encontrado(s)`
+            : 'Buscando meshes...';
+        if (meshState.pending_devices.length > 0) {
+            deviceList.innerHTML = meshState.pending_devices.map(d => {
+                if (meshState.role === 'host') {
+                    return `
+        <div class="a-mesh-device">
+          <div class="a-mesh-device-info">
+            <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+            <span class="a-mesh-device-signal">${signalBars(d.rssi)}</span>
+          </div>
+          <div class="a-mesh-device-actions">
+            <button class="a-mesh-btn-accept" data-device-id="${d.id}">${iconCheck(16)}</button>
+            <button class="a-mesh-btn-reject" data-device-id="${d.id}">${iconX(16)}</button>
+          </div>
+        </div>`;
+                }
+                else {
+                    return `
+        <div class="a-mesh-device a-mesh-device-pending">
+          <div class="a-mesh-device-info">
+            <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+          </div>
+          <span class="a-mesh-device-badge pending">Esperando...</span>
+        </div>`;
+                }
+            }).join('');
+            if (meshState.role === 'host') {
+                deviceList.querySelectorAll('.a-mesh-btn-accept').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const id = btn.dataset.deviceId;
+                        void invoke('mesh_accept_device', { device_id: id });
+                        void refreshMeshState().then(updateMeshSheetState);
+                    });
+                });
+                deviceList.querySelectorAll('.a-mesh-btn-reject').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const id = btn.dataset.deviceId;
+                        void invoke('mesh_reject_device', { device_id: id });
+                        void refreshMeshState().then(updateMeshSheetState);
+                    });
+                });
+            }
+        }
+        else {
+            deviceList.innerHTML = `<div class="a-mesh-empty">${meshState.role === 'host' ? 'Esperando dispositivos...' : 'Buscando meshes...'}</div>`;
+        }
+        if (meshState.role === 'host' && meshState.pending_count > 0) {
+            const allAccepted = meshState.pending_devices.every(d => d.status === 'connected');
+            if (allAccepted) {
+                actions.innerHTML = `<button class="a-btn a-btn-primary" id="mesh-close-btn">Crear grupo</button>`;
+                document.getElementById('mesh-close-btn')?.addEventListener('click', () => {
+                    void invoke('mesh_close_modal').then(closeMeshSheet);
+                });
+            }
+            else {
+                actions.innerHTML = `<div class="a-mesh-hint" style="text-align:center;color:var(--yellow);">Acepta o rechaza los dispositivos primero</div>`;
+            }
+        }
+        else if (meshState.role === 'host') {
+            actions.innerHTML = '';
+        }
+        else {
+            actions.innerHTML = `<button class="a-btn a-btn-secondary" id="mesh-close-btn">Cancelar</button>`;
+            document.getElementById('mesh-close-btn')?.addEventListener('click', () => {
+                void invoke('mesh_cancel_discovery').then(closeMeshSheet);
+            });
+        }
+        return;
+    }
+    if (meshState.status === 'forming') {
+        hint.textContent = meshState.role === 'host' ? 'Formando grupo WiFi Direct...' : 'Conectando al grupo...';
+        deviceList.innerHTML = meshState.active_devices.length > 0
+            ? meshState.active_devices.map(d => `
+        <div class="a-mesh-device a-mesh-device-active">
+          <div class="a-mesh-device-info">
+            <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+          </div>
+          <span class="a-mesh-device-badge">Conectando...</span>
+        </div>`).join('')
+            : '<div class="a-mesh-empty">Estableciendo conexión...</div>';
+        actions.innerHTML = '';
+        return;
+    }
+    if (meshState.status === 'active' || meshState.status === 'transferring') {
+        hint.textContent = meshState.role === 'host'
+            ? `Mesh activo · ${meshState.active_devices.length} dispositivo(s)`
+            : `Conectado al mesh de ${meshState.mesh_id || 'host'}`;
+        deviceList.innerHTML = meshState.active_devices.length > 0
+            ? meshState.active_devices.map(d => `
+        <div class="a-mesh-device a-mesh-device-active">
+          <div class="a-mesh-device-info">
+            <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+          </div>
+          <span class="a-mesh-device-badge">Conectado</span>
+        </div>`).join('')
+            : '<div class="a-mesh-empty">Mesh establecido</div>';
+        if (meshState.role === 'host') {
+            actions.innerHTML = `
+        <button class="a-btn a-btn-primary" id="mesh-finalize-btn">Finalizar envío</button>
+        <button class="a-btn a-btn-secondary" id="mesh-leave-btn">Disolver mesh</button>`;
+        }
+        else {
+            actions.innerHTML = `<button class="a-btn a-btn-danger" id="mesh-leave-btn">Salir del mesh</button>`;
+        }
+        const leaveBtn = document.getElementById('mesh-leave-btn');
+        leaveBtn?.addEventListener('click', async () => {
+            if (confirm('¿Seguro que quieres salir del mesh?')) {
+                await invoke('mesh_leave');
+                closeMeshSheet();
+            }
+        });
+        const finalizeBtn = document.getElementById('mesh-finalize-btn');
+        finalizeBtn?.addEventListener('click', async () => {
+            await invoke('mesh_finalize');
+            closeMeshSheet();
+        });
+        return;
+    }
+    if (meshState.status === 'destroying') {
+        hint.textContent = 'Cerrando mesh...';
+        deviceList.innerHTML = '<div class="a-mesh-empty">Dissolviendo grupo...</div>';
+        actions.innerHTML = '';
+        return;
+    }
+    hint.textContent = `Estado: ${meshState.status}`;
+    deviceList.innerHTML = '<div class="a-mesh-empty">—</div>';
+    actions.innerHTML = '';
+}
+function iconMesh(size) {
+    return svg(size, '0 0 24 24', '<circle cx="5" cy="5" r="2.5" stroke-width="1.8" fill="none"/><circle cx="19" cy="5" r="2.5" stroke-width="1.8" fill="none"/><circle cx="5" cy="19" r="2.5" stroke-width="1.8" fill="none"/><circle cx="19" cy="19" r="2.5" stroke-width="1.8" fill="none"/><line x1="7" y1="5" x2="17" y2="19" stroke-width="1.8"/><line x1="17" y1="5" x2="7" y2="19" stroke-width="1.8"/>');
+}
+function iconHost(size) {
+    return svg(size, '0 0 24 24', '<circle cx="12" cy="8" r="4" stroke-width="1.8" fill="none"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" stroke-width="1.8" fill="none"/><circle cx="12" cy="12" r="9" stroke-width="1.5" fill="none" stroke-dasharray="2 2"/>');
+}
+function iconDevice(size) {
+    return svg(size, '0 0 24 24', '<rect x="5" y="2" width="14" height="20" rx="3" stroke-width="1.8" fill="none"/><line x1="9" y1="18" x2="15" y2="18" stroke-width="1.8"/>');
+}
+function signalBars(rssi) {
+    if (rssi > -60)
+        return '●●●';
+    if (rssi > -75)
+        return '●●○';
+    return '●○○';
+}
+function iconDirect(size) {
+    return svg(size, '0 0 16 16', '<circle cx="4" cy="8" r="1.5" stroke-width="1.6"/><circle cx="12" cy="8" r="1.5" stroke-width="1.6"/><path d="M5.5,8 Q10,3 10.5,8" stroke-width="1.6"/>');
 }

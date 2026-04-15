@@ -10,5 +10,6 @@ data class LocalContent(
     val mimeType: String,
     val fileName: String?,
     val isPublished: Boolean = false,
+    val publishedAt: Long? = null,
     val sendMode: SendMode = SendMode.Broadcast,
 )

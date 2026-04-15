@@ -15,14 +15,20 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.fenixhub.mobile.FenixHubApplication
 import com.fenixhub.mobile.MainActivity
 import com.fenixhub.mobile.R
+import com.fenixhub.mobile.model.MeshEvent
+import com.fenixhub.mobile.model.MeshRole
 import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.SendMode
+import com.fenixhub.mobile.network.DirectBlePeer
+import com.fenixhub.mobile.network.EphemeralDirectSession
 import com.fenixhub.mobile.network.FenixHttpServer
 import com.fenixhub.mobile.network.NsdController
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +38,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import java.net.Inet4Address
+import java.net.NetworkInterface
 
 class FenixHubService : Service() {
     inner class LocalBinder : Binder() {
@@ -50,7 +60,14 @@ class FenixHubService : Service() {
     private val localContentFactory by lazy { container.localContentFactory }
     private val httpServer by lazy { FenixHttpServer(settingsStore, repository) }
     private val nsdController by lazy { NsdController(this, repository, settingsStore) }
+    private val bleIdentityController by lazy { container.bleIdentityController }
+    private val wifiDirectController by lazy { container.wifiDirectController }
+    private val bleDirectController by lazy { container.bleDirectController }
+    private val wifiDirectTransferController by lazy { container.wifiDirectTransferController }
     private val hotspotManager by lazy { container.hotspotManager }
+    private val meshManager by lazy { container.meshManager }
+    private var meshHttpServer: FenixHttpServer? = null
+
     private val overlayController by lazy {
         OverlayController(
             context = this,
@@ -63,17 +80,53 @@ class FenixHubService : Service() {
         )
     }
 
+    private val ephemeralSession by lazy {
+        EphemeralDirectSession(
+            context = this,
+            bleController = bleDirectController,
+            transferController = wifiDirectTransferController,
+            contentRepository = repository,
+            receivedHandler = receivedHandler,
+            httpClient = httpClient,
+            httpServer = httpServer,
+        )
+    }
+
     private var syncJob: Job? = null
+    private var publishGuardJob: Job? = null
     private var sensorManager: SensorManager? = null
     private var shakeDetector: ShakeDetector? = null
     private var accelerometer: Sensor? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var edgeTriggerView: EdgeTriggerView? = null
 
     override fun onCreate() {
         super.onCreate()
         sensorManager = getSystemService(SensorManager::class.java)
         accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        val wm = getSystemService(WindowManager::class.java)
+        edgeTriggerView = EdgeTriggerView(this, wm) { showOverlayIfPermitted() }
+
+        serviceScope.launch {
+            meshManager.events.collect { event ->
+                when (event) {
+                    is MeshEvent.GroupFormed -> {
+                        val state = meshManager.state.value
+                        if (state.role == MeshRole.HOST) {
+                            onMeshActive(state.localContentPool, isHost = true)
+                        }
+                    }
+                    is MeshEvent.MeshDestroyed -> {
+                        stopMeshHttpServer()
+                    }
+                    is MeshEvent.Error -> {
+                        showToast(event.message)
+                    }
+                    else -> {}
+                }
+            }
+        }
     }
 
     override fun onBind(intent: Intent): IBinder = binder
@@ -132,11 +185,158 @@ class FenixHubService : Service() {
         }
     }
 
+    // ── Direct Mode (AirDrop-like) ──────────────────────────────────────────────
+
+    /**
+     * Inicia modo directo como SENDER. Comienza a descubrir receivers por BLE.
+     */
+    fun startDirectModeSender() {
+        val settings = settingsStore.current()
+        if (!settings.configured) {
+            showToast("Configura FenixHub primero")
+            return
+        }
+        val contentId = repository.selectedLocalContentId.value
+            ?: repository.latestLocalContent()?.contentId
+        if (contentId == null) {
+            showToast("Añade contenido al hub antes de enviar")
+            return
+        }
+        ephemeralSession.startAsSender(settings.deviceName)
+        Log.i(TAG, "Direct mode sender started")
+    }
+
+    /**
+     * Confirma la selección de peers y crea el grupo WiFi Direct.
+     * @param selectedPeerIds IDs de los peers seleccionados
+     * @param contentToSendId ID del contenido a enviar
+     */
+    fun acceptDirectPeers(selectedPeerIds: Set<String>, contentToSendId: String) {
+        selectedPeerIds.forEach { ephemeralSession.togglePeerSelection(it) }
+        ephemeralSession.acceptSelectedPeers(contentToSendId) { ephemeralId, peerCount ->
+            showToast("Grupo creado ($ephemeralId) - esperando $peerCount destinatario(s)")
+        }
+    }
+
+    /**
+     * Cancela el modo directo.
+     */
+    fun cancelDirectMode() {
+        ephemeralSession.cancel()
+    }
+
+    /**
+     * Inicia modo receiver. Escucha invitaciones de senders cercanos.
+     */
+    fun startDirectModeReceiver() {
+        val settings = settingsStore.current()
+        if (!settings.configured) {
+            showToast("Configura FenixHub primero")
+            return
+        }
+        ephemeralSession.startAsReceiver(settings.deviceName)
+        Log.i(TAG, "Direct mode receiver started")
+    }
+
+    /**
+     * Obtiene la invitación entrante actual (si hay).
+     */
+    fun getCurrentInviter() = ephemeralSession.getCurrentInviter()
+
+    /**
+     * Acepta la invitación entrante.
+     * @param onContentReceived callback cuando el contenido llega
+     */
+    fun acceptDirectInvite(onContentReceived: (item: com.fenixhub.mobile.model.LocalContent) -> Unit) {
+        ephemeralSession.acceptIncomingInvite { senderIp, senderPort, contentId ->
+            showToast("Conectando al grupo directo...")
+            serviceScope.launch {
+                val success = ephemeralSession.pullFromSender(senderIp, senderPort, contentId)
+                if (success) {
+                    val latest = repository.localContent.value.firstOrNull()
+                    latest?.let { onContentReceived(it) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Rechaza la invitación entrante.
+     */
+    fun rejectDirectInvite() {
+        ephemeralSession.rejectIncomingInvite()
+    }
+
+    /**
+     * Obtiene el estado de la sesión directa.
+     */
+    val directSessionState get() = ephemeralSession.sessionState
+
+    /**
+     * Obtiene la lista de peers descubiertos en modo directo.
+     */
+    val discoveredDirectPeers get() = ephemeralSession.discoveredPeers
+
+    /**
+     * Obtiene los peers seleccionados.
+     */
+    val selectedDirectPeers get() = ephemeralSession.selectedPeers
+
+    /**
+     * Obtiene el estado actual del mesh.
+     */
+    val meshState get() = meshManager.state
+
+    /**
+     * Inicia el HTTP server del mesh en la interfaz p2p.
+     * Se llama después de crear el grupo WiFi Direct.
+     */
+    fun startMeshHttpServer(contentIds: List<String>): Int {
+        val server = FenixHttpServer(settingsStore, repository)
+        meshHttpServer = server
+        contentIds.forEach { contentId ->
+            repository.publish(contentId, SendMode.Broadcast)
+        }
+        val port = server.startIfNeededEphemeral()
+        Log.i(TAG, "Mesh HTTP server started on port $port")
+        return port
+    }
+
+    /**
+     * Detiene el HTTP server del mesh.
+     */
+    fun stopMeshHttpServer() {
+        meshHttpServer?.stop()
+        meshHttpServer = null
+        repository.unpublishAll()
+        Log.d(TAG, "Mesh HTTP server stopped, content unpublished")
+    }
+
+    /**
+     * Callback cuando el mesh se activa. Inicia el servidor HTTP con el content pool.
+     */
+    private fun onMeshActive(contentPool: List<String>, isHost: Boolean) {
+        if (!isHost) return
+        serviceScope.launch {
+            try {
+                val port = startMeshHttpServer(contentPool)
+                val localItems = repository.localContent.value.filter { contentPool.contains(it.contentId) }
+                nsdController.syncPublishedContent(localItems, port)
+                showToast("Mesh activo. Publicando ${contentPool.size} contenido(s).")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start mesh HTTP server", e)
+                showToast("Error al iniciar mesh: ${e.message}")
+            }
+        }
+    }
+
     override fun onDestroy() {
         overlayController.dismiss()
         stopNetworkStack(clearPeers = true)
         hotspotManager.stop()
         releaseMulticastLock()
+        ephemeralSession.cleanup()
+        edgeTriggerView?.stop()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -147,7 +347,12 @@ class FenixHubService : Service() {
 
         httpServer.startIfNeeded()
         nsdController.startDiscovery()
+        bleIdentityController.ensureRunning(settings.groupId, settings.deviceName)
+        wifiDirectController.ensureRunning()
+
         startShakeDetection()
+        startPublishGuardIfNeeded()
+        edgeTriggerView?.start()
 
         if (syncJob?.isActive != true) {
             syncJob = serviceScope.launch {
@@ -167,7 +372,11 @@ class FenixHubService : Service() {
     private fun stopNetworkStack(clearPeers: Boolean) {
         syncJob?.cancel()
         syncJob = null
+        publishGuardJob?.cancel()
+        publishGuardJob = null
         stopShakeDetection()
+        bleIdentityController.stop()
+        wifiDirectController.stop()
         nsdController.stop()
         httpServer.stop()
         if (clearPeers) {
@@ -175,9 +384,75 @@ class FenixHubService : Service() {
         }
     }
 
+    private fun startPublishGuardIfNeeded() {
+        if (publishGuardJob?.isActive == true) return
+
+        publishGuardJob = serviceScope.launch {
+            var publishNetworkIp: String? = null
+
+            while (isActive) {
+                delay(PUBLISH_GUARD_POLL_MS)
+
+                val published = repository.localContent.value.filter { it.isPublished }
+                if (published.isEmpty()) {
+                    publishNetworkIp = null
+                    continue
+                }
+
+                val oldestPublishedAt = published.mapNotNull { it.publishedAt }.minOrNull()
+                    ?: System.currentTimeMillis()
+                if (System.currentTimeMillis() - oldestPublishedAt > MAX_PUBLISH_LIFETIME_MS) {
+                    repository.unpublishAll()
+                    httpServer.stop()
+                    showToast("Publicacion expirada por seguridad. Vuelve a compartir.")
+                    publishNetworkIp = null
+                    continue
+                }
+
+                val currentIp = currentLanIpv4()
+                if (publishNetworkIp == null) {
+                    publishNetworkIp = currentIp
+                    continue
+                }
+
+                if (currentIp != null && publishNetworkIp != currentIp) {
+                    repository.unpublishAll()
+                    httpServer.stop()
+                    showToast("Cambio de red detectado. Publicacion detenida por seguridad.")
+                    publishNetworkIp = null
+                }
+            }
+        }
+    }
+
+    private fun currentLanIpv4(): String? {
+        return runCatching {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return@runCatching null
+            while (interfaces.hasMoreElements()) {
+                val iface = interfaces.nextElement()
+                if (!iface.isUp || iface.isLoopback || iface.name.startsWith("p2p")) {
+                    continue
+                }
+
+                val addresses = iface.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val address = addresses.nextElement()
+                    if (address is Inet4Address) {
+                        val host = address.hostAddress
+                        if (!host.isNullOrBlank()) {
+                            return@runCatching host
+                        }
+                    }
+                }
+            }
+            null
+        }.getOrNull()
+    }
+
     private fun showOverlayIfPermitted() {
         if (Settings.canDrawOverlays(this)) {
-            overlayController.show()
+            edgeTriggerView?.setOverlayVisible(true)
+            overlayController.show { edgeTriggerView?.setOverlayVisible(false) }
         } else {
             showToast("Concede permiso de overlay para abrir el hub flotante")
         }
@@ -209,9 +484,6 @@ class FenixHubService : Service() {
             setReferenceCounted(false)
             acquire()
         }
-        // Keep the WiFi radio at full performance during transfers — without this
-        // Android throttles TX to ~4 MB/s even on 5 GHz when the radio is in
-        // power-save mode.
         wifiLock = wifiManager.createWifiLock(
             WifiManager.WIFI_MODE_FULL_HIGH_PERF,
             "FenixHubWifiLock",
@@ -281,12 +553,15 @@ class FenixHubService : Service() {
     }
 
     companion object {
+        const val TAG = "FenixHubService"
         const val ACTION_SHOW_OVERLAY = "com.fenixhub.mobile.action.SHOW_OVERLAY"
         const val ACTION_REFRESH_IDENTITY = "com.fenixhub.mobile.action.REFRESH_IDENTITY"
         const val ACTION_START_HOTSPOT = "com.fenixhub.mobile.action.START_HOTSPOT"
         const val ACTION_STOP_HOTSPOT = "com.fenixhub.mobile.action.STOP_HOTSPOT"
         private const val CHANNEL_ID = "fenixhub-service"
         private const val NOTIFICATION_ID = 3106
+        private const val MAX_PUBLISH_LIFETIME_MS = 10 * 60 * 1000L
+        private const val PUBLISH_GUARD_POLL_MS = 5_000L
 
         fun start(context: Context, action: String? = null) {
             val intent = Intent(context, FenixHubService::class.java)

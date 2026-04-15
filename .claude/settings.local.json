@@ -31,7 +31,14 @@
       "Bash(ls e:/fenix-hub/*.png e:/fenix-hub/*.ico e:/fenix-hub/*.icns)",
       "Bash(bunx tauri:*)",
       "Bash(grep -v \"^--$\")",
-      "Bash(cargo fix:*)"
+      "Bash(cargo fix:*)",
+      "Bash(git pull:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(python -c \"import sys,json; pkgs=json.load\\(sys.stdin\\)['packages']; [print\\(p['name'],p['version']\\) for p in pkgs if 'mdns' in p['name'].lower\\(\\)]\")",
+      "Bash(netstat -ano)",
+      "Bash(awk '{print $5}')",
+      "Bash(xargs -I{} taskkill /PID {} /F)",
+      "Bash(taskkill /PID 20476 /F)"
     ]
   }
 }

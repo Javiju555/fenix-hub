@@ -3,6 +3,8 @@
 /// ## Security
 ///
 /// Each request includes an HMAC-SHA256 signature in `X-FenixHub-Auth`.
+/// The signature is computed over a canonical payload including method, path,
+/// group_id, timestamp, nonce, and body hash.
 /// If the server responds with `X-FenixHub-Encrypted: 1`, the body is
 /// AES-256-GCM decrypted using the group's ENC sub-key before returning.
 ///
@@ -11,16 +13,24 @@
 /// the caller should treat the data with lower trust.
 use crate::crypto::{self, ChunkDecoder};
 use crate::identity::GroupIdentity;
-use crate::protocol::{ENCRYPTED_HEADER, FNX2_HEADER_SIZE, HMAC_HEADER};
+use crate::protocol::{
+    canonical_auth_message, AUTH_BODY_SHA256_HEADER, AUTH_NONCE_HEADER, AUTH_TIMESTAMP_HEADER,
+    EMPTY_BODY_SHA256_HEX,
+    ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, FNX2_HEADER_SIZE,
+    HMAC_HEADER,
+};
 use crate::content::ContentType;
 use anyhow::Result;
+use rand::RngCore;
 use std::net::IpAddr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 
 pub struct PulledContent {
     pub bytes: Vec<u8>,
+    pub file_path: Option<std::path::PathBuf>, // set when streamed to disk
     pub mime_type: Option<String>,
     pub file_name: Option<String>,
 }
@@ -28,7 +38,7 @@ pub struct PulledContent {
 /// Pulls the raw content of a content item from a peer's ephemeral server.
 ///
 /// Steps:
-/// 1. Compute HMAC-SHA256(mac_key, content_id) → send in `X-FenixHub-Auth`.
+/// 1. Build canonical auth payload + HMAC signature and send auth headers.
 /// 2. Receive response.
 /// 3. If `X-FenixHub-Encrypted: 1` is present, decrypt with AES-256-GCM(enc_key).
 /// 4. Return plaintext bytes + metadata headers.
@@ -39,10 +49,8 @@ pub async fn pull_content(
     identity: &GroupIdentity,
 ) -> Result<PulledContent> {
     let url = format!("http://{}:{}/content/{}", peer_ip, peer_port, content_id);
-
-    // Sign the request with HMAC-SHA256(mac_key, content_id).
-    let sig = identity.sign(content_id.as_bytes());
-    let sig_hex = hex::encode(&sig);
+    let canonical_path = format!("/content/{}", content_id);
+    let auth = build_request_auth(identity, "GET", &canonical_path, &[])?;
 
     // Reuse a single client across all pulls — avoids a new TCP handshake per call.
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
@@ -50,7 +58,10 @@ pub async fn pull_content(
 
     let response = client
         .get(&url)
-        .header(HMAC_HEADER, sig_hex)
+        .header(HMAC_HEADER, auth.signature_hex)
+        .header(AUTH_TIMESTAMP_HEADER, auth.timestamp_ms.to_string())
+        .header(AUTH_NONCE_HEADER, auth.nonce_hex)
+        .header(AUTH_BODY_SHA256_HEADER, auth.body_sha256_hex)
         .send()
         .await?
         .error_for_status()?;
@@ -83,10 +94,8 @@ pub async fn pull_content(
         .unwrap_or(false);
 
     let bytes = if is_v2_stream {
-        // FNX2 v2 streaming: server sends chunks, we decrypt and discard body
-        // (caller should use pull_content_to_file for actual streaming)
         tracing::debug!("Peer {} uses FNX2 v2 streaming", peer_ip);
-        vec![]
+        pull_v2_body_to_bytes(response, content_id, peer_ip, identity.enc_key()).await?
     } else if is_encrypted {
         let raw_bytes = response.bytes().await?;
         let enc_key = identity.enc_key();
@@ -122,6 +131,7 @@ pub async fn pull_content(
 
     Ok(PulledContent {
         bytes,
+        file_path: None,
         mime_type,
         file_name,
     })
@@ -162,6 +172,52 @@ fn parse_file_name(content_disposition: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+struct RequestAuth {
+    signature_hex: String,
+    timestamp_ms: u64,
+    nonce_hex: String,
+    body_sha256_hex: String,
+}
+
+fn build_request_auth(
+    identity: &GroupIdentity,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<RequestAuth> {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| anyhow::anyhow!("Clock error while building auth headers: {}", e))?
+        .as_millis() as u64;
+
+    let mut nonce = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let nonce_hex = hex::encode(nonce);
+
+    let body_sha256_hex = if body.is_empty() {
+        EMPTY_BODY_SHA256_HEX.to_string()
+    } else {
+        crate::protocol::sha256_hex(body)
+    };
+
+    let canonical = canonical_auth_message(
+        method,
+        path,
+        &identity.group_id(),
+        timestamp_ms,
+        &nonce_hex,
+        &body_sha256_hex,
+    );
+    let signature_hex = hex::encode(identity.sign(&canonical));
+
+    Ok(RequestAuth {
+        signature_hex,
+        timestamp_ms,
+        nonce_hex,
+        body_sha256_hex,
+    })
+}
+
 /// Pulls content with streaming decrypt to a file (FNX2 v2).
 /// Writes each decrypted chunk directly to disk, never holding full file in RAM.
 pub async fn pull_content_to_file(
@@ -172,16 +228,18 @@ pub async fn pull_content_to_file(
     output_path: &std::path::Path,
 ) -> Result<ContentType> {
     let url = format!("http://{}:{}/content/{}", peer_ip, peer_port, content_id);
-
-    let sig = identity.sign(content_id.as_bytes());
-    let sig_hex = hex::encode(&sig);
+    let canonical_path = format!("/content/{}", content_id);
+    let auth = build_request_auth(identity, "GET", &canonical_path, &[])?;
 
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     let client = CLIENT.get_or_init(reqwest::Client::new);
 
     let response = client
         .get(&url)
-        .header(HMAC_HEADER, sig_hex)
+        .header(HMAC_HEADER, auth.signature_hex)
+        .header(AUTH_TIMESTAMP_HEADER, auth.timestamp_ms.to_string())
+        .header(AUTH_NONCE_HEADER, auth.nonce_hex)
+        .header(AUTH_BODY_SHA256_HEADER, auth.body_sha256_hex)
         .send()
         .await?
         .error_for_status()?;
@@ -194,22 +252,33 @@ pub async fn pull_content_to_file(
         .unwrap_or(false);
 
     if !is_v2 {
-        anyhow::bail!("Peer {} does not support FNX2 v2 streaming", peer_ip);
+        // Peer is an older server — fall back to pull_content (buffered).
+        tracing::warn!(
+            "Peer {} does not support FNX2 v2 streaming; falling back to buffered pull",
+            peer_ip
+        );
+        let pulled = pull_content(peer_ip, peer_port, content_id, identity).await?;
+        tokio::fs::write(output_path, &pulled.bytes).await?;
+        return Ok(ContentType::File);
     }
 
     // Stream the response body
     let mut body = response.bytes_stream();
     let enc_key = identity.enc_key();
 
-    // Read FNX2 header first
+    // Read FNX2 header first, keeping any leftover bytes from the same TCP chunk.
     let mut header_buf = vec![0u8; FNX2_HEADER_SIZE];
     let mut header_read = 0usize;
+    let mut leftover: Vec<u8> = Vec::new();
     while header_read < FNX2_HEADER_SIZE {
         if let Some(chunk) = body.next().await {
             let chunk = chunk?;
             let take = (FNX2_HEADER_SIZE - header_read).min(chunk.len());
             header_buf[header_read..header_read + take].copy_from_slice(&chunk[..take]);
             header_read += take;
+            if chunk.len() > take {
+                leftover.extend_from_slice(&chunk[take..]);
+            }
         } else {
             anyhow::bail!("Incomplete FNX2 header");
         }
@@ -225,15 +294,38 @@ pub async fn pull_content_to_file(
         decoder.original_size
     );
 
-    // Open output file and decrypt chunks to disk
+    // Open output file and decrypt chunks.
     let mut file = File::create(output_path).await?;
+    // pending accumulates ciphertext bytes until we have a full encrypted chunk.
+    let full_chunk = FNX2_CHUNK_SIZE + 16; // 16 = GCM tag
+    let mut pending: Vec<u8> = leftover;
+
+    let flush_pending = |pending: &mut Vec<u8>,
+                         decoder: &mut ChunkDecoder,
+                         is_final: bool|
+     -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        while pending.len() >= full_chunk || (is_final && !pending.is_empty()) {
+            let end = if pending.len() >= full_chunk { full_chunk } else { pending.len() };
+            let plaintext = decoder.decrypt_chunk(&pending[..end])?;
+            out.extend_from_slice(&plaintext);
+            pending.drain(..end);
+        }
+        Ok(out)
+    };
 
     while let Some(chunk) = body.next().await {
         let chunk = chunk?;
-        if chunk.is_empty() { continue; }
-        let plaintext = decoder.decrypt_chunk(&chunk)?;
+        if chunk.is_empty() {
+            continue;
+        }
+        pending.extend_from_slice(&chunk);
+        let plaintext = flush_pending(&mut pending, &mut decoder, false)?;
         file.write_all(&plaintext).await?;
     }
+    // Flush final (potentially short) chunk
+    let plaintext = flush_pending(&mut pending, &mut decoder, true)?;
+    file.write_all(&plaintext).await?;
 
     file.flush().await?;
 
@@ -246,4 +338,52 @@ pub async fn pull_content_to_file(
     );
 
     Ok(ContentType::File)
+}
+
+async fn pull_v2_body_to_bytes(
+    response: reqwest::Response,
+    content_id: &str,
+    peer_ip: IpAddr,
+    enc_key: &[u8; 32],
+) -> Result<Vec<u8>> {
+    let mut body = response.bytes_stream();
+
+    // Accumulate the full response into a buffer first, then parse.
+    // The bytes_stream yields raw TCP chunks — if we try to read the 29-byte
+    // FNX2 header and the first chunk is larger, leftover bytes would be lost.
+    // Buffering avoids that without holding two copies (collect then slice).
+    let mut raw: Vec<u8> = Vec::new();
+    while let Some(chunk) = body.next().await {
+        raw.extend_from_slice(&chunk?);
+    }
+
+    if raw.len() < FNX2_HEADER_SIZE {
+        anyhow::bail!("Incomplete FNX2 header: {} bytes", raw.len());
+    }
+
+    let mut decoder = ChunkDecoder::new(enc_key, &raw[..FNX2_HEADER_SIZE])?;
+    let mut decrypted = Vec::new();
+    let mut pos = FNX2_HEADER_SIZE;
+
+    // Walk the remaining bytes chunk by chunk (each chunk is FNX2_CHUNK_SIZE +
+    // GCM_TAG_BYTES, except the last which may be shorter).
+    let full_chunk = FNX2_CHUNK_SIZE + 16; // 16 = GCM tag
+    for chunk_index in 0..decoder.total_chunks {
+        let is_last = chunk_index == decoder.total_chunks - 1;
+        let end = if is_last { raw.len() } else { pos + full_chunk };
+        if end > raw.len() {
+            anyhow::bail!("FNX2 body truncated at chunk {chunk_index}");
+        }
+        let plaintext = decoder.decrypt_chunk(&raw[pos..end])?;
+        decrypted.extend_from_slice(&plaintext);
+        pos = end;
+    }
+
+    tracing::debug!(
+        "Pulled {} from {} via FNX2 — {} B",
+        content_id,
+        peer_ip,
+        decrypted.len()
+    );
+    Ok(decrypted)
 }

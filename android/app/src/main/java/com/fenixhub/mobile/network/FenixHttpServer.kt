@@ -13,6 +13,7 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.server.request.receiveText
 import io.ktor.server.request.header
+import io.ktor.server.request.path
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytesWriter
 import io.ktor.server.response.respondText
@@ -31,6 +32,7 @@ import javax.crypto.spec.SecretKeySpec
 import android.util.Log
 import io.netty.channel.ChannelOption
 import org.json.JSONObject
+import kotlin.math.abs
 
 class FenixHttpServer(
     private val settingsStore: SettingsStore,
@@ -41,14 +43,38 @@ class FenixHttpServer(
         private set
 
     private var engine: ApplicationEngine? = null
+    private var ephemeralEngine: ApplicationEngine? = null
+    private var ephemeralPort: Int? = null
+    private val replayNonceLock = Any()
+    private val seenReplayNonces = linkedMapOf<String, Long>()
 
     fun startIfNeeded(): Int {
         activePort?.let { return it }
 
         val chosenPort = choosePort()
-        val server = embeddedServer(Netty, host = "0.0.0.0", port = chosenPort, configure = {
-            // Increase TCP send buffer so the kernel can pipeline large file transfers
-            // without stalling — default Android SO_SNDBUF (~128 KB) causes ~4 MB/s.
+        engine = buildServer(chosenPort, ephemeralMode = false)
+        engine!!.start(wait = false)
+        activePort = chosenPort
+        return chosenPort
+    }
+
+    fun startIfNeededEphemeral(): Int {
+        ephemeralPort?.let { return it }
+
+        val chosenPort = runCatching {
+            ServerSocket(EPHEMERAL_DEFAULT_PORT).use { EPHEMERAL_DEFAULT_PORT }
+        }.getOrElse {
+            ServerSocket(0).use { it.localPort }
+        }
+        ephemeralEngine = buildServer(chosenPort, ephemeralMode = true)
+        ephemeralEngine!!.start(wait = false)
+        ephemeralPort = chosenPort
+        Log.d(TAG, "Ephemeral server started on port $chosenPort")
+        return chosenPort
+    }
+
+    private fun buildServer(port: Int, ephemeralMode: Boolean): ApplicationEngine {
+        return embeddedServer(Netty, host = "0.0.0.0", port = port, configure = {
             httpServerCodec = {
                 io.netty.handler.codec.http.HttpServerCodec()
             }
@@ -59,119 +85,216 @@ class FenixHttpServer(
         }) {
             routing {
                 get("/content/{content_id}") {
-                    val settings = call.currentSettingsOrRespond() ?: return@get
-
-                    val contentId = call.parameters["content_id"]
-                    if (contentId.isNullOrBlank()) {
-                        call.respond(HttpStatusCode.BadRequest)
-                        return@get
-                    }
-
-                    if (!call.isAuthorized(settings, contentId.toByteArray(Charsets.UTF_8))) {
-                        call.respond(HttpStatusCode.Unauthorized)
-                        return@get
-                    }
-
-                    val item = repository.getLocalContent(contentId)
-                    if (item == null || !item.isPublished) {
-                        call.respond(HttpStatusCode.NotFound)
-                        return@get
-                    }
-
-                    val contentType = runCatching { ContentType.parse(item.mimeType) }
-                        .getOrElse { ContentType.Application.OctetStream }
-                    item.fileName?.let { fileName ->
-                        call.response.headers.append(
-                            HttpHeaders.ContentDisposition,
-                            "inline; filename=\"${fileName.replace("\"", "_")}\"",
-                        )
-                    }
-
-                    val file = File(item.cachePath)
-                    if (!file.exists()) {
-                        call.respond(HttpStatusCode.NotFound)
-                        return@get
-                    }
-
-                    // Stream-encrypt in 64 KB chunks: nonce → cipher.update() per chunk
-                    // → cipher.doFinal() for the GCM tag. Never holds the full file in RAM.
-                    val encKey = settings.encKeyBytes()
-                    val nonce = ByteArray(NONCE_SIZE).also(secureRandom::nextBytes)
-                    val cipher = Cipher.getInstance("AES/GCM/NoPadding").also {
-                        it.init(
-                            Cipher.ENCRYPT_MODE,
-                            SecretKeySpec(encKey, "AES"),
-                            GCMParameterSpec(GCM_TAG_BITS, nonce),
-                        )
-                    }
-
-                    val fileSizeBytes = file.length()
-                    Log.d(TAG, "Serving $contentId — ${fileSizeBytes / 1024} KB encrypted streaming")
-                    val startMs = System.currentTimeMillis()
-
-                    call.response.headers.append(ENCRYPTED_HEADER, "1")
-                    call.respondBytesWriter(contentType = contentType) {
-                        // Write nonce first.
-                        writeFully(nonce)
-                        var totalRead = 0L
-                        val buf = ByteArray(CHUNK_SIZE)
-                        // Read + encrypt on IO dispatcher, then hand each chunk back to
-                        // the Ktor channel via writeFully (which suspends on backpressure).
-                        file.inputStream().buffered(CHUNK_SIZE).use { input ->
-                            while (true) {
-                                val read = withContext(Dispatchers.IO) { input.read(buf) }
-                                if (read == -1) break
-                                val chunk = cipher.update(buf, 0, read) ?: continue
-                                if (chunk.isNotEmpty()) writeFully(chunk)
-                                totalRead += read
-                            }
-                        }
-                        // GCM auth tag.
-                        val final = withContext(Dispatchers.IO) { cipher.doFinal() }
-                        if (final != null && final.isNotEmpty()) writeFully(final)
-                        val elapsedMs = System.currentTimeMillis() - startMs
-                        val speedKBs = if (elapsedMs > 0) totalRead / elapsedMs else 0
-                        Log.i(TAG, "Served $contentId — ${totalRead / 1024} KB in ${elapsedMs}ms (${speedKBs} KB/s)")
+                    if (ephemeralMode) {
+                        call.serveContentEphemeral()
+                    } else {
+                        call.serveContentAuthenticated()
                     }
                 }
 
                 post("/auth/challenge") {
-                    val settings = call.currentSettingsOrRespond() ?: return@post
-                    val rawBody = call.receiveText()
-                    val nonce = runCatching {
-                        JSONObject(rawBody).optString("nonce").trim()
-                    }.getOrNull()
-                    if (nonce.isNullOrBlank()) {
-                        call.respond(HttpStatusCode.BadRequest)
+                    if (ephemeralMode) {
+                        call.respond(HttpStatusCode.NotFound)
                         return@post
                     }
-
-                    if (!call.isAuthorized(settings, CryptoUtils.authChallengeHeaderMessage(nonce))) {
-                        call.respond(HttpStatusCode.Unauthorized)
-                        return@post
-                    }
-
-                    val hmac = CryptoUtils.hmacSha256Hex(
-                        settings.macKeyBytes(),
-                        nonce.toByteArray(Charsets.UTF_8),
-                    )
-                    val response = JSONObject().put("hmac", hmac).toString()
-                    call.respondText(response, ContentType.Application.Json)
+                    call.serveAuthChallenge()
                 }
             }
         }
+    }
 
-        server.start(wait = false)
-        engine = server
-        activePort = chosenPort
-        return chosenPort
+    private suspend fun io.ktor.server.application.ApplicationCall.serveContentEphemeral() {
+        val contentId = parameters["content_id"]
+        if (contentId.isNullOrBlank()) {
+            respond(HttpStatusCode.BadRequest)
+            return
+        }
+
+        val item = repository.getLocalContent(contentId)
+        if (item == null || !item.isPublished) {
+            respond(HttpStatusCode.NotFound)
+            return
+        }
+
+        val contentType = runCatching { ContentType.parse(item.mimeType) }
+            .getOrElse { ContentType.Application.OctetStream }
+        item.fileName?.let { fileName ->
+            response.headers.append(
+                HttpHeaders.ContentDisposition,
+                "inline; filename=\"${fileName.replace("\"", "_")}\"",
+            )
+        }
+
+        val file = File(item.cachePath)
+        if (!file.exists()) {
+            respond(HttpStatusCode.NotFound)
+            return
+        }
+
+        val fileSizeBytes = file.length()
+        Log.d(TAG, "Ephemeral serving $contentId — ${fileSizeBytes / 1024} KB (no encryption)")
+        val startMs = System.currentTimeMillis()
+
+        respondBytesWriter(contentType = contentType) {
+            var totalRead = 0L
+            val buf = ByteArray(CHUNK_SIZE)
+            file.inputStream().buffered(CHUNK_SIZE).use { input ->
+                while (true) {
+                    val read = withContext(Dispatchers.IO) { input.read(buf) }
+                    if (read == -1) break
+                    writeFully(buf, 0, read)
+                    totalRead += read
+                }
+            }
+            val elapsedMs = System.currentTimeMillis() - startMs
+            Log.i(TAG, "Ephemeral served $contentId — ${totalRead / 1024} KB in ${elapsedMs}ms")
+        }
+    }
+
+    private suspend fun io.ktor.server.application.ApplicationCall.serveContentAuthenticated() {
+        val settings = currentSettingsOrRespond() ?: return
+
+        val contentId = parameters["content_id"]
+        if (contentId.isNullOrBlank()) {
+            respond(HttpStatusCode.BadRequest)
+            return
+        }
+
+        if (!isAuthorized(
+                settings = settings,
+                method = "GET",
+                canonicalPath = "/content/$contentId",
+                bodyBytes = ByteArray(0),
+            )) {
+            respond(HttpStatusCode.Unauthorized)
+            return
+        }
+
+        val item = repository.getLocalContent(contentId)
+        if (item == null || !item.isPublished) {
+            respond(HttpStatusCode.NotFound)
+            return
+        }
+
+        val contentType = runCatching { ContentType.parse(item.mimeType) }
+            .getOrElse { ContentType.Application.OctetStream }
+        item.fileName?.let { fileName ->
+            response.headers.append(
+                HttpHeaders.ContentDisposition,
+                "inline; filename=\"${fileName.replace("\"", "_")}\"",
+            )
+        }
+
+        val file = File(item.cachePath)
+        if (!file.exists()) {
+            respond(HttpStatusCode.NotFound)
+            return
+        }
+
+        val encKey = settings.encKeyBytes()
+        val originalSize = file.length()
+        // totalChunks fits in Int for any realistic file (2^31 * 64KB = 128 TB)
+        val totalChunks = if (originalSize == 0L) 0 else
+            ((originalSize + FNX2_CHUNK_SIZE - 1) / FNX2_CHUNK_SIZE).toInt()
+        val baseNonce = ByteArray(NONCE_SIZE).also(secureRandom::nextBytes)
+        val secretKey = SecretKeySpec(encKey, "AES")
+
+        Log.d(TAG, "Serving $contentId — ${originalSize / 1024} KB, $totalChunks FNX2 chunks")
+        val startMs = System.currentTimeMillis()
+
+        // FNX2 v2: per-chunk AES-GCM (64 KB chunks). Desktop stream-decrypts
+        // directly to disk — no full-file buffer needed on either side.
+        response.headers.append(ENCRYPTED_HEADER, "2")
+        respondBytesWriter(contentType = contentType) {
+            // ── FNX2 header (29 bytes) ─────────────────────────────────────
+            writeFully(FNX2_MAGIC)                  // 4 bytes
+            writeFully(baseNonce)                   // 12 bytes
+            writeFully(intToBE(totalChunks))        // 4 bytes
+            writeFully(longToBE(originalSize))      // 8 bytes
+            writeFully(byteArrayOf(FNX2_COMPRESSION_NONE.toByte())) // 1 byte
+
+            if (totalChunks == 0) return@respondBytesWriter
+
+            // ── Chunks ────────────────────────────────────────────────────
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val chunkNonce = ByteArray(NONCE_SIZE)
+            val buf = ByteArray(FNX2_CHUNK_SIZE)
+
+            file.inputStream().buffered(FNX2_CHUNK_SIZE).use { input ->
+                for (chunkIndex in 0 until totalChunks) {
+                    // Read exactly FNX2_CHUNK_SIZE bytes (or fewer for the last chunk)
+                    val read = withContext(Dispatchers.IO) {
+                        var total = 0
+                        while (total < FNX2_CHUNK_SIZE) {
+                            val n = input.read(buf, total, FNX2_CHUNK_SIZE - total)
+                            if (n == -1) break
+                            total += n
+                        }
+                        total
+                    }
+                    if (read == 0) break
+
+                    // Per-chunk nonce: XOR base_nonce[4..12] with chunk index (BE u64)
+                    baseNonce.copyInto(chunkNonce)
+                    val idx = chunkIndex.toLong()
+                    for (i in 0 until 8) {
+                        chunkNonce[4 + i] = (chunkNonce[4 + i].toInt() xor
+                            ((idx ushr ((7 - i) * 8)).toInt() and 0xff)).toByte()
+                    }
+
+                    cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, chunkNonce))
+                    writeFully(cipher.doFinal(buf, 0, read))
+                }
+            }
+
+            val elapsedMs = System.currentTimeMillis() - startMs
+            val speedKBs = if (elapsedMs > 0) originalSize / elapsedMs else 0
+            Log.i(TAG, "Served $contentId — ${originalSize / 1024} KB in ${elapsedMs}ms ($speedKBs KB/s) FNX2 v2")
+        }
+    }
+
+    private suspend fun io.ktor.server.application.ApplicationCall.serveAuthChallenge() {
+        val settings = currentSettingsOrRespond() ?: return
+        val rawBody = receiveText()
+        val bodyBytes = rawBody.toByteArray(Charsets.UTF_8)
+        val nonce = runCatching {
+            JSONObject(rawBody).optString("nonce").trim()
+        }.getOrNull()
+        if (nonce.isNullOrBlank()) {
+            respond(HttpStatusCode.BadRequest)
+            return
+        }
+
+        if (!isAuthorized(
+                settings = settings,
+                method = "POST",
+                canonicalPath = "/auth/challenge",
+                bodyBytes = bodyBytes,
+            )) {
+            respond(HttpStatusCode.Unauthorized)
+            return
+        }
+
+        val hmac = CryptoUtils.hmacSha256Hex(
+            settings.macKeyBytes(),
+            nonce.toByteArray(Charsets.UTF_8),
+        )
+        val response = JSONObject().put("hmac", hmac).toString()
+        respondText(response, ContentType.Application.Json)
     }
 
     fun stop() {
         engine?.stop(1_000, 2_000)
         engine = null
         activePort = null
+        ephemeralEngine?.stop(1_000, 2_000)
+        ephemeralEngine = null
+        ephemeralPort = null
     }
+
+    val isRunning: Boolean get() = engine != null
+
+    fun ensureRunning(): Int = startIfNeeded()
 
     private fun choosePort(): Int {
         return runCatching {
@@ -192,21 +315,111 @@ class FenixHttpServer(
 
     private fun io.ktor.server.application.ApplicationCall.isAuthorized(
         settings: AppSettings,
-        message: ByteArray,
+        method: String,
+        canonicalPath: String,
+        bodyBytes: ByteArray,
     ): Boolean {
-        val receivedHeader = request.header(HMAC_HEADER) ?: return false
-        val expected = CryptoUtils.hmacSha256Hex(settings.macKeyBytes(), message)
-        return CryptoUtils.constantTimeEquals(expected, receivedHeader)
+        val receivedSignature = request.header(CryptoUtils.HMAC_HEADER)?.trim() ?: return false
+        val timestampMs = request.header(CryptoUtils.AUTH_TIMESTAMP_HEADER)
+            ?.trim()
+            ?.toLongOrNull()
+            ?: return false
+        val nonceHex = request.header(CryptoUtils.AUTH_NONCE_HEADER)
+            ?.trim()
+            ?.lowercase()
+            ?: return false
+        val bodyHashHeader = request.header(CryptoUtils.AUTH_BODY_SHA256_HEADER)
+            ?.trim()
+            ?.lowercase()
+            ?: return false
+
+        if (!CryptoUtils.isValidAuthNonceHex(nonceHex)) {
+            return false
+        }
+
+        val expectedBodyHash = if (bodyBytes.isEmpty()) {
+            CryptoUtils.EMPTY_BODY_SHA256_HEX
+        } else {
+            CryptoUtils.sha256Hex(bodyBytes)
+        }
+        if (!CryptoUtils.constantTimeEquals(expectedBodyHash, bodyHashHeader)) {
+            return false
+        }
+
+        val nowMs = System.currentTimeMillis()
+        if (abs(nowMs - timestampMs) > CryptoUtils.AUTH_MAX_SKEW_MS) {
+            return false
+        }
+
+        val canonical = CryptoUtils.canonicalAuthMessage(
+            method = method,
+            path = canonicalPath.ifBlank { request.path() },
+            groupId = settings.groupId,
+            timestampMs = timestampMs,
+            nonceHex = nonceHex,
+            bodySha256Hex = bodyHashHeader,
+        )
+        val expectedSignature = CryptoUtils.hmacSha256Hex(settings.macKeyBytes(), canonical)
+        if (!CryptoUtils.constantTimeEquals(expectedSignature, receivedSignature)) {
+            return false
+        }
+
+        return markReplayNonce(nonceHex, nowMs)
+    }
+
+    private fun markReplayNonce(nonceHex: String, nowMs: Long): Boolean {
+        synchronized(replayNonceLock) {
+            val minTimestamp = nowMs - CryptoUtils.AUTH_MAX_SKEW_MS
+            val staleKeys = seenReplayNonces
+                .filterValues { timestamp -> timestamp < minTimestamp }
+                .keys
+                .toList()
+            staleKeys.forEach(seenReplayNonces::remove)
+
+            if (seenReplayNonces.containsKey(nonceHex)) {
+                return false
+            }
+
+            if (seenReplayNonces.size >= MAX_REPLAY_CACHE_ENTRIES) {
+                val firstKey = seenReplayNonces.keys.firstOrNull()
+                if (firstKey != null) {
+                    seenReplayNonces.remove(firstKey)
+                }
+            }
+
+            seenReplayNonces[nonceHex] = nowMs
+            return true
+        }
+    }
+
+    private fun intToBE(value: Int): ByteArray = byteArrayOf(
+        (value ushr 24).toByte(),
+        (value ushr 16).toByte(),
+        (value ushr 8).toByte(),
+        value.toByte(),
+    )
+
+    private fun longToBE(value: Long): ByteArray {
+        val result = ByteArray(8)
+        for (i in 0 until 8) result[i] = (value ushr ((7 - i) * 8)).toByte()
+        return result
     }
 
     private companion object {
         const val TAG = "FenixHubServer"
         const val DEFAULT_PORT = 8765
-        const val HMAC_HEADER = "X-FenixHub-Auth"
+        const val EPHEMERAL_DEFAULT_PORT = 8766
         const val ENCRYPTED_HEADER = "X-FenixHub-Encrypted"
         const val NONCE_SIZE = 12
         const val GCM_TAG_BITS = 128
-        const val CHUNK_SIZE = 256 * 1024  // 256 KB
+        const val CHUNK_SIZE = 256 * 1024       // 256 KB (ephemeral plaintext streaming)
+        const val FNX2_CHUNK_SIZE = 64 * 1024  // 64 KB — matches desktop FNX2 decoder
+        const val FNX2_COMPRESSION_NONE = 0x00
+        const val MAX_REPLAY_CACHE_ENTRIES = 8_192
         val secureRandom = SecureRandom()
+        val FNX2_MAGIC = byteArrayOf(
+            'F'.code.toByte(), 'N'.code.toByte(),
+            'X'.code.toByte(), '2'.code.toByte(),
+        )
     }
 }

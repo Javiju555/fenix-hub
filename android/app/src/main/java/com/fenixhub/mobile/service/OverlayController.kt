@@ -1,5 +1,6 @@
 package com.fenixhub.mobile.service
 
+import android.animation.ObjectAnimator
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -49,7 +50,7 @@ class OverlayController(
     private var layoutParams: WindowManager.LayoutParams? = null
     private var minimized = false
 
-    fun show() {
+    fun show(onDismissed: (() -> Unit)? = null) {
         if (!Settings.canDrawOverlays(context)) return
 
         if (webView != null) {
@@ -70,22 +71,43 @@ class OverlayController(
             onOpenMainApp = ::openMainApp,
             onMinimizeOverlay = ::minimize,
             onExpandOverlay = ::expand,
-            onCloseOverlay = ::dismiss,
+            onCloseOverlay = {
+                onDismissed?.invoke()
+                dismiss()
+            },
         )
         bridge = currentBridge
         val view = createWebView(currentBridge)
-        val params = minimizedLayoutParams()
+        val params = baseLayoutParams()
         webView = view
         layoutParams = params
-        minimized = true
+        minimized = false
         currentBridge.attach(view)
+        view.alpha = 0f
         windowManager.addView(view, params)
+
+        view.viewTreeObserver.addOnGlobalLayoutListener(
+            object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() {
+                    if (view.width == 0) return
+                    view.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                    view.translationX = view.width.toFloat()
+                    view.animate()
+                        .translationX(0f)
+                        .alpha(1f)
+                        .setDuration(SLIDE_IN_DURATION_MS)
+                        .setInterpolator(android.view.animation.OvershootInterpolator(0.8f))
+                        .start()
+                }
+            },
+        )
         view.loadUrl(OVERLAY_URL)
     }
 
     fun minimize() {
         val current = webView ?: return
         if (minimized) return
+        if (current.parent == null) return
 
         val params = minimizedLayoutParams()
         layoutParams = params
@@ -97,6 +119,7 @@ class OverlayController(
     fun expand() {
         val current = webView ?: return
         if (!minimized) return
+        if (current.parent == null) return
 
         val params = baseLayoutParams()
         layoutParams = params
@@ -107,7 +130,9 @@ class OverlayController(
 
     fun dismiss() {
         webView?.let { current ->
-            runCatching { windowManager.removeView(current) }
+            if (current.parent != null) {
+                runCatching { windowManager.removeView(current) }
+            }
             current.removeJavascriptInterface(BRIDGE_NAME)
             current.destroy()
         }
@@ -243,5 +268,6 @@ class OverlayController(
 
         private const val MINIMIZED_SIZE_DP = 58
         private const val MINIMIZED_MARGIN_DP = 12
+        private const val SLIDE_IN_DURATION_MS = 280L
     }
 }

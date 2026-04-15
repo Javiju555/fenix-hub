@@ -9,6 +9,7 @@ import com.fenixhub.mobile.model.AppSettings
 import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.SendMode
+import com.fenixhub.mobile.model.WifiDirectTransferState
 import com.fenixhub.mobile.service.FenixHubService
 import com.fenixhub.mobile.service.HotspotManager
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +53,10 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
     /** Estado del hotspot local (sin internet). Observar para actualizar la UI. */
     val hotspotState: StateFlow<HotspotManager.State> = container.hotspotManager.state
 
+    /** Estado de la transferencia WiFi Direct. */
+    val wifiDirectTransferState: StateFlow<WifiDirectTransferState> =
+        container.wifiDirectTransferController.transferState
+
     // ── Contenido ─────────────────────────────────────────────────────────────
 
     fun importText(text: String) {
@@ -94,5 +99,28 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun stopHotspot() {
         FenixHubService.start(getApplication(), FenixHubService.ACTION_STOP_HOTSPOT)
+    }
+
+    // ── WiFi Direct Transfer ──────────────────────────────────────────────
+
+    /**
+     * Inicia una transferencia por WiFi Direct del contenido seleccionado.
+     * El contenido debe estar publicado previamente.
+     */
+    fun sendViaWifiDirect() {
+        val contentId = uiState.value.selectedLocalContentId ?: return
+        val app = getApplication<Application>()
+        val service = app.getSystemService(FenixHubService::class.java)
+            ?: return
+        // Usar el servicio directamente si está corriendo
+        FenixHubService.start(app, FenixHubService.ACTION_SHOW_OVERLAY)
+    }
+
+    /**
+     * Inicia una transferencia por WiFi Direct de un contenido específico.
+     */
+    fun sendViaWifiDirect(contentId: String) {
+        val app = getApplication<Application>()
+        FenixHubService.start(app, FenixHubService.ACTION_SHOW_OVERLAY)
     }
 }

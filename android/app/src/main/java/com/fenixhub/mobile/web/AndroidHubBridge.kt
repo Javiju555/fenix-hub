@@ -1,6 +1,7 @@
 package com.fenixhub.mobile.web
 
 import android.content.ClipboardManager
+import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import android.util.Log
@@ -11,16 +12,28 @@ import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
 import com.fenixhub.mobile.AppContainer
+import com.fenixhub.mobile.model.AppSettings
 import com.fenixhub.mobile.model.Announcement
 import com.fenixhub.mobile.model.HubContentType
 import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.PulledContent
 import com.fenixhub.mobile.model.SendMode
+import com.fenixhub.mobile.model.MeshRole
+import com.fenixhub.mobile.model.MeshStatus
+import com.fenixhub.mobile.model.MeshDevice
+import com.fenixhub.mobile.network.BleDirectController
+import com.fenixhub.mobile.network.DirectBleListener
+import com.fenixhub.mobile.network.DirectBlePeer
+import com.fenixhub.mobile.network.EphemeralDirectSession
+import com.fenixhub.mobile.network.FenixHttpServer
 import com.fenixhub.mobile.service.FenixHubService
+import com.fenixhub.mobile.util.CryptoUtils
+import com.fenixhub.mobile.util.TransportHardwareInspector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
@@ -35,6 +48,24 @@ class AndroidHubBridge(
 ) {
     @Volatile
     private var webView: WebView? = null
+
+    private val selectedDirectPeerIds = mutableSetOf<String>()
+
+    private val directModeListener = object : DirectBleListener {
+        override fun onPeerDiscovered(peer: DirectBlePeer) {
+            Log.d(TAG, "Direct peer discovered: ${peer.deviceName}")
+        }
+        override fun onPeerLost(peerId: String) {
+            Log.d(TAG, "Direct peer lost: $peerId")
+            selectedDirectPeerIds.remove(peerId)
+        }
+        override fun onIncomingInvite(peer: DirectBlePeer) {
+            Log.i(TAG, "Incoming invite from: ${peer.deviceName}")
+        }
+        override fun onError(reason: String) {
+            Log.w(TAG, "Direct mode error: $reason")
+        }
+    }
 
     fun attach(webView: WebView) {
         this.webView = webView
@@ -70,6 +101,15 @@ class AndroidHubBridge(
         return when (command) {
             "get_identity" -> identityJson().toString()
             "setup_identity" -> setupIdentityJson(requirePayloadArgs(args)).toString()
+            "update_identity" -> updateIdentityJson(requirePayloadArgs(args)).toString()
+            "delete_identity_only" -> {
+                deleteIdentityOnly()
+                "null"
+            }
+            "list_identity_profiles" -> profilesPayloadJson().toString()
+            "save_current_identity_profile" -> saveCurrentIdentityProfileJson(requirePayloadArgs(args)).toString()
+            "activate_identity_profile" -> activateIdentityProfileJson(requirePayloadArgs(args)).toString()
+            "delete_identity_profile" -> deleteIdentityProfileJson(requirePayloadArgs(args)).toString()
             "get_local_content" -> JSONArray().apply {
                 container.contentRepository.localContent.value.forEach { put(localContentJson(it)) }
             }.toString()
@@ -95,42 +135,385 @@ class AndroidHubBridge(
                 unpublishContent(args)
                 "null"
             }
+            "start_direct_mode_sender" -> {
+                startDirectModeSender()
+                "null"
+            }
+            "accept_direct_peers" -> {
+                acceptDirectPeers(args)
+                "null"
+            }
+            "cancel_direct_mode" -> {
+                cancelDirectMode()
+                "null"
+            }
+            "start_direct_mode_receiver" -> {
+                FenixHubService.start(activity)
+                activity.lifecycleScope.launch(Dispatchers.Main.immediate) {
+                    container.ephemeralSession.startAsReceiver(container.settingsStore.current().deviceName)
+                }
+                "null"
+            }
+            "get_current_inviter" -> {
+                getCurrentInviterJson().toString()
+            }
+            "accept_direct_invite" -> {
+                activity.lifecycleScope.launch(Dispatchers.Main.immediate) {
+                    container.ephemeralSession.acceptIncomingInvite { senderIp, senderPort, contentId ->
+                        Log.i(TAG, "Direct invite accepted: $senderIp:$senderPort contentId=$contentId")
+                    }
+                }
+                "null"
+            }
+            "reject_direct_invite" -> {
+                container.ephemeralSession.rejectIncomingInvite()
+                "null"
+            }
+            "toggle_direct_peer" -> {
+                toggleDirectPeer(args)
+                "null"
+            }
+            "get_direct_peers" -> {
+                getDirectPeersJson().toString()
+            }
+            "get_direct_session_state" -> {
+                getDirectSessionStateJson().toString()
+            }
+            "get_mesh_state" -> getMeshStateJson().toString()
+            "refresh_direct_peers" -> getDirectPeersJson().toString()
             "stop_server" -> {
                 container.contentRepository.unpublishAll()
                 "null"
             }
             "pull_peer_content" -> pullPeerContent(args).toString()
+            "get_transport_hardware" -> getTransportHardwareJson().toString()
+            "clear_received_cache" -> {
+                clearReceivedCache()
+                "null"
+            }
+            "confirm_reset" -> "true"
+            "reset_all_data" -> {
+                resetAllData()
+                "null"
+            }
             "open_overlay" -> if (openOverlay()) "true" else "false"
+            "publish_all_local" -> {
+                publishAllLocal()
+                "null"
+            }
+            "mesh_start_host" -> {
+                val contentPool = args?.optJSONArray("content_pool")?.let { arr ->
+                    (0 until arr.length()).map { arr.getString(it) }
+                } ?: emptyList()
+                container.meshManager.dispatch(
+                    com.fenixhub.mobile.service.MeshManager.MeshCommand.StartAsHost(contentPool)
+                )
+                "null"
+            }
+            "mesh_start_device" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.StartAsDevice)
+                "null"
+            }
+            "mesh_accept_device" -> {
+                val deviceId = args?.optString("device_id").orEmpty()
+                if (deviceId.isNotBlank()) {
+                    container.meshManager.dispatch(
+                        com.fenixhub.mobile.service.MeshManager.MeshCommand.AcceptDevice(deviceId)
+                    )
+                }
+                "null"
+            }
+            "mesh_reject_device" -> {
+                val deviceId = args?.optString("device_id").orEmpty()
+                if (deviceId.isNotBlank()) {
+                    container.meshManager.dispatch(
+                        com.fenixhub.mobile.service.MeshManager.MeshCommand.RejectDevice(deviceId)
+                    )
+                }
+                "null"
+            }
+            "mesh_request_join" -> {
+                val hostMeshId = args?.optString("host_mesh_id").orEmpty()
+                val hostName = args?.optString("host_name").orEmpty()
+                container.meshManager.dispatch(
+                    com.fenixhub.mobile.service.MeshManager.MeshCommand.RequestJoin(hostMeshId, hostName)
+                )
+                "null"
+            }
+            "mesh_cancel_discovery" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.CancelDiscovery)
+                "null"
+            }
+            "mesh_close_modal" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.CloseModal)
+                "null"
+            }
+            "mesh_leave" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.LeaveMesh)
+                "null"
+            }
+            "mesh_finalize" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.FinalizeTransfer)
+                "null"
+            }
+            "mesh_confirm_received" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.ConfirmAllReceived)
+                "null"
+            }
+            "mesh_get_state" -> getMeshStateJson().toString()
             else -> error("Comando no soportado: $command")
         }
     }
 
+    private fun getTransportHardwareJson(): JSONObject {
+        val settings = container.settingsStore.current()
+        if (settings.configured) {
+            container.bleIdentityController.ensureRunning(settings.groupId, settings.deviceName)
+            container.wifiDirectController.ensureRunning()
+        }
+
+        val snapshot = TransportHardwareInspector.snapshot(activity)
+        val bleStatus = container.bleIdentityController.status()
+        val wifiStatus = container.wifiDirectController.status()
+        val blePeers = container.bleIdentityController.snapshotPeers()
+        val wifiPeers = container.wifiDirectController.snapshotPeers()
+
+        val handoffCandidates = JSONArray().apply {
+            blePeers.forEach { blePeer ->
+                val wifiPeer = wifiPeers.firstOrNull { candidate ->
+                    candidate.deviceName.trim().equals(blePeer.deviceName.trim(), ignoreCase = true)
+                }
+                if (wifiPeer != null) {
+                    put(
+                        JSONObject()
+                            .put("device_name", blePeer.deviceName)
+                            .put("ble_id", blePeer.deviceId)
+                            .put("wifi_direct_id", wifiPeer.deviceAddress)
+                            .put("flow", "ble_discovery_then_wifi_direct_transfer"),
+                    )
+                }
+            }
+        }
+
+        val blePeersJson = JSONArray().apply {
+            blePeers.forEach { peer ->
+                put(
+                    JSONObject()
+                        .put("id", peer.deviceId)
+                        .put("device_name", peer.deviceName)
+                        .put("rssi", peer.rssi)
+                        .put("last_seen_elapsed_ms", peer.lastSeenElapsedMs),
+                )
+            }
+        }
+
+        val wifiPeersJson = JSONArray().apply {
+            wifiPeers.forEach { peer ->
+                put(
+                    JSONObject()
+                        .put("id", peer.deviceAddress)
+                        .put("device_name", peer.deviceName)
+                        .put("status", peer.status)
+                        .put("last_seen_elapsed_ms", peer.lastSeenElapsedMs),
+                )
+            }
+        }
+
+        val airdropReady = snapshot.ble.supported && snapshot.ble.enabled && snapshot.ble.permissionsReady &&
+            snapshot.wifiDirect.supported && snapshot.wifiDirect.enabled && snapshot.wifiDirect.permissionsReady
+
+        return JSONObject()
+            .put(
+                "ble",
+                JSONObject()
+                    .put("supported", snapshot.ble.supported)
+                    .put("enabled", snapshot.ble.enabled)
+                    .put("permissions_ready", snapshot.ble.permissionsReady)
+                    .put("adapter_name", nullable(snapshot.ble.adapterName))
+                    .put("scanning", bleStatus.scanning)
+                    .put("advertising", bleStatus.advertising)
+                    .put("last_error", nullable(bleStatus.lastError)),
+            )
+            .put(
+                "wifi_direct",
+                JSONObject()
+                    .put("supported", snapshot.wifiDirect.supported)
+                    .put("enabled", snapshot.wifiDirect.enabled)
+                    .put("permissions_ready", snapshot.wifiDirect.permissionsReady)
+                    .put("discovering", wifiStatus.discovering)
+                    .put("last_error", nullable(wifiStatus.lastError)),
+            )
+            .put("airdrop_ready", airdropReady)
+            .put("flow", "ble_discovery_then_wifi_direct_transfer")
+            .put("ble_peers", blePeersJson)
+            .put("wifi_direct_peers", wifiPeersJson)
+            .put("handoff_candidates", handoffCandidates)
+    }
+
     private fun identityJson(): JSONObject {
         val settings = container.settingsStore.current()
+        return identityJson(settings)
+    }
+
+    private fun identityJson(settings: AppSettings): JSONObject {
         return JSONObject()
             .put("device_name", settings.deviceName)
             .put("group_id", settings.groupId)
             .put("configured", settings.configured)
+            .put("device_type", settings.deviceType)
     }
 
     private suspend fun setupIdentityJson(args: JSONObject): JSONObject {
         val passphrase = args.optString("passphrase").trim()
         val deviceName = args.optString("device_name").trim()
+        val deviceType = optionalTrimmedString(args, "device_type")
         require(passphrase.isNotBlank()) { "La frase de acceso es obligatoria" }
         require(deviceName.isNotBlank()) { "El nombre del dispositivo es obligatorio" }
+        CryptoUtils.validatePassphraseStrength(passphrase)?.let { message ->
+            error(message)
+        }
 
         val settings = withContext(Dispatchers.Default) {
-            container.settingsStore.saveIdentity(passphrase, deviceName)
+            container.settingsStore.saveIdentity(passphrase, deviceName, deviceType)
         }
 
         withContext(Dispatchers.Main.immediate) {
             FenixHubService.start(activity)
         }
 
+        return identityJson(settings)
+    }
+
+    private suspend fun updateIdentityJson(args: JSONObject): JSONObject {
+        val current = container.settingsStore.current()
+        require(current.configured) { "Identity not configured" }
+
+        val passphrase = optionalTrimmedString(args, "passphrase")
+        val deviceName = args.optString("device_name").trim()
+        val deviceType = optionalTrimmedString(args, "device_type")
+        require(deviceName.isNotBlank()) { "Device name is required" }
+
+        val settings = withContext(Dispatchers.Default) {
+            container.settingsStore.updateIdentity(passphrase, deviceName, deviceType)
+        }
+        val groupChanged = current.groupId.isNotBlank() && current.groupId != settings.groupId
+
+        withContext(Dispatchers.Main.immediate) {
+            FenixHubService.start(activity, FenixHubService.ACTION_REFRESH_IDENTITY)
+        }
+
         return JSONObject()
-            .put("device_name", settings.deviceName)
-            .put("group_id", settings.groupId)
-            .put("configured", settings.configured)
+            .put("identity", identityJson(settings))
+            .put("group_changed", groupChanged)
+            .put("requires_restart", groupChanged)
+    }
+
+    private fun profilesPayloadJson(): JSONObject {
+        return profilesPayloadJson(container.settingsStore.listProfiles())
+    }
+
+    private fun profilesPayloadJson(
+        profiles: List<com.fenixhub.mobile.model.IdentityProfileInfo>,
+    ): JSONObject {
+        val payload = JSONArray()
+        profiles.forEach { profile ->
+            payload.put(
+                JSONObject()
+                    .put("name", profile.name)
+                    .put("device_name", profile.deviceName)
+                    .put("group_id", profile.groupId)
+                    .put("device_type", profile.deviceType)
+                    .put("active", profile.active),
+            )
+        }
+        return JSONObject().put("profiles", payload)
+    }
+
+    private fun saveCurrentIdentityProfileJson(args: JSONObject): JSONObject {
+        val name = args.optString("name").trim()
+        val makeActive = args.optBoolean("make_active", false)
+        val profiles = container.settingsStore.saveCurrentProfile(name, makeActive)
+        return profilesPayloadJson(profiles)
+    }
+
+    private suspend fun activateIdentityProfileJson(args: JSONObject): JSONObject {
+        val name = args.optString("name").trim()
+        require(name.isNotBlank()) { "Profile name is required" }
+
+        val previousGroup = container.settingsStore.current().groupId
+        val settings = withContext(Dispatchers.Default) {
+            container.settingsStore.activateProfile(name)
+        } ?: error("Profile not found")
+
+        withContext(Dispatchers.Main.immediate) {
+            FenixHubService.start(activity, FenixHubService.ACTION_REFRESH_IDENTITY)
+        }
+
+        val groupChanged = previousGroup.isNotBlank() && previousGroup != settings.groupId
+        return JSONObject()
+            .put("identity", identityJson(settings))
+            .put("group_changed", groupChanged)
+            .put("requires_restart", true)
+    }
+
+    private fun deleteIdentityProfileJson(args: JSONObject): JSONObject {
+        val name = args.optString("name").trim()
+        require(name.isNotBlank()) { "Profile name is required" }
+        val profiles = container.settingsStore.removeProfile(name)
+        return profilesPayloadJson(profiles)
+    }
+
+    private suspend fun deleteIdentityOnly() {
+        withContext(Dispatchers.Default) {
+            container.contentRepository.unpublishAll()
+            container.contentRepository.clearPeers()
+            container.settingsStore.clearIdentityOnly()
+        }
+        stopRuntimeNetworking()
+    }
+
+    private suspend fun clearReceivedCache() {
+        withContext(Dispatchers.Default) {
+            clearLocalHubData()
+            val receivedDir = File(activity.cacheDir, "fenixhub/received")
+            if (receivedDir.exists()) {
+                receivedDir.deleteRecursively()
+            }
+        }
+    }
+
+    private suspend fun resetAllData() {
+        withContext(Dispatchers.Default) {
+            clearLocalHubData()
+            val receivedDir = File(activity.cacheDir, "fenixhub/received")
+            if (receivedDir.exists()) {
+                receivedDir.deleteRecursively()
+            }
+            container.contentRepository.clearPeers()
+            container.settingsStore.resetAllData()
+        }
+        stopRuntimeNetworking()
+    }
+
+    private fun clearLocalHubData() {
+        val localIds = container.contentRepository.localContent.value.map { it.contentId }
+        localIds.forEach { contentId ->
+            container.contentRepository.removeLocalContent(contentId)?.let { removed ->
+                container.tempClipboardStore.deleteContent(removed.contentId)
+            }
+        }
+        container.tempClipboardStore.clearAll()
+    }
+
+    private suspend fun stopRuntimeNetworking() {
+        withContext(Dispatchers.Main.immediate) {
+            container.bleIdentityController.stop()
+            container.wifiDirectController.stop()
+            container.hotspotManager.stop()
+            runCatching {
+                activity.stopService(Intent(activity, FenixHubService::class.java))
+            }
+        }
     }
 
     private suspend fun addTextContent(args: JSONObject?): JSONObject {
@@ -216,6 +599,148 @@ class AndroidHubBridge(
         container.contentRepository.unpublish(contentId)
     }
 
+    // ── Direct Mode (AirDrop-like) ───────────────────────────────────────
+
+    private fun startDirectModeSender() {
+        FenixHubService.start(activity)
+        selectedDirectPeerIds.clear()
+        activity.lifecycleScope.launch(Dispatchers.Main.immediate) {
+            container.bleDirectController.startDirectMode(
+                role = BleDirectController.Role.SENDER,
+                deviceName = container.settingsStore.current().deviceName,
+                listener = directModeListener,
+            )
+            Log.i(TAG, "Direct mode sender started")
+        }
+    }
+
+    private fun toggleDirectPeer(args: JSONObject?) {
+        val peerId = args?.optString("peer_id").orEmpty()
+        if (peerId.isBlank()) return
+        if (selectedDirectPeerIds.contains(peerId)) {
+            selectedDirectPeerIds.remove(peerId)
+        } else {
+            selectedDirectPeerIds.add(peerId)
+        }
+        Log.d(TAG, "Toggled peer selection: $peerId, selected: $selectedDirectPeerIds")
+    }
+
+    private fun acceptDirectPeers(args: JSONObject?) {
+        val selectedIds = args?.optJSONArray("selected_peer_ids")
+            ?.let { arr ->
+                (0 until arr.length()).map { arr.getString(it) }.toSet()
+            }
+            ?: emptySet()
+        val contentId = args?.optString("content_id").orEmpty()
+            .ifBlank { container.contentRepository.latestLocalContent()?.contentId }
+            ?: return
+
+        activity.lifecycleScope.launch(Dispatchers.Main.immediate) {
+            val session = createEphemeralSession()
+            selectedIds.forEach { session.togglePeerSelection(it) }
+            session.acceptSelectedPeers(contentId) { ephemeralId, peerCount ->
+                Log.i(TAG, "Direct mode accepted: ephemeralId=$ephemeralId, peers=$peerCount")
+            }
+        }
+    }
+
+    private fun cancelDirectMode() {
+        container.bleDirectController.stopDirectMode()
+        selectedDirectPeerIds.clear()
+    }
+
+    private fun createEphemeralSession(): EphemeralDirectSession {
+        return EphemeralDirectSession(
+            context = activity,
+            bleController = container.bleDirectController,
+            transferController = container.wifiDirectTransferController,
+            contentRepository = container.contentRepository,
+            receivedHandler = container.receivedContentHandler,
+            httpClient = container.httpClient,
+            httpServer = FenixHttpServer(container.settingsStore, container.contentRepository),
+        )
+    }
+
+    private fun getDirectPeersJson(): JSONObject {
+        val peers = container.bleDirectController.snapshotPeers()
+        val status = container.bleDirectController.status()
+        return JSONObject()
+            .put("peers", JSONArray().apply {
+                peers.forEach { peer ->
+                    put(JSONObject()
+                        .put("device_id", peer.deviceId)
+                        .put("device_name", peer.deviceName)
+                        .put("ephemeral_group_id", peer.ephemeralGroupId)
+                        .put("rssi", peer.rssi)
+                        .put("selected", selectedDirectPeerIds.contains(peer.deviceId))
+                    )
+                }
+            })
+            .put("discovering", status.discovering)
+            .put("advertising", status.advertising)
+    }
+
+    private fun getDirectSessionStateJson(): JSONObject {
+        val status = container.bleDirectController.status()
+        val ephemeralId = container.bleDirectController.currentEphemeralGroupId()
+        return JSONObject()
+            .put("discovering", status.discovering)
+            .put("advertising", status.advertising)
+            .put("ephemeral_group_id", ephemeralId)
+            .put("peer_count", container.bleDirectController.snapshotPeers().size)
+    }
+
+    private fun getMeshStateJson(): JSONObject {
+        val state = container.meshManager.state.value
+        return JSONObject()
+            .put("role", state.role.name.lowercase())
+            .put("status", state.status.name.lowercase())
+            .put("mesh_id", state.meshId ?: JSONObject.NULL)
+            .put("passphrase_set", state.passphrase != null)
+            .put("pending_devices", JSONArray().apply {
+                state.pendingDevices.forEach { device ->
+                    put(JSONObject()
+                        .put("id", device.id)
+                        .put("name", device.name)
+                        .put("rssi", device.rssi)
+                        .put("status", device.status.name.lowercase()))
+                }
+            })
+            .put("active_devices", JSONArray().apply {
+                state.activeDevices.forEach { device ->
+                    put(JSONObject()
+                        .put("id", device.id)
+                        .put("name", device.name)
+                        .put("rssi", device.rssi)
+                        .put("status", device.status.name.lowercase())
+                        .put("joined_at", device.joinedAt ?: JSONObject.NULL))
+                }
+            })
+            .put("local_content_pool", JSONArray().apply {
+                state.localContentPool.forEach { put(it) }
+            })
+            .put("is_active", state.isActive)
+            .put("can_add_devices", state.canAddDevices)
+            .put("can_leave", state.canLeave)
+            .put("pending_count", state.pendingCount)
+    }
+
+    private fun getCurrentInviterJson(): JSONObject {
+        val inviter = container.ephemeralSession.getCurrentInviter()
+        return if (inviter != null) {
+            JSONObject()
+                .put("has_invite", true)
+                .put("device_name", inviter.deviceName)
+                .put("ephemeral_group_id", inviter.ephemeralGroupId)
+                .put("sender_ip", inviter.senderIp ?: "")
+                .put("sender_port", inviter.senderPort ?: 0)
+                .put("content_id", inviter.contentId ?: "")
+        } else {
+            JSONObject().put("has_invite", false)
+        }
+    }
+
+
     private suspend fun pullPeerContent(args: JSONObject?): JSONObject {
         val transfer = resolvePeerTransfer(args)
         val received = withContext(Dispatchers.IO) {
@@ -260,6 +785,17 @@ class AndroidHubBridge(
             } else {
                 openOverlayPermissionSettings()
                 false
+            }
+        }
+    }
+
+    private fun publishAllLocal() {
+        FenixHubService.start(activity)
+        val items = container.contentRepository.localContent.value
+        if (items.isEmpty()) return
+        items.forEach { item ->
+            if (!item.isPublished) {
+                container.contentRepository.publish(item.contentId, SendMode.Broadcast)
             }
         }
     }
@@ -310,6 +846,11 @@ class AndroidHubBridge(
 
     private fun requirePayloadArgs(args: JSONObject?): JSONObject {
         return args?.optJSONObject("args") ?: args ?: JSONObject()
+    }
+
+    private fun optionalTrimmedString(args: JSONObject, key: String): String? {
+        if (!args.has(key) || args.isNull(key)) return null
+        return args.optString(key).trim().ifBlank { null }
     }
 
     private suspend fun resolvePeerTransfer(args: JSONObject?): PeerTransfer {
