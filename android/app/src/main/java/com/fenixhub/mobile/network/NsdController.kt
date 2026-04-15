@@ -33,6 +33,8 @@ class NsdController(
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private val registrations = linkedMapOf<String, RegistrationHandle>()
     private val peerLastSeenAt = linkedMapOf<String, Long>()
+    // Last port used for registration — needed to re-announce on refresh cycles.
+    @Volatile private var currentPort: Int = 0
 
     // Android 12+ only allows one resolveService() at a time.
     // Queue pending resolves and drain one-by-one after each completes.
@@ -47,6 +49,11 @@ class NsdController(
             refreshRequested = true
             stopDiscoveryInternal()
         }
+        // Re-register all services so devices that started late receive a fresh
+        // mDNS announcement. Android's NSD responder does not reply to PTR queries
+        // for services that have been registered for a while, so periodic
+        // re-registration is required for late-joining peers to discover us.
+        reannounceAll()
         scheduleRefresh()
     }
 
@@ -58,6 +65,7 @@ class NsdController(
     }
 
     fun syncPublishedContent(items: List<LocalContent>, port: Int) {
+        currentPort = port
         val settings = settingsStore.current()
         if (!settings.configured) return
 
@@ -73,6 +81,19 @@ class NsdController(
             }
             unregisterInternal(item.contentId)
             register(item.contentId, payload, port)
+        }
+    }
+
+    /** Force re-register all services to trigger fresh mDNS announcements. */
+    private fun reannounceAll() {
+        val port = currentPort
+        if (port == 0 || registrations.isEmpty()) return
+        Log.d(TAG, "Re-announcing ${registrations.size} service(s) for late-joiner discovery")
+        registrations.keys.toList().forEach { contentId ->
+            val handle = registrations[contentId] ?: return@forEach
+            runCatching { nsdManager.unregisterService(handle.listener) }
+            registrations.remove(contentId)
+            register(contentId, handle.payload, port)
         }
     }
 
@@ -167,6 +188,7 @@ class NsdController(
         registrations[contentId] = RegistrationHandle(
             serviceName = serviceInfo.serviceName,
             payload = payload,
+            port = port,
             listener = listener,
         )
         nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, listener)
@@ -190,6 +212,7 @@ class NsdController(
     private data class RegistrationHandle(
         val serviceName: String,
         val payload: String,
+        val port: Int,
         val listener: NsdManager.RegistrationListener,
     )
 
@@ -368,7 +391,7 @@ class NsdController(
     private companion object {
         const val TAG = "FenixHubNsd"
         const val SERVICE_TYPE = "_fenixhub._tcp."
-        const val PROTOCOL_VERSION = 1
+        const val PROTOCOL_VERSION = 3
         const val DISCOVERY_REFRESH_MS = 15_000L
         const val DISCOVERY_RETRY_MS = 3_000L
         const val PEER_EXPIRY_MS = 45_000L
@@ -382,11 +405,6 @@ class NsdController(
         if (item.contentType != HubContentType.IMAGE) {
             return item.preview
         }
-
-        return runCatching {
-            PreviewUtils.imageAnnouncementPreviewDataUrl(File(item.cachePath).readBytes())
-        }.getOrElse {
-            item.fileName?.let { fileName -> "Imagen: ${fileName.take(48)}" } ?: "Imagen lista para descargar"
-        }
+        return item.fileName?.let { "Imagen: ${it.take(48)}" } ?: "Imagen lista para descargar"
     }
 }

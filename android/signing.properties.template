@@ -1,0 +1,14 @@
+# Copia este archivo a signing.properties y rellena los valores.
+# signing.properties está gitignoreado — nunca lo subas al repo.
+
+# Ruta relativa al directorio android/ (o absoluta)
+storeFile=../packaging/fenixhub-release.jks
+
+# Contraseña del keystore
+storePassword=TU_CONTRASEÑA_KEYSTORE
+
+# Alias de la clave (el que pusiste en keytool -alias)
+keyAlias=fenixhub
+
+# Contraseña del alias (puede ser la misma que storePassword)
+keyPassword=TU_CONTRASEÑA_KEY

@@ -55,10 +55,7 @@ const nativePending = new Map<string, NativePendingRequest>();
 
 let localContent: ContentItem[] = [];
 let peerContent: PeerAnnouncement[] = [];
-let onlineDevices: string[] = [];
 let activeTab: 'local' | 'red' = 'local';
-let selectedLocalId: string | null = null;
-let selectedPeerId: string | null = null;
 let overlayMinimized = false;
 
 function localFingerprint(item: ContentItem): string {
@@ -250,6 +247,9 @@ async function invokeMock<T>(cmd: string, args?: unknown): Promise<T> {
       );
       return undefined as T;
     }
+    case 'publish_all_local':
+      mockLocal = mockLocal.map(item => ({ ...item, is_published: true }));
+      return undefined as T;
     case 'remove_content':
       mockLocal = mockLocal.filter(item => item.id !== (a?.id as string));
       return undefined as T;
@@ -311,17 +311,12 @@ function setupListeners() {
   listen<{ announcement: PeerAnnouncement }>('peer-content-available', ({ payload }) => {
     const announcement = payload.announcement;
     if (!upsertPeerAnnouncement(announcement)) return;
-    syncOnlineDevices();
     update();
   });
 
   listen<{ content_id: string }>('peer-content-gone', ({ payload }) => {
     if (!peerContent.some(item => item.content_id === payload.content_id)) return;
     peerContent = peerContent.filter(item => item.content_id !== payload.content_id);
-    if (selectedPeerId === payload.content_id) {
-      selectedPeerId = null;
-    }
-    syncOnlineDevices();
     update();
   });
 
@@ -339,15 +334,6 @@ async function loadState() {
     invoke<ContentItem[]>('get_local_content'),
     invoke<PeerAnnouncement[]>('get_peers'),
   ]);
-
-  if (selectedLocalId && !localContent.some(item => item.id === selectedLocalId)) {
-    selectedLocalId = null;
-  }
-  if (selectedPeerId && !peerContent.some(item => item.content_id === selectedPeerId)) {
-    selectedPeerId = null;
-  }
-
-  syncOnlineDevices();
 }
 
 async function refreshState() {
@@ -361,10 +347,6 @@ async function refreshState() {
   } catch (error) {
     console.error(error);
   }
-}
-
-function syncOnlineDevices() {
-  onlineDevices = [...new Set(peerContent.map(item => item.device_name))];
 }
 
 function render() {
@@ -409,7 +391,11 @@ function render() {
         <button class="overlay-expand" id="overlay-expand">${iconExpand(16)} Abrir</button>
       </div>
       <section class="overlay-stack" id="overlay-stack"></section>
-      <footer class="overlay-actions" id="overlay-actions"></footer>
+      <footer class="overlay-footer-bar">
+        <button class="overlay-footer-btn" id="act-paste">${iconClipboard(16)} Pegar</button>
+        <button class="overlay-footer-btn accent" id="act-share-all">${iconBroadcast(16)} Todo</button>
+        <button class="overlay-footer-btn subtle" id="act-close-overlay">${iconX(16)} Cerrar</button>
+      </footer>
     </div>
   `;
 
@@ -417,8 +403,6 @@ function render() {
     button.addEventListener('click', () => {
       const nextTab = button.dataset.tab as 'local' | 'red';
       activeTab = nextTab;
-      selectedLocalId = null;
-      selectedPeerId = null;
       update();
     });
   });
@@ -437,6 +421,12 @@ function render() {
     await invoke('close_overlay');
   });
 
+  document.getElementById('act-paste')!.addEventListener('click', () => void copyOrPasteLocal());
+  document.getElementById('act-share-all')!.addEventListener('click', () => void publishAllLocal());
+  document.getElementById('act-close-overlay')!.addEventListener('click', async () => {
+    await invoke('close_overlay');
+  });
+
   update();
 }
 
@@ -447,7 +437,6 @@ function update() {
     tab.classList.toggle('active', (tab as HTMLElement).dataset.tab === activeTab);
   });
   renderCards();
-  renderActions();
 }
 
 function renderCards() {
@@ -461,9 +450,8 @@ function renderCards() {
     }
 
     stack.innerHTML = localContent.map(item => {
-      const selected = selectedLocalId === item.id;
       return `
-        <button class="overlay-card ${selected ? 'selected' : ''}" data-local-id="${item.id}">
+        <button class="overlay-card ${item.is_published ? 'published' : ''}" data-local-id="${item.id}">
           <div class="overlay-card-top">
             <span class="overlay-type ${item.content_type}">${typeLabel(item.content_type)}</span>
             ${item.is_published ? '<span class="overlay-live">LIVE</span>' : ''}
@@ -477,8 +465,8 @@ function renderCards() {
     stack.querySelectorAll<HTMLButtonElement>('[data-local-id]').forEach(button => {
       button.addEventListener('click', () => {
         const id = button.dataset.localId!;
-        selectedLocalId = selectedLocalId === id ? null : id;
-        update();
+        const item = localContent.find(i => i.id === id);
+        if (item) showActionSheet(item, 'local');
       });
     });
   } else {
@@ -488,9 +476,8 @@ function renderCards() {
     }
 
     stack.innerHTML = peerContent.map(item => {
-      const selected = selectedPeerId === item.content_id;
       return `
-        <button class="overlay-card peer ${selected ? 'selected' : ''}" data-peer-id="${item.content_id}">
+        <button class="overlay-card peer" data-peer-id="${item.content_id}">
           <div class="overlay-card-top">
             <span class="overlay-type ${item.content_type}">${typeLabel(item.content_type)}</span>
             <span class="overlay-device">${escapeHtml(item.device_name)}</span>
@@ -504,141 +491,23 @@ function renderCards() {
     stack.querySelectorAll<HTMLButtonElement>('[data-peer-id]').forEach(button => {
       button.addEventListener('click', () => {
         const id = button.dataset.peerId!;
-        selectedPeerId = selectedPeerId === id ? null : id;
-        update();
+        const item = peerContent.find(i => i.content_id === id);
+        if (item) showActionSheet(item, 'red');
       });
     });
   }
 }
 
-function renderActions() {
-  const actions = document.getElementById('overlay-actions');
-  if (!actions) return;
-
-  if (activeTab === 'local') {
-    const targets = getLocalTargets();
-    const anyPublished = targets.some(item => item.is_published);
-    const allPublished = targets.length > 0 && targets.every(item => item.is_published);
-    actions.innerHTML = `
-      <div class="overlay-hint">${localHint(targets.length)}</div>
-      <div class="overlay-grid">
-        <button class="overlay-action" id="act-send">${iconSend(18)} Mandar a</button>
-        <button class="overlay-action" id="act-publish">${iconBroadcast(18)} ${allPublished ? 'Parar' : anyPublished ? 'Publicar resto' : 'Publicar'}</button>
-        <button class="overlay-action danger" id="act-delete">${iconTrash(18)} Borrar</button>
-        <button class="overlay-action" id="act-paste">${iconClipboard(18)} Pegar</button>
-      </div>
-      <div class="overlay-close-row">
-        <button class="overlay-action subtle" id="act-close-overlay">${iconX(18)} Cerrar overlay</button>
-      </div>
-    `;
-
-    document.getElementById('act-send')!.addEventListener('click', () => {
-      void sendLocalTargets();
-    });
-    document.getElementById('act-publish')!.addEventListener('click', () => {
-      void togglePublishTargets();
-    });
-    document.getElementById('act-delete')!.addEventListener('click', () => {
-      void deleteLocalTargets();
-    });
-    document.getElementById('act-paste')!.addEventListener('click', () => {
-      void copyOrPasteLocal();
-    });
-  } else {
-    const targets = getPeerTargets();
-    actions.innerHTML = `
-      <div class="overlay-hint">${peerHint(targets.length)}</div>
-      <div class="overlay-grid">
-        <button class="overlay-action success" id="act-download">${iconDownload(18)} Descargar</button>
-        <button class="overlay-action danger" id="act-ignore">${iconMute(18)} Ignorar</button>
-        <button class="overlay-action" id="act-copy">${iconCopy(18)} Copiar</button>
-        <button class="overlay-action" id="act-open">${iconExpand(18)} Abrir</button>
-      </div>
-      <div class="overlay-close-row">
-        <button class="overlay-action subtle" id="act-close-overlay">${iconX(18)} Cerrar overlay</button>
-      </div>
-    `;
-
-    document.getElementById('act-download')!.addEventListener('click', () => {
-      void downloadPeerTargets();
-    });
-    document.getElementById('act-ignore')!.addEventListener('click', () => {
-      void ignorePeerTargets();
-    });
-    document.getElementById('act-copy')!.addEventListener('click', () => {
-      void copyPeerTargets();
-    });
-    document.getElementById('act-open')!.addEventListener('click', async () => {
-      await invoke('open_full_app');
-    });
-  }
-
-  document.getElementById('act-close-overlay')?.addEventListener('click', async () => {
-    await invoke('close_overlay');
-  });
-}
-
-function getLocalTargets() {
-  if (selectedLocalId) {
-    return localContent.filter(item => item.id === selectedLocalId);
-  }
-  return localContent;
-}
-
-function getPeerTargets() {
-  if (selectedPeerId) {
-    return peerContent.filter(item => item.content_id === selectedPeerId);
-  }
-  return peerContent;
-}
-
-async function sendLocalTargets() {
-  const targets = getLocalTargets();
-  if (targets.length === 0) {
-    showToast('No hay contenido local');
-    return;
-  }
-  if (onlineDevices.length === 0) {
-    showToast('No hay peers conectados');
-    return;
-  }
-  if (onlineDevices.length === 1) {
-    await sendToDevice(onlineDevices[0]);
-    return;
-  }
-  openDeviceSheet();
-}
-
-async function sendToDevice(device: string) {
+async function togglePublishSingle(id: string) {
+  const item = localContent.find(i => i.id === id);
+  if (!item) return;
   try {
-    for (const item of getLocalTargets()) {
-      await invoke('publish_content', { args: { content_id: item.id, target_device: device } });
-    }
-    showToast(`Enviado a ${device}`);
-    await refreshState();
-  } catch (error) {
-    showToast(errorMessage(error));
-  }
-}
-
-async function togglePublishTargets() {
-  const targets = getLocalTargets();
-  if (targets.length === 0) {
-    showToast('No hay contenido local');
-    return;
-  }
-  const allPublished = targets.every(item => item.is_published);
-  try {
-    if (allPublished) {
-      for (const item of targets) {
-        await invoke('unpublish_content', { content_id: item.id });
-      }
-      showToast(targets.length === 1 ? 'Emisión detenida' : 'Emisiones detenidas');
+    if (item.is_published) {
+      await invoke('unpublish_content', { content_id: id });
+      showToast('Emisión detenida');
     } else {
-      for (const item of targets.filter(entry => !entry.is_published)) {
-        await invoke('publish_content', { args: { content_id: item.id, target_device: null } });
-      }
-      showToast(targets.length === 1 ? 'Contenido publicado' : 'Contenido publicado en lote');
+      await invoke('publish_content', { args: { content_id: id, target_device: null } });
+      showToast('Publicado');
     }
     await refreshState();
   } catch (error) {
@@ -646,35 +515,41 @@ async function togglePublishTargets() {
   }
 }
 
-async function deleteLocalTargets() {
-  const targets = getLocalTargets();
-  if (targets.length === 0) {
-    showToast('No hay contenido local');
+
+async function deleteLocalSingle(id: string) {
+  try {
+    await invoke('remove_content', { id });
+    showToast('Contenido borrado');
+    await refreshState();
+  } catch (error) {
+    showToast(errorMessage(error));
+  }
+}
+
+async function startDirectModeFromOverlay(contentId?: string) {
+  const id = contentId || localContent[0]?.id;
+  if (!id) {
+    showToast('Añade contenido antes de enviar');
     return;
   }
   try {
-    for (const item of targets) {
-      await invoke('remove_content', { id: item.id });
-    }
-    selectedLocalId = null;
-    showToast(targets.length === 1 ? 'Contenido borrado' : 'Lote borrado');
-    await refreshState();
+    await invoke('start_direct_mode_sender');
+    showToast('Modo directo activo - buscando dispositivos...');
+  } catch (error) {
+    showToast(errorMessage(error));
+  }
+}
+
+async function copySingleLocal(id: string) {
+  try {
+    const message = await invoke<string>('copy_local_content', { id });
+    showToast(message || 'Copiado al portapapeles');
   } catch (error) {
     showToast(errorMessage(error));
   }
 }
 
 async function copyOrPasteLocal() {
-  if (selectedLocalId) {
-    try {
-      const message = await invoke<string>('copy_local_content', { id: selectedLocalId });
-      showToast(message || 'Copiado al portapapeles');
-    } catch (error) {
-      showToast(errorMessage(error));
-    }
-    return;
-  }
-
   try {
     await invoke('paste_clipboard_text');
     showToast('Portapapeles añadido al hub');
@@ -684,82 +559,85 @@ async function copyOrPasteLocal() {
   }
 }
 
-async function downloadPeerTargets() {
-  const targets = getPeerTargets();
-  if (targets.length === 0) {
-    showToast('No hay peers visibles');
-    return;
-  }
+async function publishAllLocal() {
   try {
-    for (const item of targets) {
-      await invoke('pull_peer_content', { content_id: item.content_id });
-    }
-    selectedPeerId = null;
-    showToast(targets.length === 1 ? 'Descarga completada' : 'Descargas completadas');
+    await invoke('publish_all_local');
+    showToast('Todo publicado en la red');
     await refreshState();
   } catch (error) {
     showToast(errorMessage(error));
   }
 }
 
-async function ignorePeerTargets() {
-  const targets = getPeerTargets();
-  if (targets.length === 0) {
-    showToast('No hay peers visibles');
-    return;
-  }
+async function downloadSinglePeer(id: string) {
   try {
-    for (const item of targets) {
-      await invoke('ignore_peer_content', { content_id: item.content_id });
-    }
-    selectedPeerId = null;
-    showToast(targets.length === 1 ? 'Peer ignorado' : 'Peers ignorados');
+    await invoke('pull_peer_content', { content_id: id });
+    showToast('Descarga completada');
     await refreshState();
   } catch (error) {
     showToast(errorMessage(error));
   }
 }
 
-async function copyPeerTargets() {
-  const targets = getPeerTargets();
-  if (targets.length === 0) {
-    showToast('No hay peers visibles');
-    return;
-  }
-  try {
-    for (const item of targets) {
-      await invoke('copy_peer_content', { content_id: item.content_id });
-    }
-    selectedPeerId = null;
-    showToast(targets.length === 1 ? 'Peer copiado al sistema' : 'Peers copiados');
-    await refreshState();
-  } catch (error) {
-    showToast(errorMessage(error));
-  }
-}
-
-function openDeviceSheet() {
+function showActionSheet(item: ContentItem | PeerAnnouncement, tab: 'local' | 'red') {
   const backdrop = document.createElement('div');
   backdrop.className = 'overlay-sheet-backdrop';
+
+  const isLocal = tab === 'local';
+  const localItem = item as ContentItem;
+  const peerItem = item as PeerAnnouncement;
+
+  let buttonsHtml = '';
+  if (isLocal) {
+    const pub = localItem.is_published;
+    buttonsHtml = `
+      <button class="overlay-sheet-item" data-sheet-action="publish">
+        ${pub ? '⏹ Parar difusión' : '📡 Publicar para todos'}
+      </button>
+      ${pub ? `<button class="overlay-sheet-item" data-sheet-action="direct">↗ Mandar directo</button>` : ''}
+      <button class="overlay-sheet-item" data-sheet-action="copy">${iconCopy(16)} Copiar</button>
+      <button class="overlay-sheet-item danger" data-sheet-action="delete">${iconTrash(16)} Borrar</button>
+      <button class="overlay-sheet-item ghost" data-sheet-action="cancel">Cancelar</button>
+    `;
+  } else {
+    buttonsHtml = `
+      <button class="overlay-sheet-item success" data-sheet-action="download">${iconDownload(16)} Descargar</button>
+      <button class="overlay-sheet-item" data-sheet-action="copy">${iconCopy(16)} Copiar directo</button>
+      <button class="overlay-sheet-item danger" data-sheet-action="ignore">${iconMute(16)} Ignorar</button>
+      <button class="overlay-sheet-item ghost" data-sheet-action="cancel">Cancelar</button>
+    `;
+  }
+
   backdrop.innerHTML = `
     <div class="overlay-sheet">
-      <div class="overlay-sheet-title">Mandar a</div>
-      ${onlineDevices.map(device => `<button class="overlay-sheet-item" data-device="${escapeAttribute(device)}">${escapeHtml(device)}</button>`).join('')}
-      <button class="overlay-sheet-item ghost" data-close="1">Cancelar</button>
+      <div class="overlay-sheet-title">${escapeHtml(
+        isLocal ? (localItem.file_name || localItem.preview.slice(0, 40)) : (peerItem.file_name || peerItem.preview.slice(0, 40))
+      )}</div>
+      ${buttonsHtml}
     </div>
   `;
-  backdrop.addEventListener('click', event => {
-    if (event.target === backdrop) {
-      backdrop.remove();
-    }
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) backdrop.remove();
   });
 
-  backdrop.querySelectorAll<HTMLButtonElement>('.overlay-sheet-item').forEach(button => {
-    button.addEventListener('click', () => {
-      const device = button.dataset.device;
+  backdrop.querySelectorAll<HTMLButtonElement>('[data-sheet-action]').forEach(btn => {
+    btn.addEventListener('click', async () => {
       backdrop.remove();
-      if (device) {
-        void sendToDevice(device);
+      const action = btn.dataset.sheetAction!;
+      if (action === 'cancel') return;
+
+      if (isLocal) {
+        const id = localItem.id;
+        if (action === 'publish')  await togglePublishSingle(id);
+        if (action === 'copy')     await copySingleLocal(id);
+        if (action === 'delete')   await deleteLocalSingle(id);
+        if (action === 'direct')   await startDirectModeFromOverlay(id);
+      } else {
+        const id = peerItem.content_id;
+        if (action === 'download') await downloadSinglePeer(id);
+        if (action === 'copy')     await copySinglePeer(id);
+        if (action === 'ignore')   await ignoreSinglePeer(id);
       }
     });
   });
@@ -767,24 +645,24 @@ function openDeviceSheet() {
   document.body.appendChild(backdrop);
 }
 
-function localHint(count: number) {
-  if (selectedLocalId) {
-    return 'Card seleccionada: acciones individuales.';
+async function copySinglePeer(id: string) {
+  try {
+    await invoke('copy_peer_content', { content_id: id });
+    showToast('Peer copiado al sistema');
+    await refreshState();
+  } catch (error) {
+    showToast(errorMessage(error));
   }
-  if (count === 0) {
-    return 'Sin cards locales.';
-  }
-  return `Sin selección: acciones masivas sobre ${count} cards.`;
 }
 
-function peerHint(count: number) {
-  if (selectedPeerId) {
-    return 'Peer seleccionado: acciones individuales.';
+async function ignoreSinglePeer(id: string) {
+  try {
+    await invoke('ignore_peer_content', { content_id: id });
+    showToast('Peer ignorado');
+    await refreshState();
+  } catch (error) {
+    showToast(errorMessage(error));
   }
-  if (count === 0) {
-    return 'Sin peers visibles.';
-  }
-  return `Sin selección: acciones masivas sobre ${count} peers.`;
 }
 
 function emptyState(title: string, description: string) {
@@ -833,20 +711,8 @@ function escapeHtml(value: string) {
     .replace(/>/g, '&gt;');
 }
 
-function escapeAttribute(value: string) {
-  return escapeHtml(value).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
 const icon = (paths: string, size = 18) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
-
-function iconSend(size = 18) {
-  return icon('<path d="M3 10h10"/><path d="M9 4l6 6-6 6"/><path d="M15 10h2"/>', size);
-}
-
-function iconBroadcast(size = 18) {
-  return icon('<circle cx="5" cy="10" r="1.5"/><circle cx="15" cy="10" r="1.5"/><path d="M7 10c2-4 4-4 6 0"/><path d="M7 10c2 4 4 4 6 0"/>', size);
-}
 
 function iconTrash(size = 18) {
   return icon('<path d="M4 6h12"/><path d="M7 6V4h6v2"/><path d="M6.5 6l.8 10h5.4l.8-10"/>', size);
@@ -878,6 +744,10 @@ function iconMinus(size = 18) {
 
 function iconX(size = 18) {
   return icon('<path d="M5 5l10 10"/><path d="M15 5L5 15"/>', size);
+}
+
+function iconBroadcast(size = 18) {
+  return icon('<circle cx="9" cy="5" r="1.5"/><circle cx="16" cy="5" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><path d="M9 5 L16 12"/><path d="M16 5 L9 12"/>', size);
 }
 
 initOverlay();

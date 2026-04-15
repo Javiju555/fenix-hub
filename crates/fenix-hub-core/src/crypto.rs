@@ -12,7 +12,7 @@ use aes_gcm::{
 use anyhow::Result;
 use rand::RngCore;
 
-use crate::protocol::{FNX2_CHUNK_SIZE, FNX2_HEADER_SIZE};
+use crate::protocol::{FNX2_COMPRESSION_NONE, FNX2_HEADER_SIZE};
 
 /// Size of the AES-GCM nonce in bytes (96-bit, as recommended for GCM).
 pub const NONCE_SIZE: usize = 12;
@@ -82,14 +82,13 @@ pub struct ChunkEncoder {
     chunk_index: u32,
     total_chunks: u32,
     original_size: u64,
-    compression: u8,
     header_written: bool,
 }
 
 impl ChunkEncoder {
     /// Creates a new chunk encoder.
     /// `total_chunks` and `original_size` are needed for the FNX2 header.
-    pub fn new(key: &[u8; 32], total_chunks: u32, original_size: u64, compression: u8) -> Self {
+    pub fn new(key: &[u8; 32], total_chunks: u32, original_size: u64) -> Self {
         let mut base_nonce = [0u8; 12];
         OsRng.fill_bytes(&mut base_nonce);
         let cipher = Aes256Gcm::new(key.into());
@@ -97,10 +96,8 @@ impl ChunkEncoder {
             cipher,
             base_nonce,
             chunk_index: 0,
-            chunk_buffer: Vec::with_capacity(FNX2_CHUNK_SIZE + 16),
             total_chunks,
             original_size,
-            compression,
             header_written: false,
         }
     }
@@ -112,7 +109,7 @@ impl ChunkEncoder {
         header.extend_from_slice(&self.base_nonce);
         header.extend_from_slice(&self.total_chunks.to_be_bytes());
         header.extend_from_slice(&self.original_size.to_be_bytes());
-        header.push(self.compression);
+        header.push(FNX2_COMPRESSION_NONE);
         header
     }
 
@@ -140,7 +137,6 @@ pub struct ChunkDecoder {
     pub base_nonce: [u8; 12],
     pub total_chunks: u32,
     pub original_size: u64,
-    pub compression: u8,
     chunk_index: u32,
     cipher: Aes256Gcm,
 }
@@ -160,13 +156,11 @@ impl ChunkDecoder {
 
         let total_chunks = u32::from_be_bytes(header[16..20].try_into()?);
         let original_size = u64::from_be_bytes(header[20..28].try_into()?);
-        let compression = header[28];
 
         Ok(Self {
             base_nonce,
             total_chunks,
             original_size,
-            compression,
             chunk_index: 0,
             cipher: Aes256Gcm::new(key.into()),
         })

@@ -7,7 +7,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-class ContentRepository {
+class ContentRepository(
+    private val tempClipboardStore: TempClipboardStore? = null,
+) {
     private val localLock = Any()
     private val peerLock = Any()
     private val localItems = linkedMapOf<String, LocalContent>()
@@ -26,6 +28,7 @@ class ContentRepository {
         synchronized(localLock) {
             localItems[item.contentId] = item
             mutableSelectedLocalContentId.value = item.contentId
+            trimLocalHistoryLocked()
             emitLocalContentLocked()
         }
     }
@@ -33,7 +36,11 @@ class ContentRepository {
     fun publish(contentId: String, sendMode: SendMode = SendMode.Broadcast) {
         synchronized(localLock) {
             val current = localItems[contentId] ?: return
-            localItems[contentId] = current.copy(isPublished = true, sendMode = sendMode)
+            localItems[contentId] = current.copy(
+                isPublished = true,
+                publishedAt = System.currentTimeMillis(),
+                sendMode = sendMode,
+            )
             mutableSelectedLocalContentId.value = contentId
             emitLocalContentLocked()
         }
@@ -42,7 +49,7 @@ class ContentRepository {
     fun unpublish(contentId: String) {
         synchronized(localLock) {
             val current = localItems[contentId] ?: return
-            localItems[contentId] = current.copy(isPublished = false)
+            localItems[contentId] = current.copy(isPublished = false, publishedAt = null)
             emitLocalContentLocked()
         }
     }
@@ -50,7 +57,7 @@ class ContentRepository {
     fun unpublishAll() {
         synchronized(localLock) {
             if (localItems.isEmpty()) return
-            localItems.replaceAll { _, current -> current.copy(isPublished = false) }
+            localItems.replaceAll { _, current -> current.copy(isPublished = false, publishedAt = null) }
             emitLocalContentLocked()
         }
     }
@@ -103,11 +110,23 @@ class ContentRepository {
         }
     }
 
+    private fun trimLocalHistoryLocked() {
+        while (localItems.size > MAX_HISTORY_ITEMS) {
+            val oldest = localItems.values.minByOrNull { it.createdAt } ?: break
+            localItems.remove(oldest.contentId)
+            tempClipboardStore?.deleteContent(oldest.contentId)
+        }
+    }
+
     private fun emitLocalContentLocked() {
         mutableLocalContent.value = localItems.values.sortedByDescending { it.createdAt }
     }
 
     private fun emitPeersLocked() {
         mutablePeers.value = peerItems.values.sortedByDescending { it.announcement.createdAt }
+    }
+
+    companion object {
+        private const val MAX_HISTORY_ITEMS = 25
     }
 }

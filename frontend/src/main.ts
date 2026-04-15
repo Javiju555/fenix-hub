@@ -1,4 +1,5 @@
-import { invoke as tauriInvoke } from '@tauri-apps/api/core';
+import { invoke as tauriInvoke, convertFileSrc } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen as tauriListen } from '@tauri-apps/api/event';
 import './style.css';
 
@@ -53,11 +54,26 @@ let mockLocal = [...MOCK_LOCAL];
 let mockPeers = [...MOCK_PEERS];
 let mockPublished = new Set<string>();
 let mockId = 100;
+let mockIdentity: IdentityInfo = {
+  device_name: 'Arch Desktop',
+  group_id: 'demo',
+  configured: true,
+  device_type: 'desktop',
+};
+let mockProfiles: IdentityProfileInfo[] = [
+  {
+    name: 'personal',
+    device_name: 'Arch Desktop',
+    group_id: 'demo',
+    device_type: 'desktop',
+    active: true,
+  },
+];
 
 async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
   const a = args as Record<string, unknown> | undefined;
   switch (cmd) {
-    case 'get_identity': return { device_name: 'Arch Desktop', group_id: 'demo', configured: true, device_type: 'desktop' } as T;
+    case 'get_identity': return mockIdentity as T;
     case 'get_local_content': return [...mockLocal] as T;
     case 'get_peers': return [...mockPeers] as T;
     case 'add_text_content': {
@@ -87,6 +103,12 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
       if (id) mockPublished.add(id); return undefined as T;
     }
     case 'stop_server': mockPublished.clear(); return undefined as T;
+    case 'start_direct_mode_sender': return undefined as T;
+    case 'accept_direct_peers': return undefined as T;
+    case 'cancel_direct_mode': return undefined as T;
+    case 'toggle_direct_peer': return undefined as T;
+    case 'get_direct_peers': return { peers: [] } as T;
+    case 'get_direct_session_state': return { discovering: false, advertising: false, ephemeral_group_id: '', peer_count: 0 } as T;
     case 'pull_peer_content': {
       const peer = mockPeers.find(p => p.content_id === (a?.content_id as string));
       const item: ContentItem = {
@@ -105,7 +127,106 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
     case 'save_peer_content_as': return { saved: true, path: 'C:\\temp\\fenixhub-mock.bin' } as T;
     case 'save_local_content_as': return { saved: true, path: 'C:\\temp\\fenixhub-local-mock.bin' } as T;
     case 'setup_identity':
-      return { device_name: (a?.args as { device_name: string })?.device_name ?? 'Device', group_id: 'demo', configured: true, device_type: (a?.args as { device_type?: string })?.device_type ?? 'desktop' } as T;
+      mockIdentity = {
+        device_name: (a?.args as { device_name: string })?.device_name ?? 'Device',
+        group_id: ((a?.args as { passphrase?: string | null })?.passphrase ? `grp-${mockId++}` : mockIdentity.group_id),
+        configured: true,
+        device_type: (a?.args as { device_type?: string })?.device_type ?? 'desktop',
+      };
+      return mockIdentity as T;
+    case 'update_identity': {
+      const payload = (a?.args as { passphrase?: string | null; device_name: string; device_type?: string }) || { device_name: 'Device' };
+      const oldGroup = mockIdentity.group_id;
+      const nextGroup = payload.passphrase ? `grp-${mockId++}` : oldGroup;
+      mockIdentity = {
+        device_name: payload.device_name || mockIdentity.device_name,
+        group_id: nextGroup,
+        configured: true,
+        device_type: payload.device_type ?? mockIdentity.device_type,
+      };
+      return {
+        identity: mockIdentity,
+        group_changed: nextGroup !== oldGroup,
+        requires_restart: nextGroup !== oldGroup,
+      } as T;
+    }
+    case 'delete_identity_only': {
+      mockIdentity = {
+        device_name: '',
+        group_id: '',
+        configured: false,
+        device_type: 'desktop',
+      };
+      return undefined as T;
+    }
+    case 'list_identity_profiles':
+      return { profiles: mockProfiles } as T;
+    case 'save_current_identity_profile': {
+      const payload = (a?.args as { name: string; make_active?: boolean }) || { name: '' };
+      const name = payload.name.trim();
+      if (name) {
+        const existing = mockProfiles.find(p => p.name === name);
+        if (existing) {
+          existing.device_name = mockIdentity.device_name;
+          existing.group_id = mockIdentity.group_id;
+          existing.device_type = mockIdentity.device_type;
+        } else {
+          mockProfiles.push({
+            name,
+            device_name: mockIdentity.device_name,
+            group_id: mockIdentity.group_id,
+            device_type: mockIdentity.device_type,
+            active: false,
+          });
+        }
+        if (payload.make_active) {
+          mockProfiles = mockProfiles.map(profile => ({ ...profile, active: profile.name === name }));
+        }
+      }
+      return { profiles: mockProfiles } as T;
+    }
+    case 'activate_identity_profile': {
+      const name = ((a?.args as { name: string })?.name || '').trim();
+      const selected = mockProfiles.find(profile => profile.name === name);
+      if (selected) {
+        mockProfiles = mockProfiles.map(profile => ({ ...profile, active: profile.name === name }));
+        mockIdentity = {
+          device_name: selected.device_name,
+          group_id: selected.group_id,
+          configured: true,
+          device_type: selected.device_type,
+        };
+      }
+      return {
+        identity: mockIdentity,
+        group_changed: false,
+        requires_restart: true,
+      } as T;
+    }
+    case 'delete_identity_profile': {
+      const name = ((a?.args as { name: string })?.name || '').trim();
+      mockProfiles = mockProfiles.filter(profile => profile.name !== name);
+      if (!mockProfiles.some(profile => profile.active) && mockProfiles.length > 0) {
+        mockProfiles[0].active = true;
+      }
+      return { profiles: mockProfiles } as T;
+    }
+    case 'get_transport_hardware':
+      return {
+        lan: true,
+        lan_ip: '192.168.1.50',
+        airdrop_ready: true,
+        flow: 'ble_discovery_then_wifi_direct_transfer',
+        ble: { supported: true, enabled: true, permissions_ready: true, adapters: ['Mock BLE Adapter'] },
+        wifi_direct: { supported: true, enabled: true, permissions_ready: true, adapters: ['Mock Wi-Fi Adapter'] },
+        ble_peers: [],
+        wifi_direct_peers: [],
+        handoff_candidates: [],
+      } as T;
+    case 'get_transport_capabilities':
+      return { lan: true, airdrop_ready: false, flow: '', ble: { supported: false, enabled: false, permissions_ready: false, adapters: [] }, wifi_direct: { supported: false, enabled: false, permissions_ready: false, adapters: [] }, ble_peers: [], wifi_direct_peers: [], handoff_candidates: [] } as T;
+    case 'confirm_reset': return true as T;
+    case 'close_settings': return undefined as T;
     default: return undefined as T;
   }
 }
@@ -114,10 +235,31 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
 
 interface IdentityInfo   { device_name: string; group_id: string; configured: boolean; device_type: string; }
 interface ContentItem    { id: string; content_type: 'text'|'image'|'file'; preview: string; size_bytes: number; created_at: number; file_name?: string | null; mime_type?: string | null; transfer_path?: string | null; data_text?: string | null; }
-interface PeerAnnouncement { group_id: string; content_id: string; device_name: string; preview: string; content_type: 'text'|'image'|'file'; size_bytes: number; send_mode: { Broadcast: null }|{ Direct: { target_device: string } }; created_at: number; port: number; file_name?: string | null; mime_type?: string | null; }
+interface PeerAnnouncement { group_id: string; content_id: string; device_name: string; preview: string; content_type: 'text'|'image'|'file'; size_bytes: number; send_mode: { Broadcast: null }|{ Direct: { target_device: string } }; created_at: number; port: number; file_name?: string | null; mime_type?: string | null; _localSrc?: string; }
 interface PeerContentPayload { announcement: PeerAnnouncement; peer_ip: string; }
 interface DragPayload { text?: string | null; uri_list?: string | null; }
 interface SaveContentResult { saved: boolean; path?: string | null; }
+interface UpdateIdentityResult { identity: IdentityInfo; group_changed: boolean; requires_restart: boolean; }
+interface IdentityProfileInfo { name: string; device_name: string; group_id: string; device_type: string; active: boolean; }
+interface ProfilesPayload { profiles: IdentityProfileInfo[]; }
+interface TransportRadioDetails {
+  supported: boolean;
+  enabled: boolean;
+  permissions_ready: boolean;
+  adapters: string[];
+  last_error?: string | null;
+}
+interface TransportCapabilities {
+  lan: boolean;
+  lan_ip?: string | null;
+  airdrop_ready?: boolean;
+  flow?: string;
+  ble: TransportRadioDetails;
+  wifi_direct: TransportRadioDetails;
+  ble_peers?: string[];
+  wifi_direct_peers?: string[];
+  handoff_candidates?: string[];
+}
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -146,11 +288,24 @@ const W_PILL = 280, H_PILL = 34;
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
+  document.body.classList.remove('settings-mode');
+
   // Block browser context menu — this is a native-style app, not a webpage
   document.addEventListener('contextmenu', e => e.preventDefault());
+  // Keep hub scale fixed: disable browser/webview zoom shortcuts and gestures.
+  document.addEventListener('wheel', (event) => {
+    if (event.ctrlKey || event.metaKey) event.preventDefault();
+  }, { passive: false });
+  document.addEventListener('keydown', (event) => {
+    if (!(event.ctrlKey || event.metaKey)) return;
+    if (event.key === '+' || event.key === '=' || event.key === '-' || event.key === '0') {
+      event.preventDefault();
+    }
+  });
 
   // Settings window uses the same bundle but a different hash.
   if (window.location.hash === '#settings') {
+    document.body.classList.add('settings-mode');
     await initSettings();
     return;
   }
@@ -165,64 +320,290 @@ async function init() {
 // ── Settings window ───────────────────────────────────────────────────────────
 
 async function initSettings() {
-  identity = await invoke<IdentityInfo>('get_identity');
-  renderSettings();
+  await reloadSettingsView();
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      void invoke('close_settings');
+    }
+  });
 }
 
-function renderSettings() {
+async function reloadSettingsView(feedback?: { message: string; tone: 'ok'|'warn'|'error' }) {
+  identity = await invoke<IdentityInfo>('get_identity');
+  const [profilesPayload, transport] = await Promise.all([
+    invoke<ProfilesPayload>('list_identity_profiles').catch(() => ({ profiles: [] })),
+    loadTransportCapabilities(),
+  ]);
+  renderSettings(profilesPayload.profiles, transport, feedback);
+}
+
+async function loadTransportCapabilities(): Promise<TransportCapabilities> {
+  return invoke<TransportCapabilities>('get_transport_hardware')
+    .catch(() => invoke<TransportCapabilities>('get_transport_capabilities'))
+    .catch(() => ({ lan: false, airdrop_ready: false, flow: '', ble: { supported: false, enabled: false, permissions_ready: false, adapters: [] }, wifi_direct: { supported: false, enabled: false, permissions_ready: false, adapters: [] }, ble_peers: [], wifi_direct_peers: [], handoff_candidates: [] }));
+}
+
+function renderSettings(
+  profiles: IdentityProfileInfo[],
+  transport: TransportCapabilities,
+  feedback?: { message: string; tone: 'ok'|'warn'|'error' },
+) {
   const app = document.getElementById('app')!;
+  const selectedType = identity?.device_type || 'desktop';
+  const profileOptions = profiles.map(profile =>
+    `<option value="${escapeHtml(profile.name)}"${profile.active ? ' selected' : ''}>${escapeHtml(profile.name)}${profile.active ? ' · activo' : ''}</option>`
+  ).join('');
+
   app.innerHTML = `
-    <div class="settings-root">
-      <h2>Ajustes de FenixHub</h2>
+    <div class="settings-shell">
+      <header class="settings-titlebar">
+        <div class="settings-titlewrap">
+          <div class="hub-logo" style="color:var(--accent)">${iconHub(15)}</div>
+          <span class="settings-title">Ajustes de FenixHub</span>
+        </div>
+        <button class="btn-icon danger settings-close" id="btn-settings-close" title="Cerrar">${iconX(11)}</button>
+      </header>
 
-      <section class="settings-section">
-        <h3>Identidad</h3>
-        <div class="settings-row">
-          <span class="settings-label">Dispositivo</span>
-          <span class="settings-value">${identity?.device_name ?? '—'}</span>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label">Grupo (ID)</span>
-          <span class="settings-value mono" id="group-id-val">${identity?.group_id?.slice(0, 16) ?? '—'}…</span>
-          <button class="btn-secondary" id="btn-copy-gid">Copiar</button>
-        </div>
-      </section>
+      <div class="settings-body">
+        ${feedback ? `<div class="settings-feedback ${feedback.tone}">${escapeHtml(feedback.message)}</div>` : ''}
 
-      <section class="settings-section">
-        <h3>Caché</h3>
-        <div class="settings-row">
-          <span class="settings-label">Archivos recibidos</span>
-          <span class="settings-value">FIFO 30 archivos en ~/.cache/fenix-hub/received/</span>
-        </div>
-        <div class="settings-row">
-          <button class="btn-secondary" id="btn-clear-cache">Limpiar caché</button>
-        </div>
-      </section>
+        <section class="settings-section">
+          <h3>Identidad</h3>
+          <div class="settings-grid two-col">
+            <label class="settings-field">
+              <span class="settings-label">Nombre del dispositivo</span>
+              <input id="settings-device-name" type="text" value="${escapeHtml(identity?.device_name || '')}" placeholder="Nombre de este dispositivo" />
+            </label>
+            <label class="settings-field">
+              <span class="settings-label">Tipo</span>
+              <select id="settings-device-type" class="settings-select">
+                ${DEVICE_TYPES.map(dt => `<option value="${dt.id}"${dt.id === selectedType ? ' selected' : ''}>${dt.label}</option>`).join('')}
+              </select>
+            </label>
+          </div>
 
-      <section class="settings-section danger">
-        <h3>Zona de peligro</h3>
-        <div class="settings-row">
-          <span class="settings-label">Eliminar todos los datos de FenixHub de este dispositivo</span>
-        </div>
-        <div class="settings-row">
-          <button class="btn-danger" id="btn-reset">Eliminar identidad y datos</button>
-        </div>
-      </section>
+          <div class="settings-row">
+            <span class="settings-label">Grupo (ID)</span>
+            <span class="settings-value mono settings-group-id" id="group-id-val">${identity?.group_id ?? '—'}</span>
+            <button class="btn-secondary" id="btn-copy-gid">Copiar</button>
+          </div>
+
+          <div class="settings-actions">
+            <button class="btn-secondary" id="btn-apply-identity">Guardar nombre/tipo</button>
+          </div>
+
+          <div class="settings-divider"></div>
+
+          <div class="settings-grid one-col">
+            <label class="settings-field">
+              <span class="settings-label">Cambiar identidad (nuevo grupo, mantiene caché)</span>
+              <input id="settings-passphrase" type="password" placeholder="Nueva passphrase del grupo" />
+            </label>
+          </div>
+          <div class="settings-actions">
+            <button class="btn-secondary" id="btn-change-group">Cambiar identidad</button>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Perfiles</h3>
+          <div class="settings-grid two-col">
+            <label class="settings-field">
+              <span class="settings-label">Perfil guardado</span>
+              <select id="settings-profile-select" class="settings-select" ${profiles.length === 0 ? 'disabled' : ''}>
+                ${profileOptions || '<option value="">Sin perfiles</option>'}
+              </select>
+            </label>
+            <label class="settings-field">
+              <span class="settings-label">Guardar perfil actual como</span>
+              <input id="settings-profile-name" type="text" placeholder="ej. trabajo" />
+            </label>
+          </div>
+          <div class="settings-actions split">
+            <button class="btn-secondary" id="btn-save-profile">Guardar perfil</button>
+            <button class="btn-secondary" id="btn-activate-profile" ${profiles.length === 0 ? 'disabled' : ''}>Activar perfil</button>
+            <button class="btn-danger ghost" id="btn-delete-profile" ${profiles.length === 0 ? 'disabled' : ''}>Eliminar perfil</button>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Transporte</h3>
+          <div class="transport-grid">
+            <div class="transport-item">
+              <span>LAN</span>
+              <span class="cap-pill ${transport.lan ? 'ok' : 'off'}">${transport.lan ? 'Disponible' : 'No disponible'}</span>
+            </div>
+            <div class="transport-note">IP actual: ${escapeHtml(transport.lan_ip || 'sin enlace LAN')}</div>
+            <div class="transport-item">
+              <span>Bluetooth LE</span>
+              <span class="cap-pill ${transport.ble?.supported && transport.ble?.enabled ? 'ok' : 'off'}">${transport.ble?.supported && transport.ble?.enabled ? 'Disponible' : 'No disponible'}</span>
+            </div>
+            <div class="transport-note">Adaptadores BLE: ${escapeHtml((transport.ble?.adapters || []).join(', ') || 'ninguno detectado')}</div>
+            <div class="transport-item">
+              <span>Wi-Fi Direct</span>
+              <span class="cap-pill ${transport.wifi_direct?.supported && transport.wifi_direct?.enabled ? 'ok' : 'off'}">${transport.wifi_direct?.supported && transport.wifi_direct?.enabled ? 'Disponible' : 'No disponible'}</span>
+            </div>
+            <div class="transport-note">Adaptadores Wi-Fi: ${escapeHtml((transport.wifi_direct?.adapters || []).join(', ') || 'ninguno detectado')}</div>
+            <div class="transport-note">Flujo cercano: ${escapeHtml(transport.flow || 'ble_discovery_then_wifi_direct_transfer')}</div>
+            <div class="transport-note">Modo AirDrop-like: <strong>${transport.airdrop_ready ? 'listo' : 'parcial'}</strong></div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Caché</h3>
+          <div class="settings-row">
+            <span class="settings-label">Archivos recibidos</span>
+            <span class="settings-value">FIFO 25 archivos en caché local</span>
+          </div>
+          <div class="settings-actions">
+            <button class="btn-secondary" id="btn-clear-cache">Limpiar caché</button>
+          </div>
+        </section>
+
+        <section class="settings-section danger">
+          <h3>Zona de peligro</h3>
+          <div class="settings-row danger-row">
+            <span class="settings-label">Eliminar solo identidad y configuración (mantiene caché)</span>
+          </div>
+          <div class="settings-actions split">
+            <button class="btn-danger ghost" id="btn-delete-identity">Eliminar identidad</button>
+          </div>
+          <div class="settings-row danger-row">
+            <span class="settings-label">Eliminar identidad, historial y caché de este dispositivo</span>
+          </div>
+          <div class="settings-actions split">
+            <button class="btn-danger" id="btn-reset">Eliminar todos los datos</button>
+          </div>
+        </section>
+      </div>
     </div>
   `;
+
+  document.getElementById('btn-settings-close')!.addEventListener('click', async () => {
+    await invoke('close_settings');
+  });
 
   document.getElementById('btn-copy-gid')?.addEventListener('click', () => {
     if (identity?.group_id) navigator.clipboard.writeText(identity.group_id);
   });
 
+  document.getElementById('btn-apply-identity')?.addEventListener('click', async () => {
+    if (!identity?.configured) {
+      await reloadSettingsView({
+        message: 'No hay identidad activa. Usa "Cambiar identidad" para crear una nueva.',
+        tone: 'error',
+      });
+      return;
+    }
+
+    const deviceName = (document.getElementById('settings-device-name') as HTMLInputElement).value.trim();
+    const deviceType = (document.getElementById('settings-device-type') as HTMLSelectElement).value;
+    if (!deviceName) {
+      await reloadSettingsView({ message: 'El nombre del dispositivo no puede estar vacío.', tone: 'error' });
+      return;
+    }
+    const result = await invoke<UpdateIdentityResult>('update_identity', {
+      args: {
+        device_name: deviceName,
+        device_type: deviceType,
+        passphrase: null,
+      },
+    });
+    await reloadSettingsView({
+      message: result.group_changed
+        ? 'Identidad actualizada. Reinicia la app para cambiar completamente de grupo.'
+        : 'Nombre y tipo actualizados al instante.',
+      tone: result.group_changed ? 'warn' : 'ok',
+    });
+  });
+
+  document.getElementById('btn-change-group')?.addEventListener('click', async () => {
+    const passphrase = (document.getElementById('settings-passphrase') as HTMLInputElement).value.trim();
+    const deviceName = (document.getElementById('settings-device-name') as HTMLInputElement).value.trim() || identity?.device_name || '';
+    const deviceType = (document.getElementById('settings-device-type') as HTMLSelectElement).value;
+    if (!passphrase) {
+      await reloadSettingsView({ message: 'Introduce una passphrase para cambiar de identidad.', tone: 'error' });
+      return;
+    }
+
+    if (!identity?.configured) {
+      await invoke<IdentityInfo>('setup_identity', {
+        args: {
+          passphrase,
+          device_name: deviceName || 'Dispositivo',
+          device_type: deviceType,
+        },
+      });
+      await reloadSettingsView({ message: 'Identidad creada correctamente.', tone: 'ok' });
+      return;
+    }
+
+    const result = await invoke<UpdateIdentityResult>('update_identity', {
+      args: {
+        passphrase,
+        device_name: deviceName,
+        device_type: deviceType,
+      },
+    });
+
+    await reloadSettingsView({
+      message: result.requires_restart
+        ? 'Identidad cambiada sin borrar caché. Reinicia la app para completar el cambio de grupo.'
+        : 'Identidad cambiada.',
+      tone: result.requires_restart ? 'warn' : 'ok',
+    });
+  });
+
+  document.getElementById('btn-save-profile')?.addEventListener('click', async () => {
+    const name = (document.getElementById('settings-profile-name') as HTMLInputElement).value.trim();
+    if (!name) {
+      await reloadSettingsView({ message: 'Escribe un nombre de perfil.', tone: 'error' });
+      return;
+    }
+    await invoke<ProfilesPayload>('save_current_identity_profile', { args: { name, make_active: false } });
+    await reloadSettingsView({ message: `Perfil "${name}" guardado.`, tone: 'ok' });
+  });
+
+  document.getElementById('btn-activate-profile')?.addEventListener('click', async () => {
+    const select = document.getElementById('settings-profile-select') as HTMLSelectElement | null;
+    const name = select?.value?.trim();
+    if (!name) return;
+    await invoke<UpdateIdentityResult>('activate_identity_profile', { args: { name } });
+    await reloadSettingsView({
+      message: `Perfil "${name}" activado. Reinicia la app para reinicializar discovery con total limpieza.`,
+      tone: 'warn',
+    });
+  });
+
+  document.getElementById('btn-delete-profile')?.addEventListener('click', async () => {
+    const select = document.getElementById('settings-profile-select') as HTMLSelectElement | null;
+    const name = select?.value?.trim();
+    if (!name) return;
+    await invoke<ProfilesPayload>('delete_identity_profile', { args: { name } });
+    await reloadSettingsView({ message: `Perfil "${name}" eliminado.`, tone: 'ok' });
+  });
+
   document.getElementById('btn-clear-cache')?.addEventListener('click', async () => {
     await invoke('clear_received_cache');
-    alert('Caché limpiado.');
+    await reloadSettingsView({ message: 'Caché local limpiada.', tone: 'ok' });
+  });
+
+  document.getElementById('btn-delete-identity')?.addEventListener('click', async () => {
+    await invoke('delete_identity_only');
+    await reloadSettingsView({
+      message: 'Identidad eliminada. La caché local se mantiene intacta.',
+      tone: 'warn',
+    });
   });
 
   document.getElementById('btn-reset')?.addEventListener('click', async () => {
-    if (!confirm('¿Seguro? Se eliminarán la identidad, el historial y la caché de este dispositivo.')) return;
+    const ok = await invoke<boolean>('confirm_reset');
+    if (!ok) return;
     await invoke('reset_all_data');
+    await reloadSettingsView({
+      message: 'Todos los datos locales han sido eliminados.',
+      tone: 'warn',
+    });
   });
 }
 
@@ -242,30 +623,40 @@ function setupEventListeners() {
   });
   listen<PeerContentPayload>('peer-content-available', ({ payload }) => {
     const ann = payload.announcement;
+    // On duplicate mDNS resolves the new announcement may have a truncated preview
+    // (NSD TXT records have size limits). Preserve whatever is better.
+    const existing = peerContent.find(p => p.content_id === ann.content_id);
+    if (existing) {
+      if (existing._localSrc) ann._localSrc = existing._localSrc; // keep cached asset URL
+      if (existing.preview.startsWith('data:image') && !ann.preview.startsWith('data:image'))
+        ann.preview = existing.preview; // keep full-res thumbnail
+    }
     peerContent = [...peerContent.filter(p => p.content_id !== ann.content_id), ann];
     if (!onlineDevices.includes(ann.device_name)) onlineDevices = [...onlineDevices, ann.device_name];
     updateHeader();
-    if (activeTab === 'red') renderPeerContent();
+    renderPeerContent();
   });
   listen<{ content_id: string; device_name: string }>('peer-content-gone', ({ payload }) => {
     peerContent = peerContent.filter(p => p.content_id !== payload.content_id);
     if (!peerContent.some(p => p.device_name === payload.device_name))
       onlineDevices = onlineDevices.filter(d => d !== payload.device_name);
     updateHeader();
-    if (activeTab === 'red') renderPeerContent();
+    renderPeerContent();
   });
   listen<PeerContentPayload>('direct-notify-received', ({ payload }) => {
     const ann = payload.announcement;
     peerContent = [ann, ...peerContent.filter(p => p.content_id !== ann.content_id)];
     updateHeader();
+    renderPeerContent();
     if (collapsed) expand();
     switchTab('red');
   });
   listen<string>('peer-online', ({ payload: deviceName }) => {
     presenceDevices.add(deviceName);
-    if (!onlineDevices.includes(deviceName)) onlineDevices = [...onlineDevices, deviceName];
+    // Do NOT add to onlineDevices — a peer is only "visible" when it has active content.
+    // This prevents idle/present-but-empty peers from showing in the counter or send buttons.
     updateHeader();
-    if (activeTab === 'red') renderPeerContent();
+    renderPeerContent();
   });
   listen<string>('peer-offline', ({ payload: deviceName }) => {
     presenceDevices.delete(deviceName);
@@ -274,7 +665,7 @@ function setupEventListeners() {
       onlineDevices = onlineDevices.filter(d => d !== deviceName);
     }
     updateHeader();
-    if (activeTab === 'red') renderPeerContent();
+    renderPeerContent();
   });
 }
 
@@ -299,6 +690,7 @@ function renderSetup() {
         <input type="password" id="passphrase"   placeholder="Nombre del grupo (igual en todos)" autocomplete="off" />
         <button id="setup-btn">${iconCheckmark(11)} Activar</button>
       </div>
+      <p class="setup-error" id="setup-error" aria-live="polite"></p>
     </div>`;
 
   // Device type picker
@@ -315,11 +707,19 @@ function renderSetup() {
     const deviceName = (document.getElementById('device-name') as HTMLInputElement).value.trim();
     if (!passphrase || !deviceName) return;
     const btn = document.getElementById('setup-btn') as HTMLButtonElement;
+    const errorNode = document.getElementById('setup-error') as HTMLParagraphElement;
+    errorNode.textContent = '';
     btn.disabled = true; btn.textContent = 'Activando…';
-    identity = await invoke<IdentityInfo>('setup_identity', {
-      args: { passphrase, device_name: deviceName, device_type: selectedDeviceType },
-    });
-    await loadContent(); renderHub(); setupEventListeners();
+    try {
+      identity = await invoke<IdentityInfo>('setup_identity', {
+        args: { passphrase, device_name: deviceName, device_type: selectedDeviceType },
+      });
+      await loadContent(); renderHub(); setupEventListeners();
+    } catch (error) {
+      btn.disabled = false;
+      btn.innerHTML = `${iconCheckmark(11)} Activar`;
+      errorNode.textContent = error instanceof Error ? error.message : String(error);
+    }
   };
   document.getElementById('setup-btn')!.addEventListener('click', submit);
   document.addEventListener('keydown', function h(e) {
@@ -332,7 +732,9 @@ function renderSetup() {
 function renderHub() {
   document.getElementById('app')!.innerHTML = `
     <div class="hub" id="hub-root">
-      <header class="hub-header" id="hub-header">
+
+      <!-- ── Expanded header ─────────────────────────────────────────── -->
+      <header class="hub-header hub-expanded-header" id="hub-header">
         <div class="hub-logo">${iconHub(18)}</div>
         <span class="hub-title">FenixHub</span>
         <span class="hub-device-label" title="Dispositivo: ${escapeHtml(identity?.device_name ?? '')}">
@@ -350,23 +752,20 @@ function renderHub() {
           <span class="enc-badge" title="Cifrado AES-256-GCM extremo a extremo activo">${iconLock(9)}</span>
         </div>
 
-        <div class="hub-collapsed-bar" id="hub-collapsed-bar" title="Mostrar FenixHub">
-          <span class="hub-pull-grip" aria-hidden="true"></span>
-          <span class="hub-collapsed-copy">
-            <span class="hub-collapsed-label">${iconChevronDown(10)} Abrir</span>
-            <span class="hub-collapsed-counts">
-              <span class="hub-collapsed-pill">${iconInbox(9)} <span id="count-local-mini">0</span></span>
-              <span class="hub-collapsed-pill">${iconWifi(9)} <span id="count-red-mini">0</span></span>
-            </span>
-          </span>
-        </div>
-
         <div class="hub-actions">
           <button class="btn-icon" id="btn-share-all" title="Compartir todo con todos">${iconBroadcast(13)}</button>
           <button class="btn-icon" id="btn-settings"  title="Ajustes">${iconGear(13)}</button>
           <button class="btn-icon" id="btn-collapse"  title="Minimizar a notch">${iconMinus(13)}</button>
           <button class="btn-icon danger" id="btn-close" title="Ocultar al tray">${iconX(12)}</button>
         </div>
+      </header>
+
+      <!-- ── Collapsed pill ──────────────────────────────────────────── -->
+      <header class="hub-header hub-pill-header" id="hub-pill-header">
+        <div class="hub-logo pill-logo">${iconHub(16)}</div>
+        <button class="pill-tab" id="pill-tab-local" data-pill-tab="local">${iconInbox(10)} Local <span class="badge" id="count-local-mini">0</span></button>
+        <button class="pill-tab pill-tab-red" id="pill-tab-red" data-pill-tab="red">${iconWifi(10)} Red <span class="badge badge-red" id="count-red-mini">0</span></button>
+        <button class="btn-icon danger pill-close" id="btn-pill-close" title="Cerrar al tray">${iconX(11)}</button>
       </header>
 
       <div class="tab-panel active" id="panel-local"></div>
@@ -396,19 +795,28 @@ function renderHub() {
   });
 
   // Collapse → pill
-  document.getElementById('btn-collapse')!.addEventListener('click', () => collapsed ? expand() : collapse());
+  document.getElementById('btn-collapse')!.addEventListener('click', () => collapse());
 
-  // Click header when collapsed → expand
-  document.getElementById('hub-header')!.addEventListener('click', (e) => {
-    if (collapsed && !(e.target as HTMLElement).closest('.hub-actions')) expand();
-  });
-
-  // Close app
+  // Close app (expanded)
   document.getElementById('btn-close')!.addEventListener('click', async () => {
     await closeApp();
   });
 
-  // Drag-to-hub
+  // Pill tab buttons → expand + switch to tab
+  document.querySelectorAll<HTMLButtonElement>('.pill-tab').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const tab = btn.dataset.pillTab as 'local' | 'red';
+      await expand();
+      switchTab(tab);
+    });
+  });
+
+  // Pill close → send to tray
+  document.getElementById('btn-pill-close')!.addEventListener('click', async () => {
+    await closeApp();
+  });
+
+  // Drag-to-hub (HTML5 — browser files and text)
   const hub = document.getElementById('hub-root')!;
   hub.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer!.dropEffect = 'copy'; hub.classList.add('drag-over'); });
   hub.addEventListener('dragleave', (e) => {
@@ -432,6 +840,65 @@ function renderHub() {
       if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
     }
   });
+
+  // Native drag-drop (Tauri onDragDropEvent — filesystem paths via WebView2).
+  // Virtual-file sources (Outlook, OneDrive, ZIP viewer) give empty paths because
+  // WebView2 exposes CF_HDROP only. Fall back to Ctrl+V for those.
+  if (IS_TAURI) {
+    (async () => {
+      try {
+        await getCurrentWindow().onDragDropEvent(async (event) => {
+          switch (event.payload.type) {
+            case 'enter':
+            case 'over':
+              hub.classList.add('drag-over');
+              break;
+            case 'leave':
+              hub.classList.remove('drag-over');
+              break;
+            case 'drop': {
+              hub.classList.remove('drag-over');
+              const paths = (event.payload.paths ?? []).filter(
+                (p): p is string => typeof p === 'string' && p.length > 0,
+              );
+              if (paths.length > 0) {
+                await commitDroppedItems(paths.map(p => addFileByPathToHub(p)));
+              } else {
+                // Outlook attachments, unsynced OneDrive files, ZIP entries, etc.:
+                // WebView2 has no path for them. Suggest Ctrl+V.
+                showDragFallbackHint();
+              }
+              break;
+            }
+          }
+        });
+      } catch {
+        // HTML5 drop handler above covers the remaining cases.
+      }
+    })();
+  }
+
+  async function addFileByPathToHub(path: string): Promise<ContentItem> {
+    return invoke<ContentItem>('add_file_by_path', { path });
+  }
+
+  async function commitDroppedItems(tasks: Array<Promise<ContentItem>>) {
+    if (tasks.length === 0) return;
+    const settled = await Promise.allSettled(tasks);
+    const items = settled
+      .filter((r): r is PromiseFulfilledResult<ContentItem> => r.status === 'fulfilled')
+      .map(r => r.value);
+    if (items.length > 0) {
+      localContent = [...items, ...localContent];
+      updateHeader();
+      if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
+    }
+    const firstError = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (firstError) {
+      const msg = firstError.reason instanceof Error ? firstError.reason.message : String(firstError.reason);
+      showToast(msg);
+    }
+  }
 
   // Ctrl+V → add to hub
   document.addEventListener('paste', async (e) => {
@@ -524,6 +991,33 @@ function updateHeader() {
   }
 }
 
+// ── Drag-to-scroll ────────────────────────────────────────────────────────────
+
+function attachDragScroll(el: HTMLElement) {
+  let isDown = false;
+  let startX = 0;
+  let scrollLeft = 0;
+
+  el.addEventListener('mousedown', (e) => {
+    if ((e.target as HTMLElement).closest('button, a, input')) return;
+    isDown = true;
+    el.style.cursor = 'grabbing';
+    startX = e.pageX - el.offsetLeft;
+    scrollLeft = el.scrollLeft;
+    e.preventDefault();
+  });
+
+  el.addEventListener('mouseleave', () => { isDown = false; el.style.cursor = ''; });
+  el.addEventListener('mouseup',    () => { isDown = false; el.style.cursor = ''; });
+
+  el.addEventListener('mousemove', (e) => {
+    if (!isDown) return;
+    const x    = e.pageX - el.offsetLeft;
+    const walk = (x - startX) * 1.4;
+    el.scrollLeft = scrollLeft - walk;
+  });
+}
+
 // ── Local panel ───────────────────────────────────────────────────────────────
 
 function renderLocalContent() {
@@ -548,7 +1042,8 @@ function renderLocalContent() {
   container.innerHTML = `<div class="card-grid">${localContent.map(item => {
     const pub = publishedIds.has(item.id);
     const actionBtns = pub
-      ? `<button class="btn-stop" data-id="${item.id}" data-action="stop">■ Parar</button>`
+      ? `<button class="btn-direct-mode" data-id="${item.id}" data-action="direct-mode" title="Modo directo AirDrop">${iconWifi(9)} Directo</button>
+          <button class="btn-stop" data-id="${item.id}" data-action="stop">■ Parar</button>`
       : [
           `<button class="btn-broadcast" data-id="${item.id}" data-action="broadcast">${iconBroadcast(9)} Todos</button>`,
           ...onlineDevices.map(d =>
@@ -598,6 +1093,8 @@ function renderLocalContent() {
         await invoke('publish_content', { args: { content_id: id, target_device: null } }); publishedIds.add(id);
       } else if (el.dataset.action === 'direct') {
         await invoke('publish_content', { args: { content_id: id, target_device: el.dataset.device! } }); publishedIds.add(id);
+      } else if (el.dataset.action === 'direct-mode') {
+        openDirectModeModal(id);
       }
       renderLocalContent();
     });
@@ -674,6 +1171,175 @@ function renderLocalContent() {
       }
     });
   });
+
+  attachDragScroll(document.getElementById('panel-local')!);
+}
+
+// ── Direct Mode Modal ─────────────────────────────────────────────────────────
+
+interface DirectPeer {
+  device_id: string;
+  device_name: string;
+  ephemeral_group_id: string;
+  rssi: number;
+  selected: boolean;
+}
+
+let directModalContentId: string | null = null;
+let directModalPeerRefresh: ReturnType<typeof setInterval> | null = null;
+
+async function openDirectModeModal(contentId: string) {
+  directModalContentId = contentId;
+
+  // Start sender mode discovery
+  await invoke('start_direct_mode_sender');
+
+  // Show modal
+  const overlay = createModalOverlay();
+  document.body.appendChild(overlay);
+
+  const modal = document.createElement('div');
+  modal.className = 'direct-modal';
+  modal.innerHTML = `
+    <div class="direct-modal-header">
+      <span>${iconWifi(18)} Modo Directo</span>
+      <button class="modal-close" id="direct-modal-close">${iconX(14)}</button>
+    </div>
+    <div class="direct-modal-body">
+      <p class="direct-hint">Buscando dispositivos cercanos...</p>
+      <div class="direct-peers-list" id="direct-peers-list">
+        <div class="direct-empty">Iniciando...</div>
+      </div>
+    </div>
+    <div class="direct-modal-footer">
+      <button class="btn-cancel" id="direct-cancel">Cancelar</button>
+      <button class="btn-accept" id="direct-accept" disabled>Enviar a 0</button>
+    </div>`;
+
+  overlay.querySelector('.modal-backdrop')!.appendChild(modal);
+
+  document.getElementById('direct-modal-close')!.addEventListener('click', closeDirectModal);
+  document.getElementById('direct-cancel')!.addEventListener('click', closeDirectModal);
+  document.getElementById('direct-accept')!.addEventListener('click', () => {
+    void acceptDirectModal();
+  });
+
+  // Start refreshing peers list
+  directModalPeerRefresh = setInterval(() => {
+    void refreshDirectPeers();
+  }, 1500);
+  void refreshDirectPeers();
+}
+
+async function refreshDirectPeers() {
+  try {
+    const resp = await invoke<{ peers: DirectPeer[] }>('get_direct_peers');
+
+    const list = document.getElementById('direct-peers-list');
+    if (!list) return;
+
+    if (resp.peers.length === 0) {
+      list.innerHTML = `<div class="direct-empty">No hay dispositivos cerca.<br> Asegúrate de que el otro dispositivo también tenga FenixHub abierto en modo directo.</div>`;
+      return;
+    }
+
+    list.innerHTML = resp.peers.map(peer => {
+      const rssiBars = signalBars(peer.rssi);
+      return `
+        <div class="direct-peer-item" data-peer-id="${escapeHtml(peer.device_id)}">
+          <div class="direct-peer-info">
+            <div class="direct-peer-name">${escapeHtml(peer.device_name)}</div>
+            <div class="direct-peer-id">Grupo: ${escapeHtml(peer.ephemeral_group_id)}</div>
+          </div>
+          <div class="direct-peer-signal">${rssiBars}</div>
+          <div class="direct-peer-check">
+            <button class="peer-select-btn" data-peer-id="${escapeHtml(peer.device_id)}">
+              ${peer.selected ? iconCheckmark(16) : iconCircle(16)}
+            </button>
+          </div>
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.peer-select-btn').forEach(btn => {
+      (btn as HTMLElement).addEventListener('click', () => {
+        const peerId = (btn as HTMLElement).dataset.peerId!;
+        toggleDirectPeer(peerId);
+        void refreshDirectPeers();
+      });
+    });
+
+    const selectedCount = resp.peers.filter(p => p.selected).length;
+    const acceptBtn = document.getElementById('direct-accept') as HTMLButtonElement;
+    acceptBtn.textContent = `Enviar a ${selectedCount}`;
+    acceptBtn.disabled = selectedCount === 0;
+
+    // Update header
+    const hint = document.querySelector('.direct-hint');
+    if (hint) {
+      hint.textContent = resp.peers.length > 0
+        ? `${resp.peers.length} dispositivo(s) encontrado(s)`
+        : 'Buscando dispositivos...';
+    }
+  } catch (e) {
+    console.error('Failed to refresh direct peers', e);
+  }
+}
+
+let selectedDirectPeerIds: Set<string> = new Set();
+
+async function toggleDirectPeer(peerId: string) {
+  if (selectedDirectPeerIds.has(peerId)) {
+    selectedDirectPeerIds.delete(peerId);
+  } else {
+    selectedDirectPeerIds.add(peerId);
+  }
+  await invoke('toggle_direct_peer', { peer_id: peerId });
+}
+
+async function acceptDirectModal() {
+  if (selectedDirectPeerIds.size === 0 || !directModalContentId) return;
+
+  const selected = Array.from(selectedDirectPeerIds);
+  await invoke('accept_direct_peers', {
+    args: {
+      selected_peer_ids: selected,
+      content_id: directModalContentId,
+    },
+  });
+
+  showToast(`Enviando a ${selected.length} dispositivo(s)...`);
+  closeDirectModal();
+}
+
+function closeDirectModal() {
+  if (directModalPeerRefresh) {
+    clearInterval(directModalPeerRefresh);
+    directModalPeerRefresh = null;
+  }
+  selectedDirectPeerIds.clear();
+  invoke('cancel_direct_mode').catch(() => {});
+
+  const overlay = document.querySelector('.modal-overlay');
+  if (overlay) overlay.remove();
+
+  renderLocalContent();
+}
+
+function createModalOverlay(): HTMLElement {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal-backdrop"></div>`;
+  overlay.querySelector('.modal-backdrop')!.addEventListener('click', (e) => {
+    if (e.target === overlay.querySelector('.modal-backdrop')) closeDirectModal();
+  });
+  return overlay;
+}
+
+function signalBars(rssi: number): string {
+  if (rssi >= -60) return '●●●';
+  if (rssi >= -75) return '●●○';
+  if (rssi >= -90) return '●○○';
+  return '○○○';
 }
 
 // ── Red panel ─────────────────────────────────────────────────────────────────
@@ -692,9 +1358,10 @@ function renderPeerContent() {
   }
 
   container.innerHTML = `<div class="card-grid">${peerContent.map(item => {
-    const isImg = item.preview.startsWith('data:image');
-    const topContent = isImg
-      ? `<img class="card-thumb" src="${item.preview}" />`
+    // _localSrc: full-res asset:// URL set after local cache; preview: mDNS base64 thumbnail
+    const thumbSrc = item._localSrc || (item.preview.startsWith('data:image') ? item.preview : null);
+    const topContent = thumbSrc
+      ? `<img class="card-thumb" src="${thumbSrc}" />`
       : `<div class="card-top">
            <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
            <div class="card-body">
@@ -725,20 +1392,13 @@ function renderPeerContent() {
         if (action === 'copy') {
           btn.textContent = 'Copiando…';
           const result = await invoke<{ cached_path: string | null }>('copy_peer_content', peerCommandArgs(id));
-          // If the peer sent an image, show the thumbnail now that it's cached locally.
           if (result?.cached_path) {
-            const card = btn.closest('.content-card') as HTMLElement | null;
-            if (card && !card.querySelector('.card-thumb')) {
-              const src = `file://${result.cached_path}`;
-              const top = card.querySelector('.card-top');
-              if (top) {
-                const thumb = document.createElement('img');
-                thumb.className = 'card-thumb';
-                thumb.src = src;
-                card.insertBefore(thumb, top);
-                top.remove();
-              }
-            }
+            // Persist asset URL in peerContent so re-renders keep the thumbnail
+            const assetSrc = convertFileSrc(result.cached_path);
+            peerContent = peerContent.map(p =>
+              p.content_id === id ? { ...p, _localSrc: assetSrc } : p
+            );
+            renderPeerContent();
           }
           flashPeerAction(btn, 'Copiado');
           return;
@@ -747,6 +1407,16 @@ function renderPeerContent() {
         btn.textContent = 'Guardando…';
         const result = await invoke<SaveContentResult>('save_peer_content_as', peerCommandArgs(id));
         if (result.saved) {
+          if (result.path) {
+            const peerItem = peerContent.find(p => p.content_id === id);
+            if (peerItem?.content_type === 'image') {
+              const assetSrc = convertFileSrc(result.path);
+              peerContent = peerContent.map(p =>
+                p.content_id === id ? { ...p, _localSrc: assetSrc } : p
+              );
+              renderPeerContent();
+            }
+          }
           flashPeerAction(btn, 'Guardado');
         } else {
           btn.disabled = false;
@@ -764,6 +1434,16 @@ function renderPeerContent() {
       }
     });
   });
+
+  attachDragScroll(document.getElementById('panel-red')!);
+}
+
+function flashPeerAction(button: HTMLButtonElement, label: string) {
+  button.textContent = label;
+  window.setTimeout(() => {
+    if (!button.isConnected) return;
+    renderPeerContent();
+  }, 900);
 }
 
 function flashPeerAction(button: HTMLButtonElement, label: string) {
@@ -786,6 +1466,9 @@ function iconHub(s: number) {
 }
 function iconCheckmark(s: number) {
   return svg(s,'0 0 16 16','<polyline points="2.5,8 6.5,12 13.5,4" stroke-width="2.2"/>');
+}
+function iconCircle(s: number) {
+  return svg(s,'0 0 16 16','<circle cx="8" cy="8" r="5.5" stroke-width="1.8"/>');
 }
 function iconInbox(s: number) {
   return svg(s,'0 0 16 16','<rect x="1.5" y="1.5" width="13" height="13" rx="2" stroke-width="1.7"/><polyline points="1.5,10 4.5,10 5.5,12.5 10.5,12.5 11.5,10 14.5,10" stroke-width="1.7"/>');
@@ -820,18 +1503,6 @@ function iconChevronDown(s: number) {
 function iconLock(s: number) {
   return svg(s,'0 0 14 14','<rect x="2" y="6" width="10" height="7" rx="1.5" stroke-width="1.6"/><path d="M4,6 V4 a4,4 0 0 1 6,0 V6" stroke-width="1.6" fill="none"/>');
 }
-function deviceTypeIcon(type: string, s: number): string {
-  const dt = DEVICE_TYPES.find(d => d.id === type) ?? DEVICE_TYPES[0];
-  // Re-render with custom size
-  switch (type) {
-    case 'laptop':  return svg(s,'0 0 20 18','<rect x="2" y="2" width="16" height="11" rx="1.5" stroke-width="1.5"/><path d="M0,16 Q10,14 20,16" stroke-width="1.5" fill="none"/>');
-    case 'phone':   return svg(s,'0 0 14 20','<rect x="1" y="1" width="12" height="18" rx="3" stroke-width="1.5"/><line x1="5.5" y1="16.5" x2="8.5" y2="16.5" stroke-width="1.5"/>');
-    case 'tablet':  return svg(s,'0 0 16 20','<rect x="1" y="1" width="14" height="18" rx="2.5" stroke-width="1.5"/><line x1="6" y1="16.5" x2="10" y2="16.5" stroke-width="1.5"/>');
-    case 'server':  return svg(s,'0 0 20 18','<rect x="1" y="1" width="18" height="7" rx="1.5" stroke-width="1.5"/><rect x="1" y="10" width="18" height="7" rx="1.5" stroke-width="1.5"/>');
-    default:        return svg(s,'0 0 20 18','<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>');
-  }
-  return dt.icon();
-}
 function iconInboxLarge() {
   return svg(36,'0 0 24 24','<rect x="2" y="2" width="20" height="20" rx="3" stroke-width="1.2"/><polyline points="2,15 7,15 8.5,19 15.5,19 17,15 22,15" stroke-width="1.2"/>');
 }
@@ -861,6 +1532,96 @@ function humanSize(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1048576) return `${(b/1024).toFixed(1)} KB`;
   return `${(b/1048576).toFixed(1)} MB`;
+}
+function showToast(message: string) {
+  const toast = document.createElement('div');
+  toast.className = 'overlay-toast';
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    setTimeout(() => toast.remove(), 240);
+  }, 1800);
+}
+
+const WARN_SIZE_BYTES = 100 * 1024 * 1024;   // 100 MB — mostrar aviso
+const MAX_SIZE_BYTES  = 500 * 1024 * 1024;   // 500 MB — límite práctico (cifrado en RAM)
+
+async function addBrowserFileToHub(file: File): Promise<ContentItem> {
+  if (file.size > MAX_SIZE_BYTES) {
+    throw new Error(`El archivo "${file.name}" supera el límite de 500 MB para transferencia cifrada en RAM.`);
+  }
+  if (file.size > WARN_SIZE_BYTES) {
+    showSizeWarning(file.name, file.size);
+  }
+
+  // Tauri exposes the real filesystem path on File objects from drag & drop.
+  // Use it to let Rust read the bytes directly — no base64, no RAM double.
+  const nativePath = IS_TAURI ? (file as unknown as { path?: string }).path : undefined;
+  if (nativePath) {
+    return invoke<ContentItem>('add_file_by_path', { path: nativePath });
+  }
+
+  // Fallback: clipboard images and browser-only mode use base64
+  const bytesBase64 = await fileToBase64(file);
+  const preview = file.type.startsWith('image/') ? await imageFileToPreview(file) : undefined;
+  return invoke<ContentItem>('add_binary_content', {
+    args: {
+      file_name: file.name || `clipboard-${Date.now()}`,
+      mime_type: file.type || null,
+      bytes_base64: bytesBase64,
+      preview: preview || null,
+    },
+  });
+}
+
+function showDragFallbackHint() {
+  const existing = document.getElementById('drag-hint');
+  if (existing) return;
+  const el = document.createElement('div');
+  el.id = 'drag-hint';
+  el.className = 'size-warn';
+  el.innerHTML = `Ya en portapapeles — usa <kbd>Ctrl+V</kbd> para pegar &nbsp;<button onclick="this.parentElement.remove()">×</button>`;
+  document.getElementById('panel-local')?.prepend(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+function showSizeWarning(name: string, size: number) {
+  const existing = document.getElementById('size-warn');
+  if (existing) existing.remove();
+  const el = document.createElement('div');
+  el.id = 'size-warn';
+  el.className = 'size-warn';
+  el.innerHTML = `⚠ <strong>${escapeHtml(name)}</strong> (${humanSize(size)}) — archivo grande, puede tardar. <button onclick="this.parentElement.remove()">×</button>`;
+  document.getElementById('panel-local')?.prepend(el);
+  setTimeout(() => el.remove(), 8000);
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  let binary = '';
+  const chunk = 0x8000;
+  const bytes = new Uint8Array(buffer);
+  for (let index = 0; index < bytes.length; index += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+  }
+  return btoa(binary);
+}
+
+async function imageFileToPreview(file: File): Promise<string | undefined> {
+  const bitmap = await createImageBitmap(file).catch(() => null);
+  if (!bitmap) return undefined;
+  const canvas = document.createElement('canvas');
+  canvas.width = 72;
+  canvas.height = 72;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return undefined;
+
+  const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
+  const width = bitmap.width * scale;
+  const height = bitmap.height * scale;
+  ctx.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+  return canvas.toDataURL('image/jpeg', 0.58);
 }
 
 const WARN_SIZE_BYTES = 100 * 1024 * 1024;   // 100 MB — mostrar aviso

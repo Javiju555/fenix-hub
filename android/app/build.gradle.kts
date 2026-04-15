@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,8 +21,8 @@ android {
         applicationId = "com.fenixhub.mobile"
         minSdk = 31
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 5
+        versionName = "0.2.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -28,8 +30,32 @@ android {
         }
     }
 
+    // ── Signing ──────────────────────────────────────────────────────────────
+    // Local: crea android/signing.properties (gitignored) con las rutas/claves.
+    // CI:    usa variables de entorno KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD.
+    signingConfigs {
+        create("release") {
+            val propsFile = rootProject.file("signing.properties")
+            if (propsFile.exists()) {
+                val props = Properties()
+                props.load(propsFile.inputStream())
+                storeFile     = rootProject.file(props.getProperty("storeFile"))
+                storePassword = props.getProperty("storePassword")
+                keyAlias      = props.getProperty("keyAlias")
+                keyPassword   = props.getProperty("keyPassword")
+            } else {
+                // GitHub Actions / CI
+                storeFile     = System.getenv("KEYSTORE_PATH")?.let { rootProject.file(it) }
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias      = System.getenv("KEY_ALIAS")
+                keyPassword   = System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -94,6 +120,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.lambdapioneer.argon2kt:argon2kt:1.4.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    testImplementation("junit:junit:4.13.2")
 
     debugImplementation("androidx.compose.ui:ui-tooling:1.6.4")
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.6.4")

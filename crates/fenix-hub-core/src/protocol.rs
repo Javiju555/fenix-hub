@@ -14,13 +14,15 @@
 /// ## Protocol version
 ///
 /// `protocol_version` in `Announcement` allows future capability negotiation.
-/// Version 1 (current): mandatory AES-256-GCM content encryption.
-/// Devices running v1 will refuse to pull from peers advertising version 0.
+/// Version 0: legacy, unencrypted. Version 1+: mandatory AES-256-GCM.
+/// Version 2: FNX2 chunked-AEAD wire format. Version 3 (current): protocol stable.
+/// Devices running v1+ refuse to pull from peers advertising version 0.
 use crate::content::ContentType;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Current protocol version — bumped whenever the wire format changes.
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// FNX2 chunked AEAD wire format magic.
 pub const FNX2_MAGIC: &[u8; 4] = b"FNX2";
@@ -104,8 +106,27 @@ pub enum HubMessage {
 }
 
 /// HTTP header carrying the HMAC-SHA256 request signature.
-/// Value: hex-encoded HMAC-SHA256(mac_key, content_id_bytes).
+/// Value: hex-encoded HMAC-SHA256(mac_key, canonical_auth_message).
 pub const HMAC_HEADER: &str = "X-FenixHub-Auth";
+
+/// HTTP header carrying the request timestamp in unix milliseconds.
+pub const AUTH_TIMESTAMP_HEADER: &str = "X-FenixHub-Timestamp";
+
+/// HTTP header carrying a per-request random nonce (hex).
+pub const AUTH_NONCE_HEADER: &str = "X-FenixHub-Nonce";
+
+/// HTTP header carrying `SHA256(body)` as lowercase hex.
+pub const AUTH_BODY_SHA256_HEADER: &str = "X-FenixHub-Body-Sha256";
+
+/// Maximum accepted clock skew for authenticated requests.
+pub const AUTH_MAX_SKEW_MS: u64 = 90_000;
+
+/// SHA-256 of an empty body.
+pub const EMPTY_BODY_SHA256_HEX: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// Canonical auth message prefix.
+const AUTH_CANONICAL_PREFIX: &str = "fenixhub-auth-v1";
 
 /// HTTP response header indicating AES-256-GCM encrypted body.
 /// Present (value "1") when the response body is encrypted.
@@ -118,3 +139,66 @@ pub const MDNS_SERVICE_TYPE: &str = "_fenixhub._tcp.local.";
 /// mDNS service type for device presence beacons (no content).
 /// Announced from daemon start so peers appear in the UI before sharing anything.
 pub const MDNS_PRESENCE_TYPE: &str = "_fenixhub-presence._tcp.local.";
+
+/// Builds the canonical signed payload used by request authentication.
+pub fn canonical_auth_message(
+    method: &str,
+    path: &str,
+    group_id: &str,
+    timestamp_ms: u64,
+    nonce_hex: &str,
+    body_sha256_hex: &str,
+) -> Vec<u8> {
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        AUTH_CANONICAL_PREFIX,
+        method.trim().to_ascii_uppercase(),
+        path.trim(),
+        group_id.trim(),
+        timestamp_ms,
+        nonce_hex.trim().to_ascii_lowercase(),
+        body_sha256_hex.trim().to_ascii_lowercase(),
+    )
+    .into_bytes()
+}
+
+/// Returns SHA-256(input) as lowercase hex.
+pub fn sha256_hex(input: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input);
+    hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hmac::{Hmac, Mac};
+
+    #[test]
+    fn canonical_auth_hmac_vector_matches_android() {
+        type HmacSha256 = Hmac<Sha256>;
+
+        let canonical = canonical_auth_message(
+            "get",
+            "/content/test-id",
+            "0123456789abcdef0123456789abcdef",
+            1_735_689_600_000,
+            "00112233445566778899AABBCCDDEEFF",
+            &EMPTY_BODY_SHA256_HEX.to_ascii_uppercase(),
+        );
+
+        let expected_canonical = b"fenixhub-auth-v1\nGET\n/content/test-id\n0123456789abcdef0123456789abcdef\n1735689600000\n00112233445566778899aabbccddeeff\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(expected_canonical.as_slice(), canonical.as_slice());
+
+        let key = hex::decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+            .expect("valid test key");
+        let mut mac = HmacSha256::new_from_slice(&key).expect("hmac key accepted");
+        mac.update(&canonical);
+        let signature = hex::encode(mac.finalize().into_bytes());
+
+        assert_eq!(
+            "5bce910b31e95e17a0e8fd3373510f562f30d9021ebc5007849edb1487992a37",
+            signature
+        );
+    }
+}
