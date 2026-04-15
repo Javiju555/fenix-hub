@@ -29,6 +29,22 @@
 - [x] Cliente streaming a disco (`pull_content_to_file`) con fallback graceful a pull bufferizado.
 - [x] Contrato `get_transport_hardware` normalizado entre desktop y Android (`ble`/`wifi_direct` anidados, `permissions_ready`, `ble_peers`, `handoff_candidates`).
 
+## Limitaciones conocidas por plataforma
+
+### Linux — drag & drop de archivos virtuales
+El desktop en Windows registra un `IDropTarget` COM personalizado que intercepta el `IDataObject`
+antes de que WebView2 lo consuma. Esto permite soltar archivos virtuales que no tienen path real
+en disco: adjuntos arrastrados directamente desde Outlook, ficheros dentro de ZIPs abiertos en
+el explorador de Windows, o archivos de OneDrive/SharePoint no descargados.
+
+En Linux este mecanismo no existe porque el protocolo XDND siempre expone `text/uri-list` con
+paths reales. Las apps del ecosistema Linux (Thunderbird, Nautilus, etc.) escriben un temp file
+antes de hacer drop, por lo que el 100% de los casos de uso habituales funcionan igual.
+
+La limitación real queda acotada a: **apps nativas de Windows** (Outlook corporativo, shells COM)
+en entornos mixtos. No es algo que tenga equivalente en el ecosistema Linux y no está previsto
+implementarlo.
+
 ## Pendiente real
 
 ### Transporte cercano (prioridad alta)
