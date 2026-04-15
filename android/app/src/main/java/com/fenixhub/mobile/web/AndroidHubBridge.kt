@@ -214,6 +214,14 @@ class AndroidHubBridge(
                 container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.StartAsDevice)
                 "null"
             }
+            "mesh_modal_open" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.ModalOpened)
+                "null"
+            }
+            "mesh_modal_close" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.ModalClosed)
+                "null"
+            }
             "mesh_accept_device" -> {
                 val deviceId = args?.optString("device_id").orEmpty()
                 if (deviceId.isNotBlank()) {
@@ -228,6 +236,15 @@ class AndroidHubBridge(
                 if (deviceId.isNotBlank()) {
                     container.meshManager.dispatch(
                         com.fenixhub.mobile.service.MeshManager.MeshCommand.RejectDevice(deviceId)
+                    )
+                }
+                "null"
+            }
+            "mesh_expel_device" -> {
+                val deviceId = args?.optString("device_id").orEmpty()
+                if (deviceId.isNotBlank()) {
+                    container.meshManager.dispatch(
+                        com.fenixhub.mobile.service.MeshManager.MeshCommand.ExpelDevice(deviceId)
                     )
                 }
                 "null"
@@ -702,6 +719,7 @@ class AndroidHubBridge(
                     put(JSONObject()
                         .put("id", device.id)
                         .put("name", device.name)
+                        .put("mesh_id", device.meshId ?: JSONObject.NULL)
                         .put("rssi", device.rssi)
                         .put("status", device.status.name.lowercase()))
                 }
@@ -711,6 +729,7 @@ class AndroidHubBridge(
                     put(JSONObject()
                         .put("id", device.id)
                         .put("name", device.name)
+                        .put("mesh_id", device.meshId ?: JSONObject.NULL)
                         .put("rssi", device.rssi)
                         .put("status", device.status.name.lowercase())
                         .put("joined_at", device.joinedAt ?: JSONObject.NULL))

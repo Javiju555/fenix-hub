@@ -1942,6 +1942,7 @@ interface MeshState {
 interface MeshDevice {
   id: string;
   name: string;
+  mesh_id?: string | null;
   rssi: number;
   status: string;
   joined_at: number | null;
@@ -1969,6 +1970,7 @@ async function openMeshSheet() {
 
   await refreshMeshState();
   renderMeshSheet();
+  await invoke('mesh_modal_open');
 
   meshRefreshInterval = window.setInterval(async () => {
     await refreshMeshState();
@@ -1986,6 +1988,7 @@ async function refreshMeshState() {
 
 function closeMeshSheet() {
   meshSheetOpen = false;
+  void invoke('mesh_modal_close');
   if (meshRefreshInterval) {
     clearInterval(meshRefreshInterval);
     meshRefreshInterval = null;
@@ -2088,12 +2091,18 @@ function updateMeshSheetState() {
           </div>
         </div>`;
         } else {
+          const hostMeshId = d.mesh_id || '';
           return `
         <div class="a-mesh-device a-mesh-device-pending">
           <div class="a-mesh-device-info">
             <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+            <span class="a-mesh-device-signal">${signalBars(d.rssi)}</span>
           </div>
-          <span class="a-mesh-device-badge pending">Esperando...</span>
+          <div class="a-mesh-device-actions">
+            <button class="a-mesh-btn-accept" data-host-mesh-id="${escapeAttribute(hostMeshId)}" data-host-name="${escapeAttribute(d.name)}" ${hostMeshId ? '' : 'disabled'}>
+              Solicitar acceso
+            </button>
+          </div>
         </div>`;
         }
       }).join('');
@@ -2113,6 +2122,19 @@ function updateMeshSheetState() {
             void refreshMeshState().then(updateMeshSheetState);
           });
         });
+      } else {
+        deviceList.querySelectorAll('.a-mesh-btn-accept').forEach(btn => {
+          (btn as HTMLElement).addEventListener('click', () => {
+            const meshId = (btn as HTMLElement).dataset.hostMeshId || '';
+            const hostName = (btn as HTMLElement).dataset.hostName || 'Host';
+            if (!meshId) {
+              showToast('Host sin mesh id válido');
+              return;
+            }
+            void invoke('mesh_request_join', { host_mesh_id: meshId, host_name: hostName });
+            void refreshMeshState().then(updateMeshSheetState);
+          });
+        });
       }
     } else {
       deviceList.innerHTML = `<div class="a-mesh-empty">${meshState.role === 'host' ? 'Esperando dispositivos...' : 'Buscando meshes...'}</div>`;
@@ -2121,7 +2143,7 @@ function updateMeshSheetState() {
     if (meshState.role === 'host' && meshState.pending_count > 0) {
       const allAccepted = meshState.pending_devices.every(d => d.status === 'connected');
       if (allAccepted) {
-        actions.innerHTML = `<button class="a-btn a-btn-primary" id="mesh-close-btn">Crear grupo</button>`;
+        actions.innerHTML = `<button class="a-btn a-btn-primary" id="mesh-close-btn">Iniciar mesh</button>`;
         document.getElementById('mesh-close-btn')?.addEventListener('click', () => {
           void invoke('mesh_close_modal').then(closeMeshSheet);
         });
@@ -2136,6 +2158,26 @@ function updateMeshSheetState() {
         void invoke('mesh_cancel_discovery').then(closeMeshSheet);
       });
     }
+    return;
+  }
+
+  if (meshState.status === 'pending') {
+    hint.textContent = meshState.role === 'device'
+      ? 'Solicitud enviada. Esperando aprobación del host y passphrase BLE...'
+      : 'Pendiente';
+    deviceList.innerHTML = meshState.pending_devices.length > 0
+      ? meshState.pending_devices.map(d => `
+        <div class="a-mesh-device a-mesh-device-pending">
+          <div class="a-mesh-device-info">
+            <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+          </div>
+          <span class="a-mesh-device-badge pending">Esperando...</span>
+        </div>`).join('')
+      : '<div class="a-mesh-empty">Esperando respuesta del host...</div>';
+    actions.innerHTML = `<button class="a-btn a-btn-secondary" id="mesh-close-btn">Cancelar</button>`;
+    document.getElementById('mesh-close-btn')?.addEventListener('click', () => {
+      void invoke('mesh_cancel_discovery').then(closeMeshSheet);
+    });
     return;
   }
 
@@ -2159,15 +2201,73 @@ function updateMeshSheetState() {
       ? `Mesh activo · ${meshState.active_devices.length} dispositivo(s)`
       : `Conectado al mesh de ${meshState.mesh_id || 'host'}`;
 
-    deviceList.innerHTML = meshState.active_devices.length > 0
-      ? meshState.active_devices.map(d => `
-        <div class="a-mesh-device a-mesh-device-active">
-          <div class="a-mesh-device-info">
-            <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
-          </div>
-          <span class="a-mesh-device-badge">Conectado</span>
-        </div>`).join('')
-      : '<div class="a-mesh-empty">Mesh establecido</div>';
+    if (meshState.role === 'host') {
+      const inviteHtml = meshState.pending_devices.length > 0
+        ? meshState.pending_devices.map(d => `
+          <div class="a-mesh-device">
+            <div class="a-mesh-device-info">
+              <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+              <span class="a-mesh-device-signal">${signalBars(d.rssi)}</span>
+            </div>
+            <div class="a-mesh-device-actions">
+              <button class="a-mesh-btn-accept" data-device-id="${d.id}">${iconCheck(16)}</button>
+              <button class="a-mesh-btn-reject" data-device-id="${d.id}">${iconX(16)}</button>
+            </div>
+          </div>`).join('')
+        : '<div class="a-mesh-empty">Sin nuevos dispositivos detectados</div>';
+
+      const connectedHtml = meshState.active_devices.length > 0
+        ? meshState.active_devices.map(d => `
+          <div class="a-mesh-device a-mesh-device-active">
+            <div class="a-mesh-device-info">
+              <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+            </div>
+            <div class="a-mesh-device-actions">
+              <button class="a-mesh-btn-reject" data-expel-device-id="${d.id}">Expulsar</button>
+            </div>
+          </div>`).join('')
+        : '<div class="a-mesh-empty">Aún no hay dispositivos conectados</div>';
+
+      deviceList.innerHTML = `
+        <div class="a-mesh-hint" style="text-align:left; margin-bottom:8px;">Disponibles para invitar</div>
+        ${inviteHtml}
+        <div class="a-mesh-hint" style="text-align:left; margin:12px 0 8px;">Integrantes de la mesh</div>
+        ${connectedHtml}
+      `;
+
+      deviceList.querySelectorAll('.a-mesh-btn-accept').forEach(btn => {
+        (btn as HTMLElement).addEventListener('click', () => {
+          const id = (btn as HTMLElement).dataset.deviceId!;
+          void invoke('mesh_accept_device', { device_id: id });
+          void refreshMeshState().then(updateMeshSheetState);
+        });
+      });
+      deviceList.querySelectorAll('.a-mesh-btn-reject').forEach(btn => {
+        const expelId = (btn as HTMLElement).dataset.expelDeviceId;
+        if (expelId) {
+          (btn as HTMLElement).addEventListener('click', () => {
+            void invoke('mesh_expel_device', { device_id: expelId });
+            void refreshMeshState().then(updateMeshSheetState);
+          });
+        } else {
+          (btn as HTMLElement).addEventListener('click', () => {
+            const id = (btn as HTMLElement).dataset.deviceId!;
+            void invoke('mesh_reject_device', { device_id: id });
+            void refreshMeshState().then(updateMeshSheetState);
+          });
+        }
+      });
+    } else {
+      deviceList.innerHTML = meshState.active_devices.length > 0
+        ? meshState.active_devices.map(d => `
+          <div class="a-mesh-device a-mesh-device-active">
+            <div class="a-mesh-device-info">
+              <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+            </div>
+            <span class="a-mesh-device-badge">Conectado</span>
+          </div>`).join('')
+        : '<div class="a-mesh-empty">Mesh establecido</div>';
+    }
 
     if (meshState.role === 'host') {
       actions.innerHTML = `

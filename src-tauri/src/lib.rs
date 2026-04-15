@@ -19,6 +19,15 @@ use tracing_subscriber::EnvFilter;
 /// Set to true by the tray "Salir" action so ExitRequested doesn't block it.
 static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+fn should_start_hidden() -> bool {
+    std::env::args().skip(1).any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--background" | "--tray" | "--hidden" | "--startup"
+        )
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -49,12 +58,21 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle().clone();
             let state = app.state::<state::HubState>();
+            let start_hidden = should_start_hidden();
             temp_store::prepare().ok();
 
             if let Some(window) = app_handle.get_webview_window("hub") {
                 windowing::attach_hub_window_handlers(&window, &app_handle);
+                if start_hidden {
+                    let _ = window.hide();
+                }
             }
-            let _ = windowing::show_or_create_hub_window(&app_handle);
+
+            if !start_hidden {
+                let _ = windowing::show_or_create_hub_window(&app_handle);
+            } else {
+                tracing::info!("Starting in background mode: hub window hidden");
+            }
 
             // Register custom Windows drop target on the hub window.
             // This intercepts drag-and-drop at the HWND level BEFORE WebView2

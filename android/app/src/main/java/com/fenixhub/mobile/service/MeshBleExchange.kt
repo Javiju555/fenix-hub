@@ -26,7 +26,14 @@ data class MeshPassphraseExchange(
     val hostDeviceId: String,
     val hostName: String,
     val rssi: Int,
+    val role: MeshBleRole = MeshBleRole.UNKNOWN,
 )
+
+enum class MeshBleRole {
+    HOST,
+    DEVICE,
+    UNKNOWN,
+}
 
 interface MeshPassphraseListener {
     fun onPassphraseReceived(exchange: MeshPassphraseExchange)
@@ -56,6 +63,7 @@ class MeshBleExchange(
 
     fun start() {
         if (discoveryMode) {
+            startDiscoveryAdvertising()
             startScanning()
         } else if (isHost) {
             startAdvertising()
@@ -75,7 +83,7 @@ class MeshBleExchange(
         if (advertiser == null) return
 
         val encrypted = encryptPassphrase()
-        val payload = "fh3|$meshId|$encrypted".toByteArray(StandardCharsets.UTF_8)
+        val payload = "fh3|$meshId|$encrypted|$deviceName".toByteArray(StandardCharsets.UTF_8)
 
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
@@ -98,6 +106,36 @@ class MeshBleExchange(
             advertising = false
             lastError = e.message
             Log.w(TAG, "Mesh exchange advertise failed", e)
+        }
+    }
+
+    private fun startDiscoveryAdvertising() {
+        if (advertiser == null) return
+
+        val role = if (isHost) "HOST" else "DEVICE"
+        val payload = "fh2|$meshId|$role|$deviceName".toByteArray(StandardCharsets.UTF_8)
+
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setConnectable(false)
+            .setTimeout(0)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .build()
+
+        val data = AdvertiseData.Builder()
+            .setIncludeDeviceName(false)
+            .addServiceUuid(serviceUuid)
+            .addServiceData(serviceUuid, payload)
+            .build()
+
+        runCatching {
+            advertiser?.startAdvertising(settings, data, advertiseCallback)
+            advertising = true
+            Log.d(TAG, "Mesh discovery advertising started: meshId=$meshId role=$role")
+        }.onFailure { e ->
+            advertising = false
+            lastError = e.message
+            Log.w(TAG, "Mesh discovery advertise failed", e)
         }
     }
 
@@ -155,11 +193,17 @@ class MeshBleExchange(
                     hostDeviceId = address,
                     hostName = hostName,
                     rssi = result.rssi,
+                    role = MeshBleRole.HOST,
                 )
             }
             "fh2" -> {
                 if (parts.size < 4) return null
                 val detectedMeshId = parts[1]
+                val role = when (parts[2].uppercase()) {
+                    "HOST" -> MeshBleRole.HOST
+                    "DEVICE" -> MeshBleRole.DEVICE
+                    else -> MeshBleRole.UNKNOWN
+                }
                 val peerName = parts.getOrNull(3) ?: "Peer"
                 val address = runCatching { result.device.address }.getOrNull() ?: "unknown"
                 return MeshPassphraseExchange(
@@ -168,6 +212,7 @@ class MeshBleExchange(
                     hostDeviceId = address,
                     hostName = peerName,
                     rssi = result.rssi,
+                    role = role,
                 )
             }
             else -> return null

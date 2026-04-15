@@ -1407,16 +1407,6 @@ function renderPeerContent() {
         btn.textContent = 'Guardando…';
         const result = await invoke<SaveContentResult>('save_peer_content_as', peerCommandArgs(id));
         if (result.saved) {
-          if (result.path) {
-            const peerItem = peerContent.find(p => p.content_id === id);
-            if (peerItem?.content_type === 'image') {
-              const assetSrc = convertFileSrc(result.path);
-              peerContent = peerContent.map(p =>
-                p.content_id === id ? { ...p, _localSrc: assetSrc } : p
-              );
-              renderPeerContent();
-            }
-          }
           flashPeerAction(btn, 'Guardado');
         } else {
           btn.disabled = false;
