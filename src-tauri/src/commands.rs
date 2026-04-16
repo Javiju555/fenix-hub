@@ -6,7 +6,7 @@ use std::path::Path;
 use std::os::windows::process::CommandExt;
 use std::time::{Duration, Instant, SystemTime};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use base64::Engine;
 use fenix_hub_core::content::{ContentData, ContentItem};
@@ -778,7 +778,11 @@ pub struct PublishArgs {
 
 /// Start ephemeral HTTP server (if needed) + announce via mDNS.
 #[tauri::command]
-pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> Result<(), String> {
+pub async fn publish_content(
+    args: PublishArgs,
+    state: State<'_, HubState>,
+    app: AppHandle,
+) -> Result<(), String> {
     let identity = state
         .identity
         .read()
@@ -787,7 +791,7 @@ pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> R
         .ok_or("Identity not configured")?;
     let content_store: ContentStore = state.local_content.clone();
 
-    // Start ephemeral HTTP server if not already running
+    // Start content server if not already running (prefers port 7473)
     let port = {
         let existing = state.server_port.read().await;
         if let Some(p) = *existing {
@@ -799,10 +803,20 @@ pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> R
                 .map_err(|e| e.to_string())?;
             *state.server_shutdown.write().await = Some(shutdown_tx);
             *state.server_port.write().await = Some(port);
-            // On Linux warn if a firewall is active — it may block incoming connections
-            // from Android/Windows peers on the ephemeral port we just opened.
+            // On Linux: check for firewall and notify the frontend if the rule is missing.
             #[cfg(target_os = "linux")]
-            warn_if_firewall_active(port);
+            {
+                let status = linux_firewall_status(port);
+                tracing::info!(
+                    "Firewall status: active={} rule_present={} type={}",
+                    status.active,
+                    status.rule_present,
+                    status.firewall_type,
+                );
+                if status.active && !status.rule_present {
+                    let _ = app.emit("firewall-blocked", &status);
+                }
+            }
             port
         }
     };
@@ -1976,49 +1990,157 @@ fn announcement_kind_label(content_type: &fenix_hub_core::content::ContentType) 
     }
 }
 
-/// On Linux: log a warning if a firewall is detected that may block incoming
-/// connections from peers (Android, Windows) on the ephemeral content-server port.
-///
-/// This is diagnostic-only — FenixHub cannot open the port automatically.
-/// The user must run: `sudo ufw allow <port>/tcp` or equivalent.
+/// Structured firewall status returned to the frontend.
+#[derive(Debug, Clone, Serialize)]
+pub struct FirewallStatus {
+    pub active: bool,
+    pub rule_present: bool,
+    /// "ufw", "nftables", "iptables", or "none"
+    pub firewall_type: String,
+    pub port: u16,
+}
+
+/// On Linux: detect whether a firewall is active and whether an allow-rule for
+/// `port` already exists. Returns a `FirewallStatus` the frontend can act on.
 #[cfg(target_os = "linux")]
-fn warn_if_firewall_active(port: u16) {
-    // nftables (modern — systemd-based distros, Arch, Fedora, etc.)
+fn linux_firewall_status(port: u16) -> FirewallStatus {
+    let port_str = port.to_string();
+
+    // ── ufw ──────────────────────────────────────────────────────────────────
+    let ufw_output = std::process::Command::new("ufw")
+        .arg("status")
+        .output()
+        .ok();
+    if let Some(ref out) = ufw_output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.contains("Status: active") {
+            let rule_present = text.contains(&format!("{port}/tcp"))
+                || text.contains(&format!("{port} "))
+                || text.contains(&port_str);
+            return FirewallStatus {
+                active: true,
+                rule_present,
+                firewall_type: "ufw".to_string(),
+                port,
+            };
+        }
+    }
+
+    // ── nftables (systemd service) ────────────────────────────────────────────
     let nft_active = std::process::Command::new("systemctl")
         .args(["is-active", "--quiet", "nftables"])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    // ufw (Ubuntu / Debian)
-    let ufw_active = std::process::Command::new("ufw")
-        .arg("status")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Status: active"))
-        .unwrap_or(false);
-    // iptables fallback (check if there are any non-default rules in INPUT chain)
-    let iptables_rules = std::process::Command::new("iptables")
-        .args(["-L", "INPUT", "--line-numbers", "-n"])
-        .output()
-        .map(|o| {
-            let out = String::from_utf8_lossy(&o.stdout);
-            // More than 3 lines means there are actual rules beyond the default header
-            out.lines().count() > 3
-        })
-        .unwrap_or(false);
-
-    if nft_active || ufw_active || iptables_rules {
-        tracing::warn!(
-            "⚠ FenixHub: firewall detected on Linux. \
-             Content server is listening on port {port} but incoming TCP connections \
-             from peers may be blocked. \
-             To allow peers to pull content, run: \
-             `sudo ufw allow {port}/tcp` (ufw) or \
-             `sudo iptables -I INPUT -p tcp --dport {port} -j ACCEPT` (iptables/nftables). \
-             Alternatively, disable the firewall for the LAN interface."
-        );
-    } else {
-        tracing::debug!("No active firewall detected. Content server port {port} should be reachable.");
+    if nft_active {
+        let rule_present = std::process::Command::new("nft")
+            .args(["list", "ruleset"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&port_str))
+            .unwrap_or(false);
+        return FirewallStatus {
+            active: true,
+            rule_present,
+            firewall_type: "nftables".to_string(),
+            port,
+        };
     }
+
+    // ── iptables fallback ─────────────────────────────────────────────────────
+    let iptables_out = std::process::Command::new("iptables")
+        .args(["-L", "INPUT", "-n"])
+        .output()
+        .ok();
+    if let Some(ref out) = iptables_out {
+        let text = String::from_utf8_lossy(&out.stdout);
+        // >3 lines = real rules present beyond the default header
+        if text.lines().count() > 3 {
+            let rule_present = text.contains(&format!("dpt:{port}"))
+                || text.contains(&port_str);
+            return FirewallStatus {
+                active: true,
+                rule_present,
+                firewall_type: "iptables".to_string(),
+                port,
+            };
+        }
+    }
+
+    FirewallStatus {
+        active: false,
+        rule_present: true,
+        firewall_type: "none".to_string(),
+        port,
+    }
+}
+
+/// Returns the current firewall status for the content-server port.
+/// Frontend calls this to decide whether to show the firewall setup dialog.
+/// Uses the fixed default port — the server always prefers 7473.
+#[tauri::command]
+#[cfg(target_os = "linux")]
+pub fn check_firewall_status() -> FirewallStatus {
+    linux_firewall_status(fenix_hub_core::server::DEFAULT_SERVER_PORT)
+}
+
+/// Asks polkit (pkexec) to add a firewall allow-rule for `port`/tcp.
+/// Tries ufw first, falls back to iptables.
+/// Returns Ok(true) if the rule was added, Ok(false) if pkexec was cancelled by the user.
+#[tauri::command]
+#[cfg(target_os = "linux")]
+pub fn request_firewall_allow(port: u16) -> Result<bool, String> {
+    // Try ufw via pkexec
+    if which_exists("ufw") {
+        let status = std::process::Command::new("pkexec")
+            .args(["ufw", "allow", &format!("{port}/tcp")])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            tracing::info!("ufw rule added for port {port}/tcp via pkexec");
+            return Ok(true);
+        }
+        // exit code 126 = user cancelled polkit dialog
+        if status.code() == Some(126) {
+            return Ok(false);
+        }
+    }
+
+    // Fallback: iptables via pkexec
+    let iptables_bin = ["/usr/sbin/iptables", "/sbin/iptables", "iptables"]
+        .iter()
+        .find(|p| which_exists(p))
+        .copied()
+        .unwrap_or("iptables");
+    let status = std::process::Command::new("pkexec")
+        .args([
+            iptables_bin,
+            "-I", "INPUT",
+            "-p", "tcp",
+            "--dport", &port.to_string(),
+            "-j", "ACCEPT",
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() {
+        tracing::info!("iptables rule added for port {port}/tcp via pkexec");
+        return Ok(true);
+    }
+    if status.code() == Some(126) {
+        return Ok(false);
+    }
+    Err(format!(
+        "No se pudo añadir la regla de firewall (código {}). \
+         Ejecuta manualmente: sudo iptables -I INPUT -p tcp --dport {port} -j ACCEPT",
+        status.code().unwrap_or(-1)
+    ))
+}
+
+fn which_exists(cmd: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {

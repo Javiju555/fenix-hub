@@ -233,6 +233,10 @@ pub fn run() {
             commands::add_file_by_path,
             commands::clear_received_cache,
             commands::reset_all_data,
+            #[cfg(target_os = "linux")]
+            commands::check_firewall_status,
+            #[cfg(target_os = "linux")]
+            commands::request_firewall_allow,
         ])
         .build(tauri::generate_context!())
         .expect("error while building FenixHub")
