@@ -249,6 +249,11 @@ pub fn save_profile(
         anyhow::bail!("Profile name is required");
     }
 
+    // Save key_hex to keyring FIRST — this is what activate_profile/load_from_active_profile reads.
+    // Without this the profile metadata is saved but the key is missing, so activation fails.
+    let entry = Entry::new("fenix-hub", &format!("profile-{}", name))?;
+    entry.set_password(&identity.key_hex())?;
+
     let mut store = read_profiles_store()?;
     store.profiles.insert(
         name.to_string(),
