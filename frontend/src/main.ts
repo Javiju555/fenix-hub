@@ -526,6 +526,16 @@ function renderSettings(
       return;
     }
 
+    // Auto-save current identity as a profile before switching groups,
+    // so the user can switch back without re-entering the passphrase.
+    if (identity?.configured && identity.device_name) {
+      const existingProfiles = await invoke<ProfilesPayload>('list_identity_profiles').catch(() => ({ profiles: [] as IdentityProfileInfo[] }));
+      const alreadySaved = existingProfiles.profiles.some(p => p.active);
+      if (!alreadySaved) {
+        await invoke('save_current_identity_profile', { args: { name: identity.device_name, make_active: true } }).catch(() => {});
+      }
+    }
+
     if (!identity?.configured) {
       await invoke<IdentityInfo>('setup_identity', {
         args: {
@@ -734,7 +744,7 @@ function renderHub() {
     <div class="hub" id="hub-root">
 
       <!-- ── Expanded header ─────────────────────────────────────────── -->
-      <header class="hub-header hub-expanded-header" id="hub-header">
+      <header class="hub-header hub-expanded-header" id="hub-header" data-tauri-drag-region>
         <div class="hub-logo">${iconHub(18)}</div>
         <span class="hub-title">FenixHub</span>
         <span class="hub-device-label" title="Dispositivo: ${escapeHtml(identity?.device_name ?? '')}">
@@ -761,7 +771,7 @@ function renderHub() {
       </header>
 
       <!-- ── Collapsed pill ──────────────────────────────────────────── -->
-      <header class="hub-header hub-pill-header" id="hub-pill-header">
+      <header class="hub-header hub-pill-header" id="hub-pill-header" data-tauri-drag-region>
         <div class="hub-logo pill-logo">${iconHub(16)}</div>
         <button class="pill-tab" id="pill-tab-local" data-pill-tab="local">${iconInbox(10)} Local <span class="badge" id="count-local-mini">0</span></button>
         <button class="pill-tab pill-tab-red" id="pill-tab-red" data-pill-tab="red">${iconWifi(10)} Red <span class="badge badge-red" id="count-red-mini">0</span></button>
@@ -1436,14 +1446,6 @@ function flashPeerAction(button: HTMLButtonElement, label: string) {
   }, 900);
 }
 
-function flashPeerAction(button: HTMLButtonElement, label: string) {
-  button.textContent = label;
-  window.setTimeout(() => {
-    if (!button.isConnected) return;
-    renderPeerContent();
-  }, 900);
-}
-
 // ── Icons ─────────────────────────────────────────────────────────────────────
 
 const svg = (s: number, vb: string, path: string, extra = 'stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"') =>
@@ -1505,6 +1507,13 @@ function typeIcon(type: string) {
   return svg(14,'0 0 16 16','<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.8"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.8"/>');
 }
 
+function deviceTypeIcon(type: string, s: number) {
+  const dt = DEVICE_TYPES.find(d => d.id === type);
+  if (dt) return dt.icon().replace(/width="\d+"/, `width="${s}"`).replace(/height="\d+"/, `height="${s}"`);
+  // fallback: generic screen
+  return svg(s,'0 0 20 18','<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>');
+}
+
 async function warmupDragPayload(id: string): Promise<void> {
   if (!IS_TAURI || dragPayloadCache.has(id)) return;
   try {
@@ -1532,86 +1541,6 @@ function showToast(message: string) {
     toast.style.opacity = '0';
     setTimeout(() => toast.remove(), 240);
   }, 1800);
-}
-
-const WARN_SIZE_BYTES = 100 * 1024 * 1024;   // 100 MB — mostrar aviso
-const MAX_SIZE_BYTES  = 500 * 1024 * 1024;   // 500 MB — límite práctico (cifrado en RAM)
-
-async function addBrowserFileToHub(file: File): Promise<ContentItem> {
-  if (file.size > MAX_SIZE_BYTES) {
-    throw new Error(`El archivo "${file.name}" supera el límite de 500 MB para transferencia cifrada en RAM.`);
-  }
-  if (file.size > WARN_SIZE_BYTES) {
-    showSizeWarning(file.name, file.size);
-  }
-
-  // Tauri exposes the real filesystem path on File objects from drag & drop.
-  // Use it to let Rust read the bytes directly — no base64, no RAM double.
-  const nativePath = IS_TAURI ? (file as unknown as { path?: string }).path : undefined;
-  if (nativePath) {
-    return invoke<ContentItem>('add_file_by_path', { path: nativePath });
-  }
-
-  // Fallback: clipboard images and browser-only mode use base64
-  const bytesBase64 = await fileToBase64(file);
-  const preview = file.type.startsWith('image/') ? await imageFileToPreview(file) : undefined;
-  return invoke<ContentItem>('add_binary_content', {
-    args: {
-      file_name: file.name || `clipboard-${Date.now()}`,
-      mime_type: file.type || null,
-      bytes_base64: bytesBase64,
-      preview: preview || null,
-    },
-  });
-}
-
-function showDragFallbackHint() {
-  const existing = document.getElementById('drag-hint');
-  if (existing) return;
-  const el = document.createElement('div');
-  el.id = 'drag-hint';
-  el.className = 'size-warn';
-  el.innerHTML = `Ya en portapapeles — usa <kbd>Ctrl+V</kbd> para pegar &nbsp;<button onclick="this.parentElement.remove()">×</button>`;
-  document.getElementById('panel-local')?.prepend(el);
-  setTimeout(() => el.remove(), 4000);
-}
-
-function showSizeWarning(name: string, size: number) {
-  const existing = document.getElementById('size-warn');
-  if (existing) existing.remove();
-  const el = document.createElement('div');
-  el.id = 'size-warn';
-  el.className = 'size-warn';
-  el.innerHTML = `⚠ <strong>${escapeHtml(name)}</strong> (${humanSize(size)}) — archivo grande, puede tardar. <button onclick="this.parentElement.remove()">×</button>`;
-  document.getElementById('panel-local')?.prepend(el);
-  setTimeout(() => el.remove(), 8000);
-}
-
-async function fileToBase64(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer();
-  let binary = '';
-  const chunk = 0x8000;
-  const bytes = new Uint8Array(buffer);
-  for (let index = 0; index < bytes.length; index += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
-  }
-  return btoa(binary);
-}
-
-async function imageFileToPreview(file: File): Promise<string | undefined> {
-  const bitmap = await createImageBitmap(file).catch(() => null);
-  if (!bitmap) return undefined;
-  const canvas = document.createElement('canvas');
-  canvas.width = 72;
-  canvas.height = 72;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return undefined;
-
-  const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
-  const width = bitmap.width * scale;
-  const height = bitmap.height * scale;
-  ctx.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
-  return canvas.toDataURL('image/jpeg', 0.58);
 }
 
 const WARN_SIZE_BYTES = 100 * 1024 * 1024;   // 100 MB — mostrar aviso

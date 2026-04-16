@@ -799,6 +799,10 @@ pub async fn publish_content(args: PublishArgs, state: State<'_, HubState>) -> R
                 .map_err(|e| e.to_string())?;
             *state.server_shutdown.write().await = Some(shutdown_tx);
             *state.server_port.write().await = Some(port);
+            // On Linux warn if a firewall is active — it may block incoming connections
+            // from Android/Windows peers on the ephemeral port we just opened.
+            #[cfg(target_os = "linux")]
+            warn_if_firewall_active(port);
             port
         }
     };
@@ -1429,12 +1433,11 @@ fn clipboard_set_file(
     #[cfg(not(target_os = "windows"))]
     {
         use fenix_hub_core::content::ContentType;
-        let mut clipboard = arboard::Clipboard::new()?;
         if *content_type == ContentType::Image {
+            let mut clipboard = arboard::Clipboard::new()?;
             clipboard_set_image_file(&mut clipboard, path)
         } else {
-            clipboard.set_text(path.to_string_lossy().to_string())?;
-            Ok(())
+            clipboard_set_file_uri(path)
         }
     }
 }
@@ -1471,6 +1474,60 @@ fn clipboard_hdrop(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Linux/macOS file clipboard: writes a text/uri-list entry so file managers
+/// (Nautilus, Dolphin, Thunar…) treat it as a file and not as plain text.
+/// Tries wl-copy (Wayland) first, then xclip (X11), then arboard text fallback.
+#[cfg(not(target_os = "windows"))]
+fn clipboard_set_file_uri(path: &std::path::Path) -> anyhow::Result<()> {
+    let uri = format!("file://{}\n", path.to_string_lossy());
+
+    // Wayland
+    #[cfg(target_os = "linux")]
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        let mut child = std::process::Command::new("wl-copy")
+            .args(["--type", "text/uri-list"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(ref mut child) = child {
+            if let Some(stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = { let mut s = stdin; s.write_all(uri.as_bytes()) };
+            }
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return Ok(());
+            }
+        }
+        tracing::warn!("wl-copy not found or failed, falling back to arboard");
+    }
+
+    // X11
+    #[cfg(target_os = "linux")]
+    {
+        let mut child = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "text/uri-list", "-i"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(ref mut child) = child {
+            if let Some(stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = { let mut s = stdin; s.write_all(uri.as_bytes()) };
+            }
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return Ok(());
+            }
+        }
+        tracing::warn!("xclip not found or failed, falling back to arboard text");
+    }
+
+    // Fallback: plain text path (works for terminal pastes at least)
+    arboard::Clipboard::new()?.set_text(path.to_string_lossy().to_string())?;
+    Ok(())
+}
+
 /// Linux/macOS image clipboard: xclip for X11, arboard fallback.
 /// Not called on Windows — use clipboard_hdrop instead.
 #[cfg(not(target_os = "windows"))]
@@ -1478,20 +1535,41 @@ fn clipboard_set_image_file(
     clipboard: &mut arboard::Clipboard,
     path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    // ── Linux X11: pipe raw PNG bytes to xclip ───────────────────────────────
+    // ── Linux Wayland: wl-copy ───────────────────────────────────────────────
     #[cfg(target_os = "linux")]
-    {
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
         if let Ok(file) = std::fs::File::open(path) {
-            let result = std::process::Command::new("xclip")
+            let mut child = std::process::Command::new("wl-copy")
+                .args(["--type", "image/png"])
+                .stdin(file)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            if let Ok(ref mut c) = child {
+                if c.wait().map(|s| s.success()).unwrap_or(false) {
+                    return Ok(());
+                }
+            }
+            tracing::warn!("wl-copy failed for image, falling back to arboard RGBA decode");
+        }
+    }
+
+    // ── Linux X11: xclip ────────────────────────────────────────────────────
+    #[cfg(target_os = "linux")]
+    if std::env::var("WAYLAND_DISPLAY").is_err() {
+        if let Ok(file) = std::fs::File::open(path) {
+            let mut child = std::process::Command::new("xclip")
                 .args(["-selection", "clipboard", "-t", "image/png", "-i"])
                 .stdin(file)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn();
-            if result.is_ok() {
-                return Ok(());
+            if let Ok(ref mut c) = child {
+                if c.wait().map(|s| s.success()).unwrap_or(false) {
+                    return Ok(());
+                }
             }
-            tracing::warn!("xclip not found, falling back to arboard RGBA decode");
+            tracing::warn!("xclip failed for image, falling back to arboard RGBA decode");
         }
     }
 
@@ -1895,6 +1973,51 @@ fn announcement_kind_label(content_type: &fenix_hub_core::content::ContentType) 
         fenix_hub_core::content::ContentType::Text => "Texto",
         fenix_hub_core::content::ContentType::Image => "Imagen",
         fenix_hub_core::content::ContentType::File => "Archivo",
+    }
+}
+
+/// On Linux: log a warning if a firewall is detected that may block incoming
+/// connections from peers (Android, Windows) on the ephemeral content-server port.
+///
+/// This is diagnostic-only — FenixHub cannot open the port automatically.
+/// The user must run: `sudo ufw allow <port>/tcp` or equivalent.
+#[cfg(target_os = "linux")]
+fn warn_if_firewall_active(port: u16) {
+    // nftables (modern — systemd-based distros, Arch, Fedora, etc.)
+    let nft_active = std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", "nftables"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    // ufw (Ubuntu / Debian)
+    let ufw_active = std::process::Command::new("ufw")
+        .arg("status")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Status: active"))
+        .unwrap_or(false);
+    // iptables fallback (check if there are any non-default rules in INPUT chain)
+    let iptables_rules = std::process::Command::new("iptables")
+        .args(["-L", "INPUT", "--line-numbers", "-n"])
+        .output()
+        .map(|o| {
+            let out = String::from_utf8_lossy(&o.stdout);
+            // More than 3 lines means there are actual rules beyond the default header
+            out.lines().count() > 3
+        })
+        .unwrap_or(false);
+
+    if nft_active || ufw_active || iptables_rules {
+        tracing::warn!(
+            "⚠ FenixHub: firewall detected on Linux. \
+             Content server is listening on port {port} but incoming TCP connections \
+             from peers may be blocked. \
+             To allow peers to pull content, run: \
+             `sudo ufw allow {port}/tcp` (ufw) or \
+             `sudo iptables -I INPUT -p tcp --dport {port} -j ACCEPT` (iptables/nftables). \
+             Alternatively, disable the firewall for the LAN interface."
+        );
+    } else {
+        tracing::debug!("No active firewall detected. Content server port {port} should be reachable.");
     }
 }
 
