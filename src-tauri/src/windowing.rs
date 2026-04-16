@@ -89,6 +89,7 @@ fn create_hub_window(app: &AppHandle) -> Result<WebviewWindow> {
     set_utility_type_hint(&window);
 
     enforce_hub_window_constraints(&window);
+    position_hub_window_top(&window, HUB_EXPANDED_WIDTH);
     attach_hub_window_handlers(&window, app);
     Ok(window)
 }
@@ -103,22 +104,28 @@ fn set_utility_type_hint(window: &WebviewWindow) {
 
 fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
     let _ = window.unminimize();
-    // Keep the hub as a fixed-size utility surface with only two valid presets.
+    // Enforce size flags and snap to valid preset.
     enforce_hub_window_constraints(window);
+    // Position at top-center only on first reveal/show — not on every resize event.
+    let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
+    let logical_w = window.outer_size().map(|s| s.width as f64 / scale).unwrap_or(HUB_EXPANDED_WIDTH);
+    let (target_w, _) = nearest_hub_preset(logical_w, HUB_EXPANDED_HEIGHT);
+    position_hub_window_top(window, target_w);
     window.show()?;
     window.set_focus()?;
 
-    // On Linux, re-apply after the WM finishes its async placement pass.
+    // On Linux, re-apply position after the WM finishes its async placement pass.
+    // Some compositors (Mutter, KWin) move the window during map — we nudge it back.
     #[cfg(target_os = "linux")]
     {
         let w = window.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            let size = w.outer_size().unwrap_or_default();
-            if size.width > 0 && size.width < 800 {
-                return;
-            }
             enforce_hub_window_constraints(&w);
+            let scale = w.scale_factor().unwrap_or(1.0).max(1.0);
+            let logical_w = w.outer_size().map(|s| s.width as f64 / scale).unwrap_or(HUB_EXPANDED_WIDTH);
+            let (target_w, _) = nearest_hub_preset(logical_w, HUB_EXPANDED_HEIGHT);
+            position_hub_window_top(&w, target_w);
         });
     }
 
@@ -138,6 +145,10 @@ fn nearest_hub_preset(logical_width: f64, logical_height: f64) -> (f64, f64) {
     }
 }
 
+/// Enforce window flags and snap the size to the nearest valid preset.
+/// Does NOT reposition — call position_hub_window_top() separately when needed.
+/// This is intentional: repositioning on every Resized event would prevent
+/// the user from moving the window on Linux (WM generates Resized after moves).
 fn enforce_hub_window_constraints(window: &WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
@@ -173,7 +184,6 @@ fn enforce_hub_window_constraints(window: &WebviewWindow) {
     if needs_resize {
         let _ = window.set_size(tauri::LogicalSize::new(target_w, target_h));
     }
-    position_hub_window_top(window, target_w);
 }
 
 /// Position the hub window at the top-center of the primary monitor.
