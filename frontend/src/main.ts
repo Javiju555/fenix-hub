@@ -260,6 +260,12 @@ interface TransportCapabilities {
   wifi_direct_peers?: string[];
   handoff_candidates?: string[];
 }
+interface FirewallStatus {
+  active: boolean;
+  rule_present: boolean;
+  firewall_type: string;
+  port: number;
+}
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -676,6 +682,9 @@ function setupEventListeners() {
     }
     updateHeader();
     renderPeerContent();
+  });
+  listen<FirewallStatus>('firewall-blocked', ({ payload }) => {
+    showFirewallModal(payload);
   });
 }
 
@@ -1343,6 +1352,91 @@ function createModalOverlay(): HTMLElement {
     if (e.target === overlay.querySelector('.modal-backdrop')) closeDirectModal();
   });
   return overlay;
+}
+
+// ── Firewall modal (Linux only) ───────────────────────────────────────────────
+
+function showFirewallModal(status: FirewallStatus) {
+  // Only show once per session
+  if (document.getElementById('firewall-modal')) return;
+
+  const manualCmd = status.firewall_type === 'ufw'
+    ? `sudo ufw allow ${status.port}/tcp`
+    : `sudo iptables -I INPUT -p tcp --dport ${status.port} -j ACCEPT`;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'firewall-modal-overlay';
+  overlay.innerHTML = `<div class="modal-backdrop"></div>`;
+
+  const modal = document.createElement('div');
+  modal.className = 'direct-modal';
+  modal.id = 'firewall-modal';
+  modal.innerHTML = `
+    <div class="direct-modal-header">
+      <span>⚠ Firewall bloqueando conexiones</span>
+      <button class="modal-close" id="fw-modal-close">${iconX(14)}</button>
+    </div>
+    <div class="direct-modal-body">
+      <p style="margin:0 0 8px">El firewall (<b>${status.firewall_type}</b>) puede bloquear que otros dispositivos se conecten al puerto <b>${status.port}/tcp</b>.</p>
+      <p style="margin:0 0 8px">Pulsa <b>Añadir regla</b> para añadirla automáticamente (pedirá contraseña de root), o copia el comando y ejecútalo en una terminal:</p>
+      <code class="fw-cmd" id="fw-cmd-text" style="display:block;background:rgba(255,255,255,0.07);padding:8px;border-radius:6px;font-size:12px;word-break:break-all;cursor:pointer" title="Copiar">${manualCmd}</code>
+      <p id="fw-result-msg" style="margin:8px 0 0;font-size:12px;min-height:16px"></p>
+    </div>
+    <div class="direct-modal-footer">
+      <button class="btn-cancel" id="fw-dismiss">Ignorar</button>
+      <button class="btn-cancel" id="fw-copy-cmd">Copiar comando</button>
+      <button class="btn-accept" id="fw-add-rule">Añadir regla</button>
+    </div>`;
+
+  overlay.querySelector('.modal-backdrop')!.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  const closeModal = () => overlay.remove();
+
+  document.getElementById('fw-modal-close')!.addEventListener('click', closeModal);
+  document.getElementById('fw-dismiss')!.addEventListener('click', closeModal);
+
+  document.getElementById('fw-cmd-text')!.addEventListener('click', () => {
+    void navigator.clipboard.writeText(manualCmd).then(() => {
+      const msg = document.getElementById('fw-result-msg')!;
+      msg.textContent = 'Comando copiado al portapapeles.';
+    });
+  });
+
+  document.getElementById('fw-copy-cmd')!.addEventListener('click', () => {
+    void navigator.clipboard.writeText(manualCmd).then(() => {
+      const msg = document.getElementById('fw-result-msg')!;
+      msg.textContent = 'Comando copiado al portapapeles.';
+    });
+  });
+
+  document.getElementById('fw-add-rule')!.addEventListener('click', () => {
+    const btn = document.getElementById('fw-add-rule') as HTMLButtonElement;
+    const msg = document.getElementById('fw-result-msg')!;
+    btn.disabled = true;
+    btn.textContent = 'Aplicando...';
+    invoke<boolean>('request_firewall_allow', { port: status.port })
+      .then((added) => {
+        if (added) {
+          msg.style.color = '#69ff47';
+          msg.textContent = 'Regla añadida correctamente. Los dispositivos ya pueden conectarse.';
+          btn.textContent = 'Listo';
+          setTimeout(closeModal, 2500);
+        } else {
+          msg.style.color = '#ffa040';
+          msg.textContent = 'Cancelado. Puedes añadir la regla manualmente con el comando de arriba.';
+          btn.disabled = false;
+          btn.textContent = 'Añadir regla';
+        }
+      })
+      .catch((err: unknown) => {
+        msg.style.color = '#ff5555';
+        msg.textContent = String(err);
+        btn.disabled = false;
+        btn.textContent = 'Añadir regla';
+      });
+  });
 }
 
 function signalBars(rssi: number): string {

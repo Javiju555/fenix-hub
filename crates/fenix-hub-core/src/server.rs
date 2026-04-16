@@ -82,13 +82,21 @@ struct ServerState {
     replay_guard: ReplayGuard,
 }
 
-/// Starts the ephemeral content server on a random available port.
+/// Fixed well-known port for the content server.
+/// Using a fixed port allows users to whitelist it in their firewall once.
+/// If this port is already in use we fall back to an ephemeral port.
+pub const DEFAULT_SERVER_PORT: u16 = 7473;
+
+/// Starts the ephemeral content server, preferring port 7473.
 /// Returns `(port, shutdown_sender)`. Send on `shutdown_sender` to stop the server.
 pub async fn start_content_server(
     identity: Arc<GroupIdentity>,
     content: ContentStore,
 ) -> Result<(u16, oneshot::Sender<()>)> {
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
+    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{DEFAULT_SERVER_PORT}")).await {
+        Ok(l) => l,
+        Err(_) => tokio::net::TcpListener::bind("0.0.0.0:0").await?,
+    };
     let port = listener.local_addr()?.port();
 
     let state = ServerState {
