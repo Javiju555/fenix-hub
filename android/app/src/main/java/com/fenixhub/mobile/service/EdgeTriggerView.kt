@@ -2,6 +2,8 @@ package com.fenixhub.mobile.service
 
 import android.content.Context
 import android.graphics.PixelFormat
+import android.provider.Settings
+import android.util.Log
 import android.view.DragEvent
 import android.view.Gravity
 import android.view.View
@@ -17,6 +19,7 @@ class EdgeTriggerView(
 
     fun start() {
         if (triggerView != null) return
+        if (!Settings.canDrawOverlays(context)) return
 
         val view = View(context).apply {
             alpha = 0f
@@ -49,8 +52,13 @@ class EdgeTriggerView(
             y = 0
         }
 
-        triggerView = view
-        windowManager.addView(view, params)
+        runCatching {
+            windowManager.addView(view, params)
+            triggerView = view
+        }.onFailure {
+            Log.w(TAG, "Edge trigger overlay not attached", it)
+            triggerView = null
+        }
     }
 
     fun stop() {
@@ -70,6 +78,7 @@ class EdgeTriggerView(
     }
 
     companion object {
+        private const val TAG = "EdgeTriggerView"
         private const val TRIGGER_WIDTH_DP = 20
     }
 }

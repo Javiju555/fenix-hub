@@ -62,14 +62,24 @@ pub fn attach_hub_window_handlers(window: &WebviewWindow, app: &AppHandle) {
 pub fn show_or_create_hub_window(app: &AppHandle) -> Result<()> {
     if let Some(window) = app.get_webview_window(HUB_WINDOW_LABEL) {
         reveal_hub_window(&window)?;
+        register_windows_drop_target(&window);
         let _ = window.emit("hub-activate", ());
         return Ok(());
     }
 
     let window = create_hub_window(app)?;
     reveal_hub_window(&window)?;
+    register_windows_drop_target(&window);
     Ok(())
 }
+
+#[cfg(target_os = "windows")]
+fn register_windows_drop_target(window: &WebviewWindow) {
+    crate::drop_target::register_fenix_drop_target(window);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn register_windows_drop_target(_window: &WebviewWindow) {}
 
 fn create_hub_window(app: &AppHandle) -> Result<WebviewWindow> {
     let window_config = app

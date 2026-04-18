@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.1 — desktop parity + Android permission flow + release pipeline (2026-04-18)
+
+### Desktop (Windows + Linux)
+- Firewall guard parity on both platforms:
+    - `firewall-blocked` warning event now emitted on Windows and Linux when inbound rule is missing.
+    - Native `check_firewall_status` + `request_firewall_allow` commands enabled on both.
+    - Windows path uses Defender Firewall + UAC flow; Linux keeps `ufw`/`iptables` + `pkexec` flow.
+- Frontend firewall modal generalized for desktop (Windows/Linux) with OS-specific manual command hints.
+
+### Android
+- Runtime permissions are now requested proactively from setup/profile/direct entry points:
+    - setup identity
+    - update identity
+    - activate identity profile
+    - start direct sender/receiver
+    - accept direct invite
+- Overlay permission is now opened immediately during identity flows if missing.
+
+### Packaging / release
+- Version bumped to `0.3.1` across desktop frontend, Tauri, Android, and installer stage configs.
+- Windows release flow standardized through custom installer script:
+    - `packaging/build-release.ps1`
+    - stage input from `packaging/windows-stage`
+
 ## 0.2.7 — experimental Windows native drop interception (2026-04-13)
 
 ### Windows — experimental ⚠️ **(no testeada)**

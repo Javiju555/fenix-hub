@@ -238,6 +238,7 @@ interface ContentItem    { id: string; content_type: 'text'|'image'|'file'; prev
 interface PeerAnnouncement { group_id: string; content_id: string; device_name: string; preview: string; content_type: 'text'|'image'|'file'; size_bytes: number; send_mode: { Broadcast: null }|{ Direct: { target_device: string } }; created_at: number; port: number; file_name?: string | null; mime_type?: string | null; _localSrc?: string; }
 interface PeerContentPayload { announcement: PeerAnnouncement; peer_ip: string; }
 interface DragPayload { text?: string | null; uri_list?: string | null; }
+interface NativeDragReceivedPayload { paths?: string[]; source?: string; }
 interface SaveContentResult { saved: boolean; path?: string | null; }
 interface UpdateIdentityResult { identity: IdentityInfo; group_changed: boolean; requires_restart: boolean; }
 interface IdentityProfileInfo { name: string; device_name: string; group_id: string; device_type: string; active: boolean; }
@@ -278,6 +279,7 @@ let presenceDevices = new Set<string>(); // devices seen via presence beacon
 let activeTab: 'local' | 'red' = 'local';
 let collapsed = false;
 let selectedDeviceType = 'desktop';
+let transportCapabilities: TransportCapabilities | null = null;
 const dragPayloadCache = new Map<string, DragPayload>();
 
 const DEVICE_TYPES: { id: string; label: string; icon: () => string }[] = [
@@ -319,8 +321,24 @@ async function init() {
   identity = await invoke<IdentityInfo>('get_identity');
   if (!identity.configured) { renderSetup(); return; }
   await loadContent();
+  transportCapabilities = await loadTransportCapabilities().catch(() => null);
   renderHub();
   setupEventListeners();
+}
+
+function directModeSupported(transport: TransportCapabilities | null = transportCapabilities): boolean {
+  if (!transport) return false;
+  const bleReady = !!(
+    transport.ble?.supported
+    && transport.ble?.enabled
+    && transport.ble?.permissions_ready
+  );
+  const wifiReady = !!(
+    transport.wifi_direct?.supported
+    && transport.wifi_direct?.enabled
+    && transport.wifi_direct?.permissions_ready
+  );
+  return bleReady && wifiReady && !!transport.airdrop_ready;
 }
 
 // ── Settings window ───────────────────────────────────────────────────────────
@@ -653,9 +671,11 @@ function setupEventListeners() {
     renderPeerContent();
   });
   listen<{ content_id: string; device_name: string }>('peer-content-gone', ({ payload }) => {
+    const removed = peerContent.find(p => p.content_id === payload.content_id);
+    const deviceName = payload.device_name || removed?.device_name || '';
     peerContent = peerContent.filter(p => p.content_id !== payload.content_id);
-    if (!peerContent.some(p => p.device_name === payload.device_name))
-      onlineDevices = onlineDevices.filter(d => d !== payload.device_name);
+    if (deviceName && !peerContent.some(p => p.device_name === deviceName))
+      onlineDevices = onlineDevices.filter(d => d !== deviceName);
     updateHeader();
     renderPeerContent();
   });
@@ -863,6 +883,20 @@ function renderHub() {
   // Native drag-drop (Tauri onDragDropEvent — filesystem paths via WebView2).
   // Virtual-file sources (Outlook, OneDrive, ZIP viewer) give empty paths because
   // WebView2 exposes CF_HDROP only. Fall back to Ctrl+V for those.
+  let lastNativeDropSig = '';
+  let lastNativeDropAt = 0;
+
+  function isDuplicateNativeDrop(paths: string[]): boolean {
+    const sig = paths.join('\n');
+    const now = Date.now();
+    if (sig.length > 0 && sig === lastNativeDropSig && (now - lastNativeDropAt) < 250) {
+      return true;
+    }
+    lastNativeDropSig = sig;
+    lastNativeDropAt = now;
+    return false;
+  }
+
   if (IS_TAURI) {
     (async () => {
       try {
@@ -881,7 +915,9 @@ function renderHub() {
                 (p): p is string => typeof p === 'string' && p.length > 0,
               );
               if (paths.length > 0) {
-                await commitDroppedItems(paths.map(p => addFileByPathToHub(p)));
+                if (!isDuplicateNativeDrop(paths)) {
+                  await commitDroppedItems(paths.map(p => addFileByPathToHub(p)));
+                }
               } else {
                 // Outlook attachments, unsynced OneDrive files, ZIP entries, etc.:
                 // WebView2 has no path for them. Suggest Ctrl+V.
@@ -893,6 +929,24 @@ function renderHub() {
         });
       } catch {
         // HTML5 drop handler above covers the remaining cases.
+      }
+
+      try {
+        await listen<NativeDragReceivedPayload>('fenix://drag-received', async ({ payload }) => {
+          const paths = (payload?.paths ?? []).filter(
+            (p): p is string => typeof p === 'string' && p.length > 0,
+          );
+          if (paths.length > 0) {
+            // If both WebView2 and native IDropTarget paths arrive, keep one insert.
+            if (!isDuplicateNativeDrop(paths)) {
+              await commitDroppedItems(paths.map(p => addFileByPathToHub(p)));
+            }
+          } else {
+            showDragFallbackHint();
+          }
+        });
+      } catch {
+        // onDragDropEvent remains available if custom native listener can't attach.
       }
     })();
   }
@@ -1041,6 +1095,7 @@ function attachDragScroll(el: HTMLElement) {
 
 function renderLocalContent() {
   const container = document.getElementById('panel-local')!;
+  const canUseDirectMode = directModeSupported();
   updateHeader();
   const validIds = new Set(localContent.map(item => item.id));
   for (const id of dragPayloadCache.keys()) {
@@ -1061,7 +1116,9 @@ function renderLocalContent() {
   container.innerHTML = `<div class="card-grid">${localContent.map(item => {
     const pub = publishedIds.has(item.id);
     const actionBtns = pub
-      ? `<button class="btn-direct-mode" data-id="${item.id}" data-action="direct-mode" title="Modo directo AirDrop">${iconWifi(9)} Directo</button>
+      ? `${canUseDirectMode
+          ? `<button class="btn-direct-mode" data-id="${item.id}" data-action="direct-mode" title="Modo directo AirDrop">${iconWifi(9)} Directo</button>`
+          : ''}
           <button class="btn-stop" data-id="${item.id}" data-action="stop">■ Parar</button>`
       : [
           `<button class="btn-broadcast" data-id="${item.id}" data-action="broadcast">${iconBroadcast(9)} Todos</button>`,
@@ -1113,6 +1170,10 @@ function renderLocalContent() {
       } else if (el.dataset.action === 'direct') {
         await invoke('publish_content', { args: { content_id: id, target_device: el.dataset.device! } }); publishedIds.add(id);
       } else if (el.dataset.action === 'direct-mode') {
+        if (!directModeSupported()) {
+          showToast('Modo Directo no disponible en este equipo.');
+          return;
+        }
         openDirectModeModal(id);
       }
       renderLocalContent();
@@ -1208,6 +1269,10 @@ let directModalContentId: string | null = null;
 let directModalPeerRefresh: ReturnType<typeof setInterval> | null = null;
 
 async function openDirectModeModal(contentId: string) {
+  if (!directModeSupported()) {
+    showToast('Modo Directo no disponible en este equipo.');
+    return;
+  }
   directModalContentId = contentId;
 
   // Start sender mode discovery
@@ -1354,15 +1419,24 @@ function createModalOverlay(): HTMLElement {
   return overlay;
 }
 
-// ── Firewall modal (Linux only) ───────────────────────────────────────────────
+// ── Firewall modal (Desktop) ───────────────────────────────────────────────
 
 function showFirewallModal(status: FirewallStatus) {
   // Only show once per session
   if (document.getElementById('firewall-modal')) return;
 
-  const manualCmd = status.firewall_type === 'ufw'
-    ? `sudo ufw allow ${status.port}/tcp`
-    : `sudo iptables -I INPUT -p tcp --dport ${status.port} -j ACCEPT`;
+  const isWindowsFirewall = status.firewall_type === 'windows_defender';
+  const manualCmd = isWindowsFirewall
+    ? `netsh advfirewall firewall add rule name="FenixHub TCP ${status.port}" dir=in action=allow protocol=TCP localport=${status.port}`
+    : status.firewall_type === 'ufw'
+      ? `sudo ufw allow ${status.port}/tcp`
+      : `sudo iptables -I INPUT -p tcp --dport ${status.port} -j ACCEPT`;
+  const autoPromptHint = isWindowsFirewall
+    ? 'pedirá confirmación de administrador (UAC)'
+    : 'pedirá contraseña de root';
+  const terminalHint = isWindowsFirewall
+    ? 'PowerShell o CMD como administrador'
+    : 'una terminal';
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -1379,7 +1453,7 @@ function showFirewallModal(status: FirewallStatus) {
     </div>
     <div class="direct-modal-body">
       <p style="margin:0 0 8px">El firewall (<b>${status.firewall_type}</b>) puede bloquear que otros dispositivos se conecten al puerto <b>${status.port}/tcp</b>.</p>
-      <p style="margin:0 0 8px">Pulsa <b>Añadir regla</b> para añadirla automáticamente (pedirá contraseña de root), o copia el comando y ejecútalo en una terminal:</p>
+      <p style="margin:0 0 8px">Pulsa <b>Añadir regla</b> para añadirla automáticamente (${autoPromptHint}), o copia el comando y ejecútalo en ${terminalHint}:</p>
       <code class="fw-cmd" id="fw-cmd-text" style="display:block;background:rgba(255,255,255,0.07);padding:8px;border-radius:6px;font-size:12px;word-break:break-all;cursor:pointer" title="Copiar">${manualCmd}</code>
       <p id="fw-result-msg" style="margin:8px 0 0;font-size:12px;min-height:16px"></p>
     </div>
@@ -1550,6 +1624,22 @@ const LOGO_SRC = './logo-mark.png';
 function iconHub(s: number) {
   return `<img src="${LOGO_SRC}" alt="FenixHub" width="${s}" height="${s}" style="display:block;object-fit:contain;" />`;
 }
+function deviceTypeIcon(type: string, s: number) {
+  switch (type) {
+    case 'desktop':
+      return svg(s,'0 0 20 18','<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>');
+    case 'laptop':
+      return svg(s,'0 0 20 18','<rect x="2" y="2" width="16" height="11" rx="1.5" stroke-width="1.5"/><path d="M0,16 Q10,14 20,16" stroke-width="1.5" fill="none"/>');
+    case 'phone':
+      return svg(s,'0 0 14 20','<rect x="1" y="1" width="12" height="18" rx="3" stroke-width="1.5"/><line x1="5.5" y1="16.5" x2="8.5" y2="16.5" stroke-width="1.5"/>');
+    case 'tablet':
+      return svg(s,'0 0 16 20','<rect x="1" y="1" width="14" height="18" rx="2.5" stroke-width="1.5"/><line x1="6" y1="16.5" x2="10" y2="16.5" stroke-width="1.5"/>');
+    case 'server':
+      return svg(s,'0 0 20 18','<rect x="1" y="1" width="18" height="7" rx="1.5" stroke-width="1.5"/><rect x="1" y="10" width="18" height="7" rx="1.5" stroke-width="1.5"/><circle cx="4.5" cy="4.5" r="1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="13.5" r="1" fill="currentColor" stroke="none"/>');
+    default:
+      return iconDevice(s);
+  }
+}
 function iconCheckmark(s: number) {
   return svg(s,'0 0 16 16','<polyline points="2.5,8 6.5,12 13.5,4" stroke-width="2.2"/>');
 }
@@ -1599,13 +1689,6 @@ function typeIcon(type: string) {
   if (type === 'text')  return svg(14,'0 0 16 16','<line x1="3" y1="5" x2="13" y2="5" stroke-width="1.8"/><line x1="3" y1="8" x2="13" y2="8" stroke-width="1.8"/><line x1="3" y1="11" x2="9" y2="11" stroke-width="1.8"/>');
   if (type === 'image') return svg(14,'0 0 16 16','<rect x="2" y="3" width="12" height="10" rx="1.5" stroke-width="1.8"/><circle cx="6" cy="6.5" r="1" stroke-width="1.8"/><polyline points="2,11 5.5,8 7.5,10 10,7.5 14,11" stroke-width="1.8"/>');
   return svg(14,'0 0 16 16','<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.8"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.8"/>');
-}
-
-function deviceTypeIcon(type: string, s: number) {
-  const dt = DEVICE_TYPES.find(d => d.id === type);
-  if (dt) return dt.icon().replace(/width="\d+"/, `width="${s}"`).replace(/height="\d+"/, `height="${s}"`);
-  // fallback: generic screen
-  return svg(s,'0 0 20 18','<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>');
 }
 
 async function warmupDragPayload(id: string): Promise<void> {

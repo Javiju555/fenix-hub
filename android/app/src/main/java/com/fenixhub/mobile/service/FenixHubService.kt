@@ -352,7 +352,11 @@ class FenixHubService : Service() {
 
         startShakeDetection()
         startPublishGuardIfNeeded()
-        edgeTriggerView?.start()
+        if (Settings.canDrawOverlays(this)) {
+            edgeTriggerView?.start()
+        } else {
+            edgeTriggerView?.stop()
+        }
 
         if (syncJob?.isActive != true) {
             syncJob = serviceScope.launch {
@@ -451,6 +455,7 @@ class FenixHubService : Service() {
 
     private fun showOverlayIfPermitted() {
         if (Settings.canDrawOverlays(this)) {
+            edgeTriggerView?.start()
             edgeTriggerView?.setOverlayVisible(true)
             overlayController.show { edgeTriggerView?.setOverlayVisible(false) }
         } else {

@@ -1,12 +1,15 @@
 package com.fenixhub.mobile
 
+import android.Manifest
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.ViewGroup
@@ -18,6 +21,7 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewAssetLoader
@@ -39,6 +43,7 @@ class MainActivity : ComponentActivity() {
 
     private var pendingFilePicker: CompletableDeferred<Uri?>? = null
     private var pendingCreateDocument: CompletableDeferred<Uri?>? = null
+    private var pendingRuntimePermissions: CompletableDeferred<Map<String, Boolean>>? = null
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent(),
@@ -53,6 +58,13 @@ class MainActivity : ComponentActivity() {
         val uri = result.data?.data
         pendingCreateDocument?.takeIf { it.isActive }?.complete(uri)
         pendingCreateDocument = null
+    }
+
+    private val runtimePermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grantResults ->
+        pendingRuntimePermissions?.takeIf { it.isActive }?.complete(grantResults)
+        pendingRuntimePermissions = null
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,6 +85,7 @@ class MainActivity : ComponentActivity() {
             launchCreateDocument = ::launchCreateDocument,
             readClipboardText = ::clipboardText,
             openOverlayPermissionSettings = ::openOverlayPermissionSettings,
+            requestRuntimePermissions = ::requestRequiredRuntimePermissions,
         )
 
         webView = createWebView()
@@ -108,6 +121,8 @@ class MainActivity : ComponentActivity() {
         pendingFilePicker = null
         pendingCreateDocument?.takeIf { it.isActive }?.complete(null)
         pendingCreateDocument = null
+        pendingRuntimePermissions?.takeIf { it.isActive }?.complete(emptyMap())
+        pendingRuntimePermissions = null
         super.onDestroy()
     }
 
@@ -276,6 +291,69 @@ class MainActivity : ComponentActivity() {
                 Uri.parse("package:$packageName"),
             ),
         )
+    }
+
+    private fun requiredRuntimePermissions(): List<String> {
+        val permissions = mutableListOf<String>()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions += Manifest.permission.BLUETOOTH_SCAN
+            permissions += Manifest.permission.BLUETOOTH_CONNECT
+            permissions += Manifest.permission.BLUETOOTH_ADVERTISE
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions += Manifest.permission.NEARBY_WIFI_DEVICES
+            permissions += Manifest.permission.POST_NOTIFICATIONS
+        } else {
+            permissions += Manifest.permission.ACCESS_FINE_LOCATION
+        }
+
+        return permissions.distinct()
+    }
+
+    private suspend fun requestRequiredRuntimePermissions(): Boolean {
+        val required = requiredRuntimePermissions()
+        if (required.isEmpty()) {
+            return true
+        }
+
+        val missing = required.filter { permission ->
+            ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) {
+            return true
+        }
+
+        if (pendingRuntimePermissions?.isActive == true) {
+            val inFlight = pendingRuntimePermissions
+            if (inFlight != null) {
+                inFlight.await()
+                return required.all { permission ->
+                    ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+                }
+            }
+        }
+
+        val deferred = CompletableDeferred<Map<String, Boolean>>()
+        pendingRuntimePermissions = deferred
+
+        withContext(Dispatchers.Main.immediate) {
+            runtimePermissionsLauncher.launch(missing.toTypedArray())
+        }
+
+        val results = try {
+            deferred.await()
+        } finally {
+            if (pendingRuntimePermissions === deferred) {
+                pendingRuntimePermissions = null
+            }
+        }
+
+        return missing.all { permission ->
+            results[permission] == true ||
+                ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+        }
     }
 
     private fun clipboardText(): String? {
