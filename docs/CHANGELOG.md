@@ -19,10 +19,8 @@
 - Overlay permission is now opened immediately during identity flows if missing.
 
 ### Packaging / release
-- Version bumped to `0.3.1` across desktop frontend, Tauri, Android, and installer stage configs.
-- Windows release flow standardized through custom installer script:
-    - `packaging/build-release.ps1`
-    - stage input from `packaging/windows-stage`
+- Version bumped to `0.3.1` across desktop frontend, Tauri, and Android.
+- Windows release binaries are distributed with a proprietary installer maintained outside this repository.
 
 ## 0.2.7 — experimental Windows native drop interception (2026-04-13)
 
