@@ -1,6 +1,6 @@
 # FenixHub — roadmap
 
-## Estado verificado (2026-04-10)
+## Estado verificado (2026-04-18)
 
 ### Implementado
 
@@ -29,6 +29,16 @@
 - [x] Cliente streaming a disco (`pull_content_to_file`) con fallback graceful a pull bufferizado.
 - [x] Contrato `get_transport_hardware` normalizado entre desktop y Android (`ble`/`wifi_direct` anidados, `permissions_ready`, `ble_peers`, `handoff_candidates`).
 
+#### v0.3.1
+- [x] Paridad desktop firewall Windows/Linux:
+  - [x] Detección de regla faltante al publicar.
+  - [x] Modal unificado en frontend con comando manual por plataforma.
+  - [x] `request_firewall_allow` disponible en Linux y Windows.
+- [x] Android UX de permisos:
+  - [x] Solicitud runtime automática en setup/update/activate de identidad.
+  - [x] Solicitud runtime previa a flujos Direct (sender/receiver/accept invite).
+  - [x] Apertura inmediata de ajustes de overlay cuando falta permiso.
+
 ## Limitaciones conocidas por plataforma
 
 ### Linux — drag & drop de archivos virtuales
@@ -56,7 +66,7 @@ implementarlo.
 - [ ] Ajuste fino de chunk size, compresion y latencia en redes lentas.
 
 ### Android parity
-- [ ] Paridad completa de perfiles/identidad v2 en capa Android nativa (hoy la base fuerte esta en desktop).
+- [ ] Paridad completa de perfiles/identidad v2 en capa Android nativa (reinicio nativo inmediato post-switch pendiente).
 
 ### Preparacion release OSS
 - [ ] CI minima: build desktop + tests Rust + tests Android unitarios en cada PR.

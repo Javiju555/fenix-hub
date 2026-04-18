@@ -29,6 +29,8 @@ docs/cfstr-virtual-drop-impl-prompt.md
 
 # Session logs
 *.log
+logs/
+.git_untracked_sorted.txt
 
 # Local informal post draft
 fenixhub

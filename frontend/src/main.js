@@ -239,6 +239,7 @@ let presenceDevices = new Set(); // devices seen via presence beacon
 let activeTab = 'local';
 let collapsed = false;
 let selectedDeviceType = 'desktop';
+let transportCapabilities = null;
 const dragPayloadCache = new Map();
 const DEVICE_TYPES = [
     { id: 'desktop', label: 'Desktop', icon: () => svg(18, '0 0 20 18', '<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>') },
@@ -278,8 +279,20 @@ async function init() {
         return;
     }
     await loadContent();
+    transportCapabilities = await loadTransportCapabilities().catch(() => null);
     renderHub();
     setupEventListeners();
+}
+function directModeSupported(transport = transportCapabilities) {
+    if (!transport)
+        return false;
+    const bleReady = !!(transport.ble?.supported
+        && transport.ble?.enabled
+        && transport.ble?.permissions_ready);
+    const wifiReady = !!(transport.wifi_direct?.supported
+        && transport.wifi_direct?.enabled
+        && transport.wifi_direct?.permissions_ready);
+    return bleReady && wifiReady && !!transport.airdrop_ready;
 }
 // ── Settings window ───────────────────────────────────────────────────────────
 async function initSettings() {
@@ -474,6 +487,15 @@ function renderSettings(profiles, transport, feedback) {
             await reloadSettingsView({ message: 'Introduce una passphrase para cambiar de identidad.', tone: 'error' });
             return;
         }
+        // Auto-save current identity as a profile before switching groups,
+        // so the user can switch back without re-entering the passphrase.
+        if (identity?.configured && identity.device_name) {
+            const existingProfiles = await invoke('list_identity_profiles').catch(() => ({ profiles: [] }));
+            const alreadySaved = existingProfiles.profiles.some(p => p.active);
+            if (!alreadySaved) {
+                await invoke('save_current_identity_profile', { args: { name: identity.device_name, make_active: true } }).catch(() => { });
+            }
+        }
         if (!identity?.configured) {
             await invoke('setup_identity', {
                 args: {
@@ -580,9 +602,11 @@ function setupEventListeners() {
         renderPeerContent();
     });
     listen('peer-content-gone', ({ payload }) => {
+        const removed = peerContent.find(p => p.content_id === payload.content_id);
+        const deviceName = payload.device_name || removed?.device_name || '';
         peerContent = peerContent.filter(p => p.content_id !== payload.content_id);
-        if (!peerContent.some(p => p.device_name === payload.device_name))
-            onlineDevices = onlineDevices.filter(d => d !== payload.device_name);
+        if (deviceName && !peerContent.some(p => p.device_name === deviceName))
+            onlineDevices = onlineDevices.filter(d => d !== deviceName);
         updateHeader();
         renderPeerContent();
     });
@@ -610,6 +634,9 @@ function setupEventListeners() {
         }
         updateHeader();
         renderPeerContent();
+    });
+    listen('firewall-blocked', ({ payload }) => {
+        showFirewallModal(payload);
     });
 }
 // ── Setup screen ──────────────────────────────────────────────────────────────
@@ -679,9 +706,12 @@ function renderHub() {
     <div class="hub" id="hub-root">
 
       <!-- ── Expanded header ─────────────────────────────────────────── -->
-      <header class="hub-header hub-expanded-header" id="hub-header">
+      <header class="hub-header hub-expanded-header" id="hub-header" data-tauri-drag-region>
         <div class="hub-logo">${iconHub(18)}</div>
         <span class="hub-title">FenixHub</span>
+        <span class="hub-device-label" title="Dispositivo: ${escapeHtml(identity?.device_name ?? '')}">
+          ${deviceTypeIcon(identity?.device_type ?? 'desktop', 13)}
+        </span>
 
         <div class="hub-tabs" id="hub-tabs">
           <button class="tab active" data-tab="local">${iconInbox(10)} Local <span class="badge" id="count-local">0</span></button>
@@ -703,7 +733,7 @@ function renderHub() {
       </header>
 
       <!-- ── Collapsed pill ──────────────────────────────────────────── -->
-      <header class="hub-header hub-pill-header" id="hub-pill-header">
+      <header class="hub-header hub-pill-header" id="hub-pill-header" data-tauri-drag-region>
         <div class="hub-logo pill-logo">${iconHub(16)}</div>
         <button class="pill-tab" id="pill-tab-local" data-pill-tab="local">${iconInbox(10)} Local <span class="badge" id="count-local-mini">0</span></button>
         <button class="pill-tab pill-tab-red" id="pill-tab-red" data-pill-tab="red">${iconWifi(10)} Red <span class="badge badge-red" id="count-red-mini">0</span></button>
@@ -786,6 +816,18 @@ function renderHub() {
     // Native drag-drop (Tauri onDragDropEvent — filesystem paths via WebView2).
     // Virtual-file sources (Outlook, OneDrive, ZIP viewer) give empty paths because
     // WebView2 exposes CF_HDROP only. Fall back to Ctrl+V for those.
+    let lastNativeDropSig = '';
+    let lastNativeDropAt = 0;
+    function isDuplicateNativeDrop(paths) {
+        const sig = paths.join('\n');
+        const now = Date.now();
+        if (sig.length > 0 && sig === lastNativeDropSig && (now - lastNativeDropAt) < 250) {
+            return true;
+        }
+        lastNativeDropSig = sig;
+        lastNativeDropAt = now;
+        return false;
+    }
     if (IS_TAURI) {
         (async () => {
             try {
@@ -802,7 +844,9 @@ function renderHub() {
                             hub.classList.remove('drag-over');
                             const paths = (event.payload.paths ?? []).filter((p) => typeof p === 'string' && p.length > 0);
                             if (paths.length > 0) {
-                                await commitDroppedItems(paths.map(p => addFileByPathToHub(p)));
+                                if (!isDuplicateNativeDrop(paths)) {
+                                    await commitDroppedItems(paths.map(p => addFileByPathToHub(p)));
+                                }
                             }
                             else {
                                 // Outlook attachments, unsynced OneDrive files, ZIP entries, etc.:
@@ -816,6 +860,23 @@ function renderHub() {
             }
             catch {
                 // HTML5 drop handler above covers the remaining cases.
+            }
+            try {
+                await listen('fenix://drag-received', async ({ payload }) => {
+                    const paths = (payload?.paths ?? []).filter((p) => typeof p === 'string' && p.length > 0);
+                    if (paths.length > 0) {
+                        // If both WebView2 and native IDropTarget paths arrive, keep one insert.
+                        if (!isDuplicateNativeDrop(paths)) {
+                            await commitDroppedItems(paths.map(p => addFileByPathToHub(p)));
+                        }
+                    }
+                    else {
+                        showDragFallbackHint();
+                    }
+                });
+            }
+            catch {
+                // onDragDropEvent remains available if custom native listener can't attach.
             }
         })();
     }
@@ -964,6 +1025,7 @@ function attachDragScroll(el) {
 // ── Local panel ───────────────────────────────────────────────────────────────
 function renderLocalContent() {
     const container = document.getElementById('panel-local');
+    const canUseDirectMode = directModeSupported();
     updateHeader();
     const validIds = new Set(localContent.map(item => item.id));
     for (const id of dragPayloadCache.keys()) {
@@ -982,7 +1044,9 @@ function renderLocalContent() {
     container.innerHTML = `<div class="card-grid">${localContent.map(item => {
         const pub = publishedIds.has(item.id);
         const actionBtns = pub
-            ? `<button class="btn-direct-mode" data-id="${item.id}" data-action="direct-mode" title="Modo directo AirDrop">${iconWifi(9)} Directo</button>
+            ? `${canUseDirectMode
+                ? `<button class="btn-direct-mode" data-id="${item.id}" data-action="direct-mode" title="Modo directo AirDrop">${iconWifi(9)} Directo</button>`
+                : ''}
           <button class="btn-stop" data-id="${item.id}" data-action="stop">■ Parar</button>`
             : [
                 `<button class="btn-broadcast" data-id="${item.id}" data-action="broadcast">${iconBroadcast(9)} Todos</button>`,
@@ -1034,6 +1098,10 @@ function renderLocalContent() {
                 publishedIds.add(id);
             }
             else if (el.dataset.action === 'direct-mode') {
+                if (!directModeSupported()) {
+                    showToast('Modo Directo no disponible en este equipo.');
+                    return;
+                }
                 openDirectModeModal(id);
             }
             renderLocalContent();
@@ -1117,6 +1185,10 @@ function renderLocalContent() {
 let directModalContentId = null;
 let directModalPeerRefresh = null;
 async function openDirectModeModal(contentId) {
+    if (!directModeSupported()) {
+        showToast('Modo Directo no disponible en este equipo.');
+        return;
+    }
     directModalContentId = contentId;
     // Start sender mode discovery
     await invoke('start_direct_mode_sender');
@@ -1246,6 +1318,91 @@ function createModalOverlay() {
     });
     return overlay;
 }
+// ── Firewall modal (Desktop) ───────────────────────────────────────────────
+function showFirewallModal(status) {
+    // Only show once per session
+    if (document.getElementById('firewall-modal'))
+        return;
+    const isWindowsFirewall = status.firewall_type === 'windows_defender';
+    const manualCmd = isWindowsFirewall
+        ? `netsh advfirewall firewall add rule name="FenixHub TCP ${status.port}" dir=in action=allow protocol=TCP localport=${status.port}`
+        : status.firewall_type === 'ufw'
+            ? `sudo ufw allow ${status.port}/tcp`
+            : `sudo iptables -I INPUT -p tcp --dport ${status.port} -j ACCEPT`;
+    const autoPromptHint = isWindowsFirewall
+        ? 'pedirá confirmación de administrador (UAC)'
+        : 'pedirá contraseña de root';
+    const terminalHint = isWindowsFirewall
+        ? 'PowerShell o CMD como administrador'
+        : 'una terminal';
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'firewall-modal-overlay';
+    overlay.innerHTML = `<div class="modal-backdrop"></div>`;
+    const modal = document.createElement('div');
+    modal.className = 'direct-modal';
+    modal.id = 'firewall-modal';
+    modal.innerHTML = `
+    <div class="direct-modal-header">
+      <span>⚠ Firewall bloqueando conexiones</span>
+      <button class="modal-close" id="fw-modal-close">${iconX(14)}</button>
+    </div>
+    <div class="direct-modal-body">
+      <p style="margin:0 0 8px">El firewall (<b>${status.firewall_type}</b>) puede bloquear que otros dispositivos se conecten al puerto <b>${status.port}/tcp</b>.</p>
+      <p style="margin:0 0 8px">Pulsa <b>Añadir regla</b> para añadirla automáticamente (${autoPromptHint}), o copia el comando y ejecútalo en ${terminalHint}:</p>
+      <code class="fw-cmd" id="fw-cmd-text" style="display:block;background:rgba(255,255,255,0.07);padding:8px;border-radius:6px;font-size:12px;word-break:break-all;cursor:pointer" title="Copiar">${manualCmd}</code>
+      <p id="fw-result-msg" style="margin:8px 0 0;font-size:12px;min-height:16px"></p>
+    </div>
+    <div class="direct-modal-footer">
+      <button class="btn-cancel" id="fw-dismiss">Ignorar</button>
+      <button class="btn-cancel" id="fw-copy-cmd">Copiar comando</button>
+      <button class="btn-accept" id="fw-add-rule">Añadir regla</button>
+    </div>`;
+    overlay.querySelector('.modal-backdrop').appendChild(modal);
+    document.body.appendChild(overlay);
+    const closeModal = () => overlay.remove();
+    document.getElementById('fw-modal-close').addEventListener('click', closeModal);
+    document.getElementById('fw-dismiss').addEventListener('click', closeModal);
+    document.getElementById('fw-cmd-text').addEventListener('click', () => {
+        void navigator.clipboard.writeText(manualCmd).then(() => {
+            const msg = document.getElementById('fw-result-msg');
+            msg.textContent = 'Comando copiado al portapapeles.';
+        });
+    });
+    document.getElementById('fw-copy-cmd').addEventListener('click', () => {
+        void navigator.clipboard.writeText(manualCmd).then(() => {
+            const msg = document.getElementById('fw-result-msg');
+            msg.textContent = 'Comando copiado al portapapeles.';
+        });
+    });
+    document.getElementById('fw-add-rule').addEventListener('click', () => {
+        const btn = document.getElementById('fw-add-rule');
+        const msg = document.getElementById('fw-result-msg');
+        btn.disabled = true;
+        btn.textContent = 'Aplicando...';
+        invoke('request_firewall_allow', { port: status.port })
+            .then((added) => {
+            if (added) {
+                msg.style.color = '#69ff47';
+                msg.textContent = 'Regla añadida correctamente. Los dispositivos ya pueden conectarse.';
+                btn.textContent = 'Listo';
+                setTimeout(closeModal, 2500);
+            }
+            else {
+                msg.style.color = '#ffa040';
+                msg.textContent = 'Cancelado. Puedes añadir la regla manualmente con el comando de arriba.';
+                btn.disabled = false;
+                btn.textContent = 'Añadir regla';
+            }
+        })
+            .catch((err) => {
+            msg.style.color = '#ff5555';
+            msg.textContent = String(err);
+            btn.disabled = false;
+            btn.textContent = 'Añadir regla';
+        });
+    });
+}
 function signalBars(rssi) {
     if (rssi >= -60)
         return '●●●';
@@ -1347,6 +1504,22 @@ const svg = (s, vb, path, extra = 'stroke="currentColor" stroke-linecap="round" 
 const LOGO_SRC = './logo-mark.png';
 function iconHub(s) {
     return `<img src="${LOGO_SRC}" alt="FenixHub" width="${s}" height="${s}" style="display:block;object-fit:contain;" />`;
+}
+function deviceTypeIcon(type, s) {
+    switch (type) {
+        case 'desktop':
+            return svg(s, '0 0 20 18', '<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>');
+        case 'laptop':
+            return svg(s, '0 0 20 18', '<rect x="2" y="2" width="16" height="11" rx="1.5" stroke-width="1.5"/><path d="M0,16 Q10,14 20,16" stroke-width="1.5" fill="none"/>');
+        case 'phone':
+            return svg(s, '0 0 14 20', '<rect x="1" y="1" width="12" height="18" rx="3" stroke-width="1.5"/><line x1="5.5" y1="16.5" x2="8.5" y2="16.5" stroke-width="1.5"/>');
+        case 'tablet':
+            return svg(s, '0 0 16 20', '<rect x="1" y="1" width="14" height="18" rx="2.5" stroke-width="1.5"/><line x1="6" y1="16.5" x2="10" y2="16.5" stroke-width="1.5"/>');
+        case 'server':
+            return svg(s, '0 0 20 18', '<rect x="1" y="1" width="18" height="7" rx="1.5" stroke-width="1.5"/><rect x="1" y="10" width="18" height="7" rx="1.5" stroke-width="1.5"/><circle cx="4.5" cy="4.5" r="1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="13.5" r="1" fill="currentColor" stroke="none"/>');
+        default:
+            return iconDevice(s);
+    }
 }
 function iconCheckmark(s) {
     return svg(s, '0 0 16 16', '<polyline points="2.5,8 6.5,12 13.5,4" stroke-width="2.2"/>');

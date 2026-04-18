@@ -833,6 +833,16 @@ function renderSettingsView(profiles, transport, feedback) {
             await reloadSettingsView({ message: 'Introduce una passphrase para cambiar de identidad.', tone: 'error' });
             return;
         }
+        // Auto-save current identity as a profile before switching groups,
+        // so the user can switch back without re-entering the passphrase.
+        if (identity?.configured && identity.device_name) {
+            const currentProfileName = identity.device_name;
+            const existingProfiles = await invoke('list_identity_profiles').catch(() => ({ profiles: [] }));
+            const alreadySaved = existingProfiles.profiles.some(p => p.active);
+            if (!alreadySaved) {
+                await invoke('save_current_identity_profile', { args: { name: currentProfileName, make_active: true } }).catch(() => { });
+            }
+        }
         let result;
         if (identity?.configured) {
             result = await invoke('update_identity', {

@@ -74,17 +74,6 @@ pub fn run() {
                 tracing::info!("Starting in background mode: hub window hidden");
             }
 
-            // Register custom Windows drop target on the hub window.
-            // This intercepts drag-and-drop at the HWND level BEFORE WebView2
-            // consumes the IDataObject, enabling virtual file support (Outlook
-            // attachments, cloud-drive shells, ZIP viewers, etc.).
-            #[cfg(target_os = "windows")]
-            {
-                if let Some(win) = app_handle.get_webview_window("hub") {
-                    drop_target::register_fenix_drop_target(&win);
-                }
-            }
-
             // Tray icon menu: left-click opens hub, right-click shows menu.
             let open_item = MenuItem::with_id(app, "open", "Abrir FenixHub", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
@@ -233,9 +222,9 @@ pub fn run() {
             commands::add_file_by_path,
             commands::clear_received_cache,
             commands::reset_all_data,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             commands::check_firewall_status,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             commands::request_firewall_allow,
         ])
         .build(tauri::generate_context!())

@@ -45,6 +45,7 @@ class AndroidHubBridge(
     private val launchCreateDocument: suspend (fileName: String, mimeType: String) -> Uri?,
     private val readClipboardText: () -> String?,
     private val openOverlayPermissionSettings: () -> Unit,
+    private val requestRuntimePermissions: suspend () -> Boolean,
 ) {
     @Volatile
     private var webView: WebView? = null
@@ -148,21 +149,14 @@ class AndroidHubBridge(
                 "null"
             }
             "start_direct_mode_receiver" -> {
-                FenixHubService.start(activity)
-                activity.lifecycleScope.launch(Dispatchers.Main.immediate) {
-                    container.ephemeralSession.startAsReceiver(container.settingsStore.current().deviceName)
-                }
+                startDirectModeReceiver()
                 "null"
             }
             "get_current_inviter" -> {
                 getCurrentInviterJson().toString()
             }
             "accept_direct_invite" -> {
-                activity.lifecycleScope.launch(Dispatchers.Main.immediate) {
-                    container.ephemeralSession.acceptIncomingInvite { senderIp, senderPort, contentId ->
-                        Log.i(TAG, "Direct invite accepted: $senderIp:$senderPort contentId=$contentId")
-                    }
-                }
+                acceptDirectInvite()
                 "null"
             }
             "reject_direct_invite" -> {
@@ -394,6 +388,8 @@ class AndroidHubBridge(
             container.settingsStore.saveIdentity(passphrase, deviceName, deviceType)
         }
 
+        requestIdentityPermissionsIfNeeded()
+
         withContext(Dispatchers.Main.immediate) {
             FenixHubService.start(activity)
         }
@@ -414,6 +410,8 @@ class AndroidHubBridge(
             container.settingsStore.updateIdentity(passphrase, deviceName, deviceType)
         }
         val groupChanged = current.groupId.isNotBlank() && current.groupId != settings.groupId
+
+        requestIdentityPermissionsIfNeeded()
 
         withContext(Dispatchers.Main.immediate) {
             FenixHubService.start(activity, FenixHubService.ACTION_REFRESH_IDENTITY)
@@ -461,6 +459,8 @@ class AndroidHubBridge(
         val settings = withContext(Dispatchers.Default) {
             container.settingsStore.activateProfile(name)
         } ?: error("Profile not found")
+
+        requestIdentityPermissionsIfNeeded()
 
         withContext(Dispatchers.Main.immediate) {
             FenixHubService.start(activity, FenixHubService.ACTION_REFRESH_IDENTITY)
@@ -618,7 +618,8 @@ class AndroidHubBridge(
 
     // ── Direct Mode (AirDrop-like) ───────────────────────────────────────
 
-    private fun startDirectModeSender() {
+    private suspend fun startDirectModeSender() {
+        ensureDirectModePermissionsReady()
         FenixHubService.start(activity)
         selectedDirectPeerIds.clear()
         activity.lifecycleScope.launch(Dispatchers.Main.immediate) {
@@ -628,6 +629,23 @@ class AndroidHubBridge(
                 listener = directModeListener,
             )
             Log.i(TAG, "Direct mode sender started")
+        }
+    }
+
+    private suspend fun startDirectModeReceiver() {
+        ensureDirectModePermissionsReady()
+        FenixHubService.start(activity)
+        activity.lifecycleScope.launch(Dispatchers.Main.immediate) {
+            container.ephemeralSession.startAsReceiver(container.settingsStore.current().deviceName)
+        }
+    }
+
+    private suspend fun acceptDirectInvite() {
+        ensureDirectModePermissionsReady()
+        activity.lifecycleScope.launch(Dispatchers.Main.immediate) {
+            container.ephemeralSession.acceptIncomingInvite { senderIp, senderPort, contentId ->
+                Log.i(TAG, "Direct invite accepted: $senderIp:$senderPort contentId=$contentId")
+            }
         }
     }
 
@@ -797,6 +815,7 @@ class AndroidHubBridge(
     }
 
     private suspend fun openOverlay(): Boolean {
+        requestRuntimePermissions()
         return withContext(Dispatchers.Main.immediate) {
             if (Settings.canDrawOverlays(activity)) {
                 FenixHubService.start(activity, FenixHubService.ACTION_SHOW_OVERLAY)
@@ -805,6 +824,27 @@ class AndroidHubBridge(
                 openOverlayPermissionSettings()
                 false
             }
+        }
+    }
+
+    private suspend fun requestIdentityPermissionsIfNeeded() {
+        requestRuntimePermissions()
+        withContext(Dispatchers.Main.immediate) {
+            if (!Settings.canDrawOverlays(activity)) {
+                openOverlayPermissionSettings()
+            }
+        }
+    }
+
+    private suspend fun ensureDirectModePermissionsReady() {
+        requestRuntimePermissions()
+
+        val hasBle = TransportHardwareInspector.hasBlePermissions(activity) &&
+            TransportHardwareInspector.hasBleAdvertisePermission(activity)
+        val hasWifiDirect = TransportHardwareInspector.hasWifiDirectPermissions(activity)
+
+        if (!hasBle || !hasWifiDirect) {
+            error("Faltan permisos de Bluetooth/Nearby para usar modo directo")
         }
     }
 

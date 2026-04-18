@@ -24,6 +24,8 @@ The Android overlay lets you drop content into any app without switching windows
 - Android: native app + overlay + drag-and-drop into overlay
 - LAN encrypted transfer: text, image, file
 - Discovery via mDNS, pull via authenticated HTTP
+- Desktop parity: firewall warning/allow flow on both Windows and Linux
+- Desktop DnD: native file drop on both; Windows adds virtual-file interception (Outlook/OneDrive/ZIP shells)
 
 **In progress**
 
@@ -50,6 +52,34 @@ bun tauri dev
 
 ```bash
 bun tauri build
+```
+
+### Desktop — release (custom Windows installer)
+
+The desktop release flow uses the custom installer pipeline in [packaging/build-release.ps1](packaging/build-release.ps1).
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\packaging\build-release.ps1 -Version 0.3.1 -InstallerRepo D:\instalador
+```
+
+Expected output:
+
+- [packaging/release-output/FenixHub_0.3.1_x64-Setup.exe](packaging/release-output/FenixHub_0.3.1_x64-Setup.exe)
+
+Notes:
+
+- Uses [packaging/windows-stage/installer_config.json](packaging/windows-stage/installer_config.json) as stage input.
+- The script auto-updates the staged installer version before building.
+
+### GitHub release (CLI)
+
+```powershell
+git tag v0.3.1
+git push origin main --tags
+gh release create v0.3.1 `
+	.\packaging\release-output\FenixHub_0.3.1_x64-Setup.exe `
+	--title "FenixHub v0.3.1" `
+	--notes-file .\docs\release-notes-v0.3.1.md
 ```
 
 ### Rust tests

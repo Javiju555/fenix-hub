@@ -361,23 +361,28 @@ class NsdController(
                 val announcement = raw?.let { AnnouncementCodec.decode(it) }
                 if (announcement != null) {
                     val settings = settingsStore.current()
-                    if (settings.configured && announcement.groupId == settings.groupId &&
+                    val visibleToCurrentDevice = settings.configured &&
+                        announcement.groupId == settings.groupId &&
                         !settingsStore.isIgnoredPeerContent(announcement.contentId) &&
                         !(announcement.deviceName == settings.deviceName &&
                             repository.getLocalContent(announcement.contentId) != null) &&
                         !(announcement.sendMode is SendMode.Direct &&
                             announcement.sendMode.targetDevice != settings.deviceName)
-                    ) {
-                        val host = resolvedServiceInfo.host?.hostAddress?.substringBefore('%')
-                        if (host != null) {
-                            mainHandler.post {
-                                peerLastSeenAt[announcement.contentId] = SystemClock.elapsedRealtime()
-                                repository.upsertPeer(PeerContent(
-                                    peerIp = host,
-                                    port = resolvedServiceInfo.port,
-                                    announcement = announcement,
-                                ))
-                            }
+
+                    val host = resolvedServiceInfo.host?.hostAddress?.substringBefore('%')
+                    mainHandler.post {
+                        if (visibleToCurrentDevice && host != null) {
+                            peerLastSeenAt[announcement.contentId] = SystemClock.elapsedRealtime()
+                            repository.upsertPeer(PeerContent(
+                                peerIp = host,
+                                port = resolvedServiceInfo.port,
+                                announcement = announcement,
+                            ))
+                        } else {
+                            // Resolve succeeded but this item is no longer visible for this device.
+                            // Remove stale UI entries immediately instead of waiting for expiry.
+                            peerLastSeenAt.remove(announcement.contentId)
+                            repository.removePeer(announcement.contentId)
                         }
                     }
                 }
@@ -394,7 +399,7 @@ class NsdController(
         const val PROTOCOL_VERSION = 3
         const val DISCOVERY_REFRESH_MS = 15_000L
         const val DISCOVERY_RETRY_MS = 3_000L
-        const val PEER_EXPIRY_MS = 45_000L
+        const val PEER_EXPIRY_MS = 20_000L
         const val MAX_ANNOUNCEMENT_BYTES = 1_000
         const val MAX_ANNOUNCEMENT_FILE_NAME_CHARS = 80
         const val MIN_ANNOUNCEMENT_PREVIEW_CHARS = 24

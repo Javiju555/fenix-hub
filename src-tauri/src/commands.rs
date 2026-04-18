@@ -803,10 +803,10 @@ pub async fn publish_content(
                 .map_err(|e| e.to_string())?;
             *state.server_shutdown.write().await = Some(shutdown_tx);
             *state.server_port.write().await = Some(port);
-            // On Linux: check for firewall and notify the frontend if the rule is missing.
-            #[cfg(target_os = "linux")]
+            // On desktop: check firewall and notify the frontend if the rule is missing.
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             {
-                let status = linux_firewall_status(port);
+                let status = desktop_firewall_status(port);
                 tracing::info!(
                     "Firewall status: active={} rule_present={} type={}",
                     status.active,
@@ -995,22 +995,83 @@ pub async fn copy_peer_content(
     content_id: String,
     state: State<'_, HubState>,
 ) -> Result<CopyPeerResult, String> {
+    let (announcement, peer_ip) = {
+        let peers = state.peer_content.read().await;
+        let (ann, ip) = peers.get(&content_id).ok_or("Peer content not found")?;
+        (ann.clone(), *ip)
+    };
+    let received_path = peer_received_path(&content_id, &announcement);
+    let content_type = announcement.content_type.clone();
+
+    // Fast path: if peer payload is already cached on disk, copy that file path
+    // directly to the clipboard (CF_HDROP on Windows) without rebuilding previews.
+    if content_type != fenix_hub_core::content::ContentType::Text && received_path.exists() {
+        let path = received_path.clone();
+        let clip_type = content_type.clone();
+        tokio::task::spawn_blocking(move || clipboard_set_file(&path, &clip_type))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+
+        let cached_path = if content_type == fenix_hub_core::content::ContentType::Image {
+            received_path.to_str().map(ToOwned::to_owned)
+        } else {
+            None
+        };
+
+        tracing::info!(
+            "Copied {} from {} ({}) to clipboard",
+            content_id,
+            announcement.device_name,
+            peer_ip
+        );
+        return Ok(CopyPeerResult { cached_path });
+    }
+
     let (announcement, peer_ip, pulled) = ensure_peer_cached(&content_id, &state).await?;
-    // Capture the cached path before consuming the announcement.
-    let is_image = announcement.content_type == fenix_hub_core::content::ContentType::Image;
-    let cached_path = if is_image {
+    let content_type = announcement.content_type.clone();
+
+    let cached_path = if content_type == fenix_hub_core::content::ContentType::Image {
         let p = peer_received_path(&content_id, &announcement);
         if p.exists() { p.to_str().map(ToOwned::to_owned) } else { None }
     } else {
         None
     };
-    let item = build_peer_item(&announcement, pulled)?;
-    // Image decode (JPEG → RGBA8 ~48 MB for a 3 MP photo) is CPU-bound and
-    // must not block the async executor.  Move it to a blocking thread.
-    tokio::task::spawn_blocking(move || write_item_to_clipboard(&item))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+
+    match content_type {
+        fenix_hub_core::content::ContentType::Text => {
+            let text = String::from_utf8(pulled.bytes).map_err(|e| e.to_string())?;
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                arboard::Clipboard::new()?.set_text(text)?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        }
+        fenix_hub_core::content::ContentType::Image | fenix_hub_core::content::ContentType::File => {
+            let path = pulled.file_path.clone()
+                .or_else(|| {
+                    let p = peer_received_path(&content_id, &announcement);
+                    if p.exists() { Some(p) } else { None }
+                });
+
+            if let Some(path) = path {
+                let clip_type = announcement.content_type.clone();
+                tokio::task::spawn_blocking(move || clipboard_set_file(&path, &clip_type))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let item = build_peer_item(&announcement, pulled)?;
+                tokio::task::spawn_blocking(move || write_item_to_clipboard(&item))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     tracing::info!(
         "Copied {} from {} ({}) to clipboard",
         content_id,
@@ -2000,6 +2061,19 @@ pub struct FirewallStatus {
     pub port: u16,
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn desktop_firewall_status(port: u16) -> FirewallStatus {
+    #[cfg(target_os = "linux")]
+    {
+        return linux_firewall_status(port);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return windows_firewall_status(port);
+    }
+}
+
 /// On Linux: detect whether a firewall is active and whether an allow-rule for
 /// `port` already exists. Returns a `FirewallStatus` the frontend can act on.
 #[cfg(target_os = "linux")]
@@ -2074,13 +2148,50 @@ fn linux_firewall_status(port: u16) -> FirewallStatus {
     }
 }
 
+/// On Windows: detect whether Defender Firewall is enabled and whether an
+/// inbound allow rule exists for the local TCP port.
+#[cfg(target_os = "windows")]
+fn windows_firewall_status(port: u16) -> FirewallStatus {
+    let (profiles_enabled, _) = windows_script_lines(
+        "Get-NetFirewallProfile -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Enabled",
+    );
+    let active = profiles_enabled
+        .iter()
+        .any(|line| line.trim().eq_ignore_ascii_case("true"));
+
+    let rule_query = format!(
+        "Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -ErrorAction SilentlyContinue | \
+Get-NetFirewallPortFilter -ErrorAction SilentlyContinue | \
+Where-Object {{ $_.Protocol -eq 'TCP' -and ($_.LocalPort -eq '{port}' -or $_.LocalPort -eq 'Any') }} | \
+Select-Object -First 1 | ForEach-Object {{ 'present' }}"
+    );
+    let (rule_lines, _) = windows_script_lines(&rule_query);
+    let rule_present = !active || rule_lines.iter().any(|line| line.trim() == "present");
+
+    FirewallStatus {
+        active,
+        rule_present,
+        firewall_type: "windows_defender".to_string(),
+        port,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_script_output(script: &str) -> Result<std::process::Output, String> {
+    let mut command = std::process::Command::new("powershell");
+    command
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    command.output().map_err(|e| e.to_string())
+}
+
 /// Returns the current firewall status for the content-server port.
 /// Frontend calls this to decide whether to show the firewall setup dialog.
 /// Uses the fixed default port — the server always prefers 7473.
 #[tauri::command]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub fn check_firewall_status() -> FirewallStatus {
-    linux_firewall_status(fenix_hub_core::server::DEFAULT_SERVER_PORT)
+    desktop_firewall_status(fenix_hub_core::server::DEFAULT_SERVER_PORT)
 }
 
 /// Asks polkit (pkexec) to add a firewall allow-rule for `port`/tcp.
@@ -2135,6 +2246,51 @@ pub fn request_firewall_allow(port: u16) -> Result<bool, String> {
     ))
 }
 
+/// On Windows: asks UAC to add an inbound allow rule for `port`/tcp.
+/// Returns Ok(true) if added, Ok(false) if the user cancels UAC.
+#[tauri::command]
+#[cfg(target_os = "windows")]
+pub fn request_firewall_allow(port: u16) -> Result<bool, String> {
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+$ruleName = 'FenixHub TCP {port}'
+$argList = "advfirewall firewall add rule name=`"$ruleName`" dir=in action=allow protocol=TCP localport={port}"
+try {{
+  $proc = Start-Process -FilePath 'netsh.exe' -ArgumentList $argList -Verb RunAs -WindowStyle Hidden -PassThru -Wait
+  if ($proc.ExitCode -eq 0) {{ exit 0 }}
+  exit $proc.ExitCode
+}} catch {{
+  $msg = $_.Exception.Message
+  if ($msg -match 'cancel') {{ exit 126 }}
+  Write-Error $msg
+  exit 1
+}}"#,
+    );
+
+    let output = windows_script_output(&script)?;
+    if output.status.success() {
+        tracing::info!("Windows firewall rule added for port {port}/tcp via UAC");
+        return Ok(true);
+    }
+
+    if output.status.code() == Some(126) {
+        return Ok(false);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let details = if stderr.is_empty() {
+        format!("código {}", output.status.code().unwrap_or(-1))
+    } else {
+        stderr
+    };
+
+    Err(format!(
+        "No se pudo añadir la regla de firewall en Windows ({details}). \
+         Ejecuta PowerShell como administrador y usa: netsh advfirewall firewall add rule name=\"FenixHub TCP {port}\" dir=in action=allow protocol=TCP localport={port}"
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn which_exists(cmd: &str) -> bool {
     std::process::Command::new("which")
         .arg(cmd)

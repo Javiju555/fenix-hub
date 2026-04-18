@@ -190,7 +190,7 @@ pub fn load() -> Result<Option<(GroupIdentity, DeviceType)>> {
     let bytes = std::fs::read(&path)?;
     let data: PersistedIdentity = serde_json::from_slice(&bytes)?;
     // For old files, key_hex might be in JSON, try to load it
-    if let Ok(identity) = GroupIdentity::from_key_hex("dummy", &data.device_name) {
+    if GroupIdentity::from_key_hex("dummy", &data.device_name).is_ok() {
         // If old format, migrate to keyring
         tracing::warn!("Migrating old identity to keyring");
         // But since we don't have key_hex, skip for now
