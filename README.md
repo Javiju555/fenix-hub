@@ -34,6 +34,27 @@ The Android overlay lets you drop content into any app without switching windows
 
 ---
 
+## Repository Scope
+
+This repository contains the **application source code** and public documentation.
+
+- Included: Rust core/desktop code, frontend code, Android app source, public docs.
+- Not included: private packaging pipeline and installer implementation details.
+
+Windows binaries published in GitHub Releases may use a proprietary installer maintained outside this repository.
+
+---
+
+## Project Layout
+
+- `crates/` — shared Rust crates (`fenix-hub-core`, `fenix-hub-daemon`)
+- `src-tauri/` — desktop app backend (Tauri + Rust)
+- `frontend/` — desktop/android web UI source
+- `android/` — native Android app and bridge code
+- `docs/` — changelog and roadmap/status docs
+
+---
+
 ## Building
 
 ### Requirements
@@ -52,34 +73,6 @@ bun tauri dev
 
 ```bash
 bun tauri build
-```
-
-### Desktop — release (custom Windows installer)
-
-The desktop release flow uses the custom installer pipeline in [packaging/build-release.ps1](packaging/build-release.ps1).
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\packaging\build-release.ps1 -Version 0.3.1 -InstallerRepo D:\instalador
-```
-
-Expected output:
-
-- [packaging/release-output/FenixHub_0.3.1_x64-Setup.exe](packaging/release-output/FenixHub_0.3.1_x64-Setup.exe)
-
-Notes:
-
-- Uses [packaging/windows-stage/installer_config.json](packaging/windows-stage/installer_config.json) as stage input.
-- The script auto-updates the staged installer version before building.
-
-### GitHub release (CLI)
-
-```powershell
-git tag v0.3.1
-git push origin main --tags
-gh release create v0.3.1 `
-	.\packaging\release-output\FenixHub_0.3.1_x64-Setup.exe `
-	--title "FenixHub v0.3.1" `
-	--notes-file .\docs\release-notes-v0.3.1.md
 ```
 
 ### Rust tests

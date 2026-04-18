@@ -26,6 +26,11 @@ packaging/
 docs/PLAN.md
 docs/instagram-announcement-es.md
 docs/cfstr-virtual-drop-impl-prompt.md
+docs/release-notes-*.md
+/CHANGELOG_LAPTOP.md
+/PLAN.md
+/PENDING.md
+/fenixhub.md
 
 # Session logs
 *.log
