@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.3 — desktop identity fallback (2026-04-25)
+
+### Desktop
+- Fixed startup showing first-run setup after identity metadata was loaded.
+- Added a local key fallback in `identity.json` and identity profiles when Windows keyring storage does not return the saved group key during dev/hot-reload or restart.
+
+### Packaging / release
+- Version bumped to `0.3.3` across desktop frontend, Tauri, and Android.
+
 ## 0.3.2 — Android discovery + encrypted prefs recovery (2026-04-25)
 
 ### Android

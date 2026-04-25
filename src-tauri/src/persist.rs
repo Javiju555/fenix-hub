@@ -1,8 +1,8 @@
 /// Identity persistence.
 ///
-/// Saves the derived group_key (NOT the passphrase) + device metadata to
-/// the system keyring (secure storage) and ~/.config/fenix-hub/identity.json for metadata.
-/// On next startup, identity is restored from the keyring — no need to re-enter passphrase.
+/// Saves the derived group_key (NOT the passphrase) + device metadata.
+/// Keyring is preferred, with identity.json as a local fallback when keyring
+/// storage is unavailable or returns stale data in dev/hot-reload sessions.
 use anyhow::Result;
 use fenix_hub_core::identity::GroupIdentity;
 use keyring::Entry;
@@ -26,6 +26,8 @@ pub enum DeviceType {
 #[derive(Serialize, Deserialize)]
 struct PersistedIdentity {
     device_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_hex: Option<String>,
     /// Device type icon selector. Defaults to Desktop for old identity.json files.
     #[serde(default)]
     device_type: DeviceType,
@@ -34,6 +36,8 @@ struct PersistedIdentity {
 #[derive(Serialize, Deserialize)]
 struct PersistedProfile {
     device_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_hex: Option<String>,
     #[serde(default)]
     device_type: DeviceType,
 }
@@ -105,9 +109,17 @@ fn load_from_active_profile() -> Result<Option<(GroupIdentity, DeviceType)>> {
     let Some(profile) = store.profiles.get(active_name) else {
         return Ok(None);
     };
-    // Load key_hex from keyring
-    let entry = Entry::new("fenix-hub", &format!("profile-{}", active_name))?;
-    let key_hex = entry.get_password()?;
+    let key_hex = Entry::new("fenix-hub", &format!("profile-{}", active_name))
+        .ok()
+        .and_then(|entry| entry.get_password().ok())
+        .or_else(|| profile.key_hex.clone());
+    let Some(key_hex) = key_hex else {
+        tracing::warn!(
+            "Active identity profile '{}' has no usable key",
+            active_name
+        );
+        return Ok(None);
+    };
     let identity = GroupIdentity::from_key_hex(&key_hex, &profile.device_name)?;
     Ok(Some((identity, profile.device_type.clone())))
 }
@@ -126,83 +138,79 @@ fn sync_active_profile(identity: &GroupIdentity, device_type: &DeviceType) -> Re
         return Ok(());
     };
 
-    // Save key_hex to keyring
-    let entry = Entry::new("fenix-hub", &format!("profile-{}", active_name))?;
-    entry.set_password(&identity.key_hex())?;
+    if let Ok(entry) = Entry::new("fenix-hub", &format!("profile-{}", active_name)) {
+        if let Err(error) = entry.set_password(&identity.key_hex()) {
+            tracing::warn!("Could not update active profile keyring entry: {}", error);
+        }
+    }
 
     profile.device_name = identity.device_name.clone();
+    profile.key_hex = Some(identity.key_hex());
     profile.device_type = device_type.clone();
     write_profiles_store(&store)
 }
 
 pub fn save(identity: &GroupIdentity, device_type: &DeviceType) -> Result<()> {
-    // Save key_hex to secure keyring
-    let entry = Entry::new("fenix-hub", "group_key")?;
-    entry.set_password(&identity.key_hex())?;
+    if let Ok(entry) = Entry::new("fenix-hub", "group_key") {
+        if let Err(error) = entry.set_password(&identity.key_hex()) {
+            tracing::warn!("Could not save identity to keyring: {}", error);
+        }
+    }
 
-    // Save metadata to JSON
     let data = PersistedIdentity {
         device_name: identity.device_name.clone(),
+        key_hex: Some(identity.key_hex()),
         device_type: device_type.clone(),
     };
     let path = config_path()?;
     std::fs::write(&path, serde_json::to_string_pretty(&data)?)?;
     sync_active_profile(identity, device_type)?;
-    tracing::info!("Identity saved to keyring and {:?}", path);
+    tracing::info!("Identity saved to {:?}", path);
     Ok(())
 }
 
 /// Returns `(identity, device_type)`.
 pub fn load() -> Result<Option<(GroupIdentity, DeviceType)>> {
-    // Try to load from keyring first
-    if let Ok(entry) = Entry::new("fenix-hub", "group_key") {
-        if let Ok(key_hex) = entry.get_password() {
-            let path = config_path()?;
-            let device_type = if path.exists() {
-                let bytes = std::fs::read(&path)?;
-                let data: PersistedIdentity = serde_json::from_slice(&bytes)?;
-                data.device_type
-            } else {
-                DeviceType::default()
-            };
-            let device_name = if path.exists() {
-                let bytes = std::fs::read(&path)?;
-                let data: PersistedIdentity = serde_json::from_slice(&bytes)?;
-                data.device_name
-            } else {
-                "Unknown".to_string()
-            };
-            let identity = GroupIdentity::from_key_hex(&key_hex, &device_name)?;
-            tracing::info!(
-                "Identity loaded from keyring (device: {}, type: {:?})",
-                identity.device_name,
-                device_type,
-            );
-            return Ok(Some((identity, device_type)));
-        }
+    let path = config_path()?;
+    let metadata = if path.exists() {
+        let bytes = std::fs::read(&path)?;
+        Some(serde_json::from_slice::<PersistedIdentity>(&bytes)?)
+    } else {
+        None
+    };
+
+    let keyring_key = Entry::new("fenix-hub", "group_key")
+        .ok()
+        .and_then(|entry| entry.get_password().ok());
+
+    if let Some(key_hex) =
+        keyring_key.or_else(|| metadata.as_ref().and_then(|data| data.key_hex.clone()))
+    {
+        let device_name = metadata
+            .as_ref()
+            .map(|data| data.device_name.as_str())
+            .unwrap_or("Unknown");
+        let device_type = metadata
+            .as_ref()
+            .map(|data| data.device_type.clone())
+            .unwrap_or_default();
+        let identity = GroupIdentity::from_key_hex(&key_hex, device_name)?;
+        tracing::info!(
+            "Identity loaded (device: {}, type: {:?}, metadata: {:?})",
+            identity.device_name,
+            device_type,
+            path,
+        );
+        return Ok(Some((identity, device_type)));
     }
 
-    // Fallback to old JSON method
-    let path = config_path()?;
-    if !path.exists() {
-        return load_from_active_profile();
+    if metadata.is_some() {
+        tracing::warn!(
+            "Identity metadata exists at {:?}, but no persisted group key was found",
+            path,
+        );
     }
-    let bytes = std::fs::read(&path)?;
-    let data: PersistedIdentity = serde_json::from_slice(&bytes)?;
-    // For old files, key_hex might be in JSON, try to load it
-    if GroupIdentity::from_key_hex("dummy", &data.device_name).is_ok() {
-        // If old format, migrate to keyring
-        tracing::warn!("Migrating old identity to keyring");
-        // But since we don't have key_hex, skip for now
-    }
-    tracing::info!(
-        "Identity loaded from {:?} (device: {}, type: {:?})",
-        path,
-        data.device_name,
-        data.device_type,
-    );
-    // Since key_hex is not in JSON anymore, return None for old files
-    Ok(None)
+    load_from_active_profile()
 }
 
 pub fn delete_identity_file() -> Result<()> {
@@ -218,15 +226,12 @@ pub fn list_profiles() -> Result<Vec<IdentityProfileInfo>> {
     let mut out = Vec::with_capacity(store.profiles.len());
 
     for (name, profile) in &store.profiles {
-        let group_id = if let Ok(entry) = Entry::new("fenix-hub", &format!("profile-{}", name)) {
-            if let Ok(key_hex) = entry.get_password() {
-                group_id_from_key_hex(&key_hex)
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
+        let group_id = Entry::new("fenix-hub", &format!("profile-{}", name))
+            .ok()
+            .and_then(|entry| entry.get_password().ok())
+            .or_else(|| profile.key_hex.clone())
+            .map(|key_hex| group_id_from_key_hex(&key_hex))
+            .unwrap_or_default();
         out.push(IdentityProfileInfo {
             name: name.clone(),
             device_name: profile.device_name.clone(),
@@ -249,16 +254,18 @@ pub fn save_profile(
         anyhow::bail!("Profile name is required");
     }
 
-    // Save key_hex to keyring FIRST — this is what activate_profile/load_from_active_profile reads.
-    // Without this the profile metadata is saved but the key is missing, so activation fails.
-    let entry = Entry::new("fenix-hub", &format!("profile-{}", name))?;
-    entry.set_password(&identity.key_hex())?;
+    if let Ok(entry) = Entry::new("fenix-hub", &format!("profile-{}", name)) {
+        if let Err(error) = entry.set_password(&identity.key_hex()) {
+            tracing::warn!("Could not save profile keyring entry '{}': {}", name, error);
+        }
+    }
 
     let mut store = read_profiles_store()?;
     store.profiles.insert(
         name.to_string(),
         PersistedProfile {
             device_name: identity.device_name.clone(),
+            key_hex: Some(identity.key_hex()),
             device_type: device_type.clone(),
         },
     );
@@ -287,9 +294,11 @@ pub fn activate_profile(profile_name: &str) -> Result<Option<(GroupIdentity, Dev
         return Ok(None);
     };
 
-    // Load key_hex from keyring
-    let entry = Entry::new("fenix-hub", &format!("profile-{}", profile_name))?;
-    let key_hex = entry.get_password()?;
+    let key_hex = Entry::new("fenix-hub", &format!("profile-{}", profile_name))
+        .ok()
+        .and_then(|entry| entry.get_password().ok())
+        .or_else(|| profile.key_hex.clone())
+        .ok_or_else(|| anyhow::anyhow!("Profile key not found"))?;
     let identity = GroupIdentity::from_key_hex(&key_hex, &profile.device_name)?;
     let device_type = profile.device_type.clone();
 
