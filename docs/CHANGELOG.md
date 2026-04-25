@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.4 — passphrase visibility + Android overlay drop (2026-04-26)
+
+### Desktop + Android
+- Added click-to-toggle passphrase visibility controls, hidden by default, on setup and identity change fields.
+
+### Android
+- Fixed FAB plus icon centering.
+- Added drag/drop handling for the overlay WebView: dropped text/URI clip data is imported into the local hub and the overlay refreshes.
+
 ## 0.3.3 — desktop identity fallback (2026-04-25)
 
 ### Desktop

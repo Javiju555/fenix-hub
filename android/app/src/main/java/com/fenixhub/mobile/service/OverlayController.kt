@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.provider.Settings
+import android.view.DragEvent
 import android.view.Gravity
 import android.view.ViewGroup
 import android.webkit.WebResourceRequest
@@ -174,6 +175,18 @@ class OverlayController(
             }
 
             addJavascriptInterface(bridge, BRIDGE_NAME)
+            setOnDragListener { _, event ->
+                when (event.action) {
+                    DragEvent.ACTION_DRAG_STARTED -> true
+                    DragEvent.ACTION_DRAG_ENTERED -> {
+                        if (minimized) expand()
+                        true
+                    }
+                    DragEvent.ACTION_DROP -> bridge.importDroppedClipData(event.clipData)
+                    DragEvent.ACTION_DRAG_ENDED -> true
+                    else -> true
+                }
+            }
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
                     view: WebView?,

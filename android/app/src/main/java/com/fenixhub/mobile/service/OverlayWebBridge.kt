@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -51,6 +52,17 @@ class OverlayWebBridge(
     fun destroy() {
         scope.cancel()
         webView = null
+    }
+
+    fun importDroppedClipData(clipData: ClipData?): Boolean {
+        if (clipData == null || clipData.itemCount == 0) return false
+        scope.launch {
+            runCatching { importClipData(clipData) }
+                .onFailure { error ->
+                    Log.w(TAG, "Overlay drop import failed", error)
+                }
+        }
+        return true
     }
 
     @JavascriptInterface
@@ -147,6 +159,42 @@ class OverlayWebBridge(
         }
         Log.i(TAG, "Pasted clipboard text into overlay hub (${text.length} chars)")
         return localContentJson(item)
+    }
+
+    private suspend fun importClipData(clipData: ClipData) {
+        var imported = 0
+        withContext(Dispatchers.IO) {
+            repeat(clipData.itemCount) { index ->
+                val item = clipData.getItemAt(index)
+                val uri = item.uri ?: item.intent?.data
+                if (uri != null) {
+                    importUri(uri)?.let {
+                        imported += 1
+                    }
+                    return@repeat
+                }
+
+                val text = item.coerceToText(context)?.toString()?.trim().orEmpty()
+                if (text.isNotBlank() && text.length <= MAX_PASTE_TEXT_CHARS) {
+                    localContentFactory.fromText(text).also { localContent ->
+                        repository.addLocalContent(localContent)
+                        imported += 1
+                    }
+                }
+            }
+        }
+
+        if (imported > 0) {
+            Log.i(TAG, "Imported $imported dropped item(s) into overlay hub")
+            dispatch("window.__fenixExternalRefresh && window.__fenixExternalRefresh();")
+        }
+    }
+
+    private fun importUri(uri: Uri): LocalContent? {
+        val item = localContentFactory.fromUri(uri, deferLargeImagePreview = true) ?: return null
+        repository.addLocalContent(item)
+        scheduleDeferredPreviewRefresh(item)
+        return item
     }
 
     private fun publishContent(args: JSONObject) {

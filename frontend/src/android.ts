@@ -681,12 +681,19 @@ function renderSetup() {
         <p>Comparte texto, imagenes y archivos del movil al resto de tus equipos sin cuenta y sin nube.</p>
       </div>
       <div class="a-setup-panel">
-        <input type="password" id="passphrase" placeholder="Frase de acceso de red" autocomplete="off" />
+        <div class="a-password-field">
+          <input type="password" id="passphrase" placeholder="Frase de acceso de red" autocomplete="off" />
+          <button class="a-password-toggle" id="passphrase-toggle" type="button" aria-label="Mostrar passphrase" aria-pressed="false" title="Mostrar passphrase">
+            ${iconEye(18)}
+          </button>
+        </div>
         <input type="text" id="device-name" placeholder="Nombre de este movil" value="${escapeAttribute(identity?.device_name || '')}" />
         <button id="setup-btn">Activar Hub</button>
         <div class="a-setup-note">Usa la misma frase en todos tus dispositivos para entrar en la misma red efimera.</div>
       </div>
     </div>`;
+
+  bindPasswordToggle('passphrase', 'passphrase-toggle');
 
   document.getElementById('setup-btn')!.addEventListener('click', async () => {
     const passphrase = (document.getElementById('passphrase') as HTMLInputElement).value.trim();
@@ -899,7 +906,12 @@ function renderSettingsView(
 
           <label class="a-settings-field">
             <span>Cambiar identidad (nuevo grupo, mantiene cache)</span>
-            <input id="settings-passphrase" type="password" placeholder="Nueva passphrase del grupo" />
+            <div class="a-password-field">
+              <input id="settings-passphrase" type="password" placeholder="Nueva passphrase del grupo" autocomplete="off" />
+              <button class="a-password-toggle" id="settings-passphrase-toggle" type="button" aria-label="Mostrar passphrase" aria-pressed="false" title="Mostrar passphrase">
+                ${iconEye(18)}
+              </button>
+            </div>
           </label>
 
           <div class="a-settings-actions">
@@ -962,6 +974,7 @@ function renderSettingsView(
   document.getElementById('btn-settings-close')!.addEventListener('click', () => {
     void returnToHubView();
   });
+  bindPasswordToggle('settings-passphrase', 'settings-passphrase-toggle');
 
   document.getElementById('btn-copy-gid')?.addEventListener('click', () => {
     if (identity?.group_id) {
@@ -1523,6 +1536,27 @@ function createSheet(innerHtml: string) {
   return backdrop;
 }
 
+function bindPasswordToggle(inputId: string, buttonId: string) {
+  const input = document.getElementById(inputId) as HTMLInputElement | null;
+  const button = document.getElementById(buttonId) as HTMLButtonElement | null;
+  if (!input || !button) return;
+
+  const setVisible = (visible: boolean) => {
+    input.type = visible ? 'text' : 'password';
+    button.setAttribute('aria-pressed', String(visible));
+    button.setAttribute('aria-label', visible ? 'Ocultar passphrase' : 'Mostrar passphrase');
+    button.title = visible ? 'Ocultar passphrase' : 'Mostrar passphrase';
+    button.innerHTML = visible ? iconEyeOff(18) : iconEye(18);
+  };
+
+  setVisible(false);
+  button.addEventListener('click', event => {
+    event.preventDefault();
+    setVisible(input.type === 'password');
+    input.focus();
+  });
+}
+
 window.androidActions = {
   async broadcast(id: string) {
     try {
@@ -1759,7 +1793,23 @@ function iconPlus(size: number) {
   return svg(
     size,
     '0 0 24 24',
-    '<line x1="12" y1="5" x2="12" y2="19" stroke-width="2.5"/><line x1="5" y1="12" x2="19" y2="12" stroke-width="2.5"/>',
+    '<line x1="12" y1="5.5" x2="12" y2="18.5" stroke-width="2.6"/><line x1="5.5" y1="12" x2="18.5" y2="12" stroke-width="2.6"/>',
+  );
+}
+
+function iconEye(size: number) {
+  return svg(
+    size,
+    '0 0 18 18',
+    '<path d="M1.8,9s2.7-4.5 7.2-4.5S16.2,9 16.2,9 13.5,13.5 9,13.5 1.8,9 1.8,9Z" stroke-width="1.6"/><circle cx="9" cy="9" r="2.2" stroke-width="1.6"/>',
+  );
+}
+
+function iconEyeOff(size: number) {
+  return svg(
+    size,
+    '0 0 18 18',
+    '<path d="M2.2,2.2 15.8,15.8" stroke-width="1.7"/><path d="M6.5,4.9A7.4,7.4 0 0 1 9,4.5C13.5,4.5 16.2,9 16.2,9a13.2,13.2 0 0 1-2.5,2.8" stroke-width="1.6"/><path d="M11.1,13.1A7.2,7.2 0 0 1 9,13.5C4.5,13.5 1.8,9 1.8,9a13.2,13.2 0 0 1 2.4-2.7" stroke-width="1.6"/><path d="M7.4,7.4a2.2,2.2 0 0 0 3.2,3.2" stroke-width="1.6"/>',
   );
 }
 
