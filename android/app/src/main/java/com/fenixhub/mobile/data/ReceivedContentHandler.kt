@@ -30,26 +30,49 @@ class ReceivedContentHandler(
     fun createLocalContent(peer: PeerContent, pulledContent: PulledContent): LocalContent {
         return when (peer.announcement.contentType) {
             HubContentType.TEXT -> {
-                val text = pulledContent.bytes.toString(Charsets.UTF_8)
+                val text = pulledContent.file
+                    ?.readText(Charsets.UTF_8)
+                    ?: pulledContent.bytes.toString(Charsets.UTF_8)
+                pulledContent.file?.delete()
                 tempStore.createTextContent(text)
             }
 
             HubContentType.IMAGE -> {
                 val mimeType = pulledContent.mimeType ?: peer.announcement.mimeType ?: previewMimeType(peer.announcement.preview) ?: "image/jpeg"
+                val fileName = pulledContent.fileName ?: peer.announcement.fileName
+                pulledContent.file?.let { file ->
+                    return tempStore.createFileContent(
+                        sourceFile = file,
+                        contentType = HubContentType.IMAGE,
+                        mimeType = mimeType,
+                        fileName = fileName,
+                        deferImagePreview = true,
+                    )
+                }
                 tempStore.createBinaryContent(
                     bytes = pulledContent.bytes,
                     contentType = HubContentType.IMAGE,
                     mimeType = mimeType,
-                    fileName = pulledContent.fileName ?: peer.announcement.fileName,
+                    fileName = fileName,
                 )
             }
 
             HubContentType.FILE -> {
+                val mimeType = pulledContent.mimeType ?: peer.announcement.mimeType ?: "application/octet-stream"
+                val fileName = pulledContent.fileName ?: peer.announcement.fileName
+                pulledContent.file?.let { file ->
+                    return tempStore.createFileContent(
+                        sourceFile = file,
+                        contentType = HubContentType.FILE,
+                        mimeType = mimeType,
+                        fileName = fileName,
+                    )
+                }
                 tempStore.createBinaryContent(
                     bytes = pulledContent.bytes,
                     contentType = HubContentType.FILE,
-                    mimeType = pulledContent.mimeType ?: peer.announcement.mimeType ?: "application/octet-stream",
-                    fileName = pulledContent.fileName ?: peer.announcement.fileName,
+                    mimeType = mimeType,
+                    fileName = fileName,
                 )
             }
         }

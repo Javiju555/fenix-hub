@@ -28,7 +28,7 @@ class AppContainer(application: Application) {
     val contentRepository = ContentRepository(tempClipboardStore)
     val localContentFactory = LocalContentFactory(tempClipboardStore)
     val receivedContentHandler = ReceivedContentHandler(application, tempClipboardStore)
-    val httpClient = FenixHttpClient()
+    val httpClient = FenixHttpClient(application.cacheDir)
     val bleIdentityController = BleIdentityController(application)
     val wifiDirectController = WifiDirectController(application)
     val wifiDirectTransferController = WifiDirectTransferController(application)

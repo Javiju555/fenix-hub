@@ -12,6 +12,7 @@ import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.util.PreviewUtils
 import org.json.JSONObject
 import java.io.File
+import java.io.InputStream
 import java.util.UUID
 
 class TempClipboardStore(private val context: Context) {
@@ -54,15 +55,18 @@ class TempClipboardStore(private val context: Context) {
         val contentType = if (mimeType.startsWith("image/")) HubContentType.IMAGE else HubContentType.FILE
         val contentId = UUID.randomUUID().toString()
         val createdAt = System.currentTimeMillis()
-        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
-        return createBinaryContent(
+        val input = resolver.openInputStream(uri) ?: return null
+        val payloadFile = writePayload(contentId, fileName, input)
+        return createFileContent(
             contentId = contentId,
             createdAt = createdAt,
             contentType = contentType,
-            bytes = bytes,
+            payloadFile = payloadFile,
             mimeType = mimeType,
             fileName = fileName,
-            deferImagePreview = deferLargeImagePreview && contentType == HubContentType.IMAGE && bytes.size >= DEFERRED_IMAGE_PREVIEW_THRESHOLD_BYTES,
+            deferImagePreview = deferLargeImagePreview &&
+                contentType == HubContentType.IMAGE &&
+                payloadFile.length() >= DEFERRED_IMAGE_PREVIEW_THRESHOLD_BYTES,
         )
     }
 
@@ -85,6 +89,31 @@ class TempClipboardStore(private val context: Context) {
     }
 
     fun readBytes(item: LocalContent): ByteArray = File(item.cachePath).readBytes()
+
+    fun createFileContent(
+        sourceFile: File,
+        contentType: HubContentType,
+        mimeType: String,
+        fileName: String? = null,
+        deferImagePreview: Boolean = true,
+    ): LocalContent {
+        val contentId = UUID.randomUUID().toString()
+        val createdAt = System.currentTimeMillis()
+        val resolvedFileName = fileName ?: defaultFileName(contentType, mimeType, contentId)
+        val payloadFile = copyPayload(contentId, resolvedFileName, sourceFile)
+        sourceFile.delete()
+        return createFileContent(
+            contentId = contentId,
+            createdAt = createdAt,
+            contentType = contentType,
+            payloadFile = payloadFile,
+            mimeType = mimeType,
+            fileName = resolvedFileName,
+            deferImagePreview = deferImagePreview &&
+                contentType == HubContentType.IMAGE &&
+                payloadFile.length() >= DEFERRED_IMAGE_PREVIEW_THRESHOLD_BYTES,
+        )
+    }
 
     fun contentUriFor(item: LocalContent): Uri {
         return FileProvider.getUriForFile(
@@ -125,13 +154,42 @@ class TempClipboardStore(private val context: Context) {
         return item
     }
 
+    private fun createFileContent(
+        contentId: String,
+        createdAt: Long,
+        contentType: HubContentType,
+        payloadFile: File,
+        mimeType: String,
+        fileName: String? = null,
+        deferImagePreview: Boolean = false,
+    ): LocalContent {
+        val resolvedFileName = fileName ?: payloadFile.name
+        val preview = when (contentType) {
+            HubContentType.TEXT -> payloadFile.readText(Charsets.UTF_8).take(80)
+            HubContentType.IMAGE -> if (deferImagePreview) resolvedFileName else PreviewUtils.imagePreviewDataUrl(payloadFile, mimeType)
+            HubContentType.FILE -> resolvedFileName
+        }
+        val item = LocalContent(
+            contentId = contentId,
+            preview = preview,
+            contentType = contentType,
+            sizeBytes = payloadFile.length(),
+            createdAt = createdAt,
+            cachePath = payloadFile.absolutePath,
+            mimeType = mimeType,
+            fileName = if (contentType == HubContentType.TEXT) null else resolvedFileName,
+        )
+        writeMeta(item)
+        return item
+    }
+
     fun refreshDeferredImagePreview(item: LocalContent): LocalContent? {
         if (item.contentType != HubContentType.IMAGE || item.preview.startsWith("data:image")) {
             return item
         }
 
-        val bytes = runCatching { File(item.cachePath).readBytes() }.getOrNull() ?: return null
-        val preview = PreviewUtils.imagePreviewDataUrl(bytes, item.mimeType)
+        val payloadFile = File(item.cachePath)
+        val preview = PreviewUtils.imagePreviewDataUrl(payloadFile, item.mimeType)
         if (preview == item.preview) {
             return item
         }
@@ -145,6 +203,28 @@ class TempClipboardStore(private val context: Context) {
         val dir = File(rootDir, contentId).apply { mkdirs() }
         val payload = File(dir, sanitizeFileName(fileName))
         payload.writeBytes(bytes)
+        return payload
+    }
+
+    private fun writePayload(contentId: String, fileName: String, input: InputStream): File {
+        val dir = File(rootDir, contentId).apply { mkdirs() }
+        val payload = File(dir, sanitizeFileName(fileName))
+        input.use { source ->
+            payload.outputStream().buffered(COPY_BUFFER_SIZE).use { output ->
+                source.copyTo(output, COPY_BUFFER_SIZE)
+            }
+        }
+        return payload
+    }
+
+    private fun copyPayload(contentId: String, fileName: String, sourceFile: File): File {
+        val dir = File(rootDir, contentId).apply { mkdirs() }
+        val payload = File(dir, sanitizeFileName(fileName))
+        sourceFile.inputStream().buffered(COPY_BUFFER_SIZE).use { source ->
+            payload.outputStream().buffered(COPY_BUFFER_SIZE).use { output ->
+                source.copyTo(output, COPY_BUFFER_SIZE)
+            }
+        }
         return payload
     }
 
@@ -199,5 +279,6 @@ class TempClipboardStore(private val context: Context) {
 
     private companion object {
         const val DEFERRED_IMAGE_PREVIEW_THRESHOLD_BYTES = 4 * 1024 * 1024
+        const val COPY_BUFFER_SIZE = 256 * 1024
     }
 }

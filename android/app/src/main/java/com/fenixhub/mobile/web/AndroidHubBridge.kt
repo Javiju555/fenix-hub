@@ -803,8 +803,11 @@ class AndroidHubBridge(
 
         withContext(Dispatchers.IO) {
             activity.contentResolver.openOutputStream(targetUri)?.use { output ->
-                output.write(transfer.pulled.bytes)
+                transfer.pulled.file?.inputStream()?.buffered()?.use { input ->
+                    input.copyTo(output, COPY_BUFFER_SIZE)
+                } ?: output.write(transfer.pulled.bytes)
             } ?: error("No se pudo abrir el destino de guardado")
+            transfer.pulled.file?.delete()
         }
 
         return when (transfer.peer.announcement.contentType) {
@@ -1009,5 +1012,6 @@ class AndroidHubBridge(
     private companion object {
         const val TAG = "FenixHubAndroidBridge"
         const val MAX_PASTE_TEXT_CHARS = 8_192
+        const val COPY_BUFFER_SIZE = 256 * 1024
     }
 }

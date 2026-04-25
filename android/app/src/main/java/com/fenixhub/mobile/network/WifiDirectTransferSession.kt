@@ -211,7 +211,7 @@ class WifiDirectTransferSession(
             contentRepository.addLocalContent(received.item)
             _sessionState.value = WifiDirectTransferState.Complete(contentId)
             transferController.transferComplete(contentId)
-            Log.i(TAG, "Receive complete: $contentId (${pulled.bytes.size} bytes)")
+            Log.i(TAG, "Receive complete: $contentId (${pulled.sizeBytes} bytes)")
             onComplete(true, received.message)
         }.onFailure { error ->
             Log.e(TAG, "Pull failed for $contentId from $goIp:$port", error)
