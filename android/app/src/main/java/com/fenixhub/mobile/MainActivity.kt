@@ -92,6 +92,7 @@ class MainActivity : ComponentActivity() {
         bridge.attach(webView)
         setContentView(webView)
 
+        container.settingsStore.consumeStorageRecoveryMessage()?.let(::toast)
         startServiceIfConfigured()
         webView.loadUrl(HUB_URL)
         handleIntent(intent)

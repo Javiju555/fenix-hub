@@ -138,8 +138,13 @@ class NsdController(
             }
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                if (serviceInfo.serviceType != SERVICE_TYPE) return
+                Log.d(
+                    TAG,
+                    "Service found candidate: ${serviceInfo.serviceName} type='${serviceInfo.serviceType}'",
+                )
+                if (!isExpectedServiceType(serviceInfo.serviceType)) return
                 if (registrations.values.any { it.serviceName == serviceInfo.serviceName }) return
+                Log.d(TAG, "Service found: ${serviceInfo.serviceName} type='${serviceInfo.serviceType}'")
                 mainHandler.post { enqueueResolve(serviceInfo) }
             }
 
@@ -207,6 +212,14 @@ class NsdController(
 
     private fun contentIdFromServiceName(serviceName: String): String? {
         return serviceName.removePrefix("fenixhub-").takeIf { it.isNotBlank() }
+    }
+
+    private fun isExpectedServiceType(rawType: String?): Boolean {
+        val type = rawType.orEmpty().trim().trim('.')
+        val expected = SERVICE_TYPE.trim('.')
+        return type == expected ||
+            type.startsWith("$expected.") ||
+            type.endsWith(".$expected")
     }
 
     private data class RegistrationHandle(
