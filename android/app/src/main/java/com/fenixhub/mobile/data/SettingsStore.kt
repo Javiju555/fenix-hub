@@ -1,6 +1,8 @@
 package com.fenixhub.mobile.data
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.fenixhub.mobile.model.AppSettings
@@ -10,22 +12,22 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
+import java.security.KeyStore
 
-class SettingsStore(context: Context) {
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        PREF_NAME,
-        MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+class SettingsStore(private val context: Context) {
+    @Volatile private var storageRecoveryMessage: String? = null
+    @Volatile private var prefs: SharedPreferences = createEncryptedPrefs()
 
-    private val mutableSettings = MutableStateFlow(load())
+    private val mutableSettings = MutableStateFlow(loadSafely())
     val settingsFlow: StateFlow<AppSettings> = mutableSettings.asStateFlow()
 
     fun current(): AppSettings = mutableSettings.value
+
+    fun consumeStorageRecoveryMessage(): String? {
+        val message = storageRecoveryMessage
+        storageRecoveryMessage = null
+        return message
+    }
 
     fun saveIdentity(passphrase: String, deviceName: String, deviceType: String? = null): AppSettings {
         val normalizedPassphrase = passphrase.trim()
@@ -316,6 +318,53 @@ class SettingsStore(context: Context) {
         }
     }
 
+    private fun createEncryptedPrefs(): SharedPreferences {
+        return runCatching { openEncryptedPrefs() }
+            .getOrElse { error ->
+                recoverUnreadablePrefs(error)
+                openEncryptedPrefs()
+            }
+    }
+
+    private fun openEncryptedPrefs(): SharedPreferences {
+        return EncryptedSharedPreferences.create(
+            context,
+            PREF_NAME,
+            MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build(),
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
+
+    private fun loadSafely(): AppSettings {
+        return runCatching { load() }
+            .getOrElse { error ->
+                recoverUnreadablePrefs(error)
+                prefs = createEncryptedPrefs()
+                prefs.edit()
+                    .clear()
+                    .putInt(KEY_KDF_VERSION, CURRENT_KDF_VERSION)
+                    .apply()
+                AppSettings()
+            }
+    }
+
+    private fun recoverUnreadablePrefs(error: Throwable) {
+        Log.w(TAG, "Encrypted settings are unreadable; resetting local identity storage", error)
+        storageRecoveryMessage = "Datos cifrados ilegibles; vuelve a configurar la identidad."
+        context.deleteSharedPreferences(PREF_NAME)
+        runCatching {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            if (keyStore.containsAlias(MasterKey.DEFAULT_MASTER_KEY_ALIAS)) {
+                keyStore.deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+            }
+        }.onFailure { keyStoreError ->
+            Log.w(TAG, "Could not remove Android Keystore master key", keyStoreError)
+        }
+    }
+
     private fun load(): AppSettings {
         val configured = prefs.getBoolean(KEY_CONFIGURED, false)
         val keyVersion = prefs.getInt(KEY_KDF_VERSION, LEGACY_KDF_VERSION)
@@ -408,6 +457,8 @@ class SettingsStore(context: Context) {
     )
 
     private companion object {
+        const val TAG = "FenixHubSettings"
+        const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val PREF_NAME = "fenixhub-secure-prefs"
         const val KEY_CONFIGURED = "configured"
         const val KEY_DEVICE_NAME = "device_name"

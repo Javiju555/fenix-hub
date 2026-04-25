@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 — Android discovery + encrypted prefs recovery (2026-04-25)
+
+### Android
+- Fixed NSD discovery rejecting valid `_fenixhub._tcp` services when Android normalizes `serviceType` with different dot/domain variants.
+- Disabled Android Auto Backup for the app because encrypted prefs cannot be restored reliably without the original Android Keystore key.
+- Added recovery for unreadable encrypted settings: local identity storage is reset cleanly and the app shows a setup-facing toast instead of silently drifting into a bad state.
+
+### Packaging / release
+- Version bumped to `0.3.2` across desktop frontend, Tauri, and Android.
+
 ## 0.3.1 — desktop parity + Android permission flow + release pipeline (2026-04-18)
 
 ### Desktop (Windows + Linux)
