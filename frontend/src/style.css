@@ -144,6 +144,7 @@ body.settings-mode {
 
 .setup-fields { display: flex; gap: 7px; width: 100%; }
 .setup-fields input { flex: 1; }
+.setup-password-field { flex: 1; }
 .setup-error {
   min-height: 14px;
   width: 100%;
@@ -168,6 +169,38 @@ input {
 }
 input:focus { border-color: rgba(94,140,244,0.45); background: rgba(94,140,244,0.04); }
 input::placeholder { color: var(--text-dim); }
+
+.password-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  width: 100%;
+}
+.password-field input {
+  padding-right: 38px;
+}
+.password-toggle {
+  position: absolute;
+  right: 5px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.password-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+  opacity: 1;
+}
+.password-toggle svg {
+  display: block;
+}
 
 button {
   background: var(--accent);

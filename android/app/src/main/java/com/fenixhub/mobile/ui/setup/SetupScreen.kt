@@ -14,20 +14,28 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.NetworkCheck
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.fenixhub.mobile.ui.theme.HubBlue
 import com.fenixhub.mobile.ui.theme.HubNight
@@ -46,6 +54,8 @@ fun SetupScreen(
     onRequestOverlayPermission: () -> Unit,
     onSave: () -> Unit,
 ) {
+    var passphraseVisible by remember { mutableStateOf(false) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -97,7 +107,27 @@ fun SetupScreen(
                         onValueChange = onPassphraseChange,
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text("Passphrase") },
-                        visualTransformation = PasswordVisualTransformation(),
+                        visualTransformation = if (passphraseVisible) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            IconButton(onClick = { passphraseVisible = !passphraseVisible }) {
+                                Icon(
+                                    imageVector = if (passphraseVisible) {
+                                        Icons.Outlined.VisibilityOff
+                                    } else {
+                                        Icons.Outlined.Visibility
+                                    },
+                                    contentDescription = if (passphraseVisible) {
+                                        "Ocultar passphrase"
+                                    } else {
+                                        "Mostrar passphrase"
+                                    },
+                                )
+                            }
+                        },
                         singleLine = true,
                     )
                     Card(
