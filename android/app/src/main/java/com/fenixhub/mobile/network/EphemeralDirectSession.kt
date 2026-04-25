@@ -247,7 +247,7 @@ class EphemeralDirectSession(
                         deviceName = "Sender Directo",
                         preview = "",
                         contentType = com.fenixhub.mobile.model.HubContentType.FILE,
-                        sizeBytes = pulled.bytes.size.toLong(),
+                        sizeBytes = pulled.sizeBytes,
                         sendMode = com.fenixhub.mobile.model.SendMode.Broadcast,
                         createdAt = System.currentTimeMillis(),
                         port = senderPort,
@@ -256,7 +256,7 @@ class EphemeralDirectSession(
                 val received = receivedHandler.handle(peer, pulled)
                 contentRepository.addLocalContent(received.item)
                 _sessionState.value = DirectSessionState.Complete(contentId)
-                Log.i(TAG, "Direct receive complete: $contentId (${pulled.bytes.size} bytes)")
+                Log.i(TAG, "Direct receive complete: $contentId (${pulled.sizeBytes} bytes)")
                 true
             },
             onFailure = { e ->
