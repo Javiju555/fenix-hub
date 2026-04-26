@@ -30,8 +30,10 @@ pub const FNX2_MAGIC: &[u8; 4] = b"FNX2";
 /// FNX2 header size: magic(4) + base_nonce(12) + total_chunks(4) + original_size(8) + compression(1)
 pub const FNX2_HEADER_SIZE: usize = 29;
 
-/// Chunk size for streaming AEAD (64 KB).
-pub const FNX2_CHUNK_SIZE: usize = 64 * 1024;
+/// Chunk size for streaming AEAD (4 MB).
+/// Larger chunks let AES-NI / Android's JCA hardware AES path amortize
+/// per-chunk init/doFinal overhead, restoring ~30 MB/s throughput.
+pub const FNX2_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 pub const FNX2_COMPRESSION_NONE: u8 = 0x00;
 pub const FNX2_COMPRESSION_ZSTD: u8 = 0x01;
