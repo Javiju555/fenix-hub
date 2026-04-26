@@ -174,6 +174,14 @@ class FenixHttpClient(cacheDir: File) {
         const val FNX2_GCM_TAG_BYTES = 16
         const val GCM_TAG_BITS = 128
         const val WRITE_BUFFER_SIZE = 256 * 1024
+        val FNX2_CANDIDATE_CHUNK_SIZES = intArrayOf(
+            FNX2_CHUNK_SIZE,
+            256 * 1024,
+            512 * 1024,
+            1024 * 1024,
+            2 * 1024 * 1024,
+            4 * 1024 * 1024,
+        )
         val FNX2_MAGIC = byteArrayOf('F'.code.toByte(), 'N'.code.toByte(), 'X'.code.toByte(), '2'.code.toByte())
     }
 
@@ -204,7 +212,11 @@ class FenixHttpClient(cacheDir: File) {
             return 0L
         }
 
-        val fullChunkEncryptedLen = FNX2_CHUNK_SIZE + FNX2_GCM_TAG_BYTES
+        val chunkPlainSize = preferredFnx2ChunkSize(totalChunks, originalSize)
+        if (chunkPlainSize != FNX2_CHUNK_SIZE) {
+            Log.w(TAG, "Peer uses FNX2 chunk size ${chunkPlainSize / 1024} KB (declared chunks=$totalChunks)")
+        }
+        val fullChunkEncryptedLen = chunkPlainSize + FNX2_GCM_TAG_BYTES
         val secretKey = SecretKeySpec(encKey, "AES")
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         val chunkNonce = baseNonce.copyOf()
@@ -275,6 +287,22 @@ class FenixHttpClient(cacheDir: File) {
             ?.takeIf { it.isNotBlank() }
             ?: "content.bin"
         return File(downloadDir, "${UUID.randomUUID()}-$safeName")
+    }
+
+    private fun preferredFnx2ChunkSize(totalChunks: Int, originalSize: Long): Int {
+        if (totalChunks <= 1 || originalSize <= 0) {
+            return FNX2_CHUNK_SIZE
+        }
+
+        return FNX2_CANDIDATE_CHUNK_SIZES
+            .firstOrNull { chunkCountForSize(originalSize, it) == totalChunks }
+            ?: FNX2_CHUNK_SIZE
+    }
+
+    private fun chunkCountForSize(originalSize: Long, chunkPlainSize: Int): Int {
+        if (originalSize <= 0) return 0
+        val chunks = (originalSize + chunkPlainSize - 1) / chunkPlainSize
+        return chunks.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     }
 
     private fun readIntBE(bytes: ByteArray, offset: Int): Int {
