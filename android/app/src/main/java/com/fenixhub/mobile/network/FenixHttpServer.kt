@@ -193,7 +193,7 @@ class FenixHttpServer(
 
         val encKey = settings.encKeyBytes()
         val originalSize = file.length()
-        // totalChunks fits in Int for any realistic file (2^31 * 64KB = 128 TB)
+        // totalChunks fits in Int for any realistic file (2^31 * 4MB = 8 PB)
         val totalChunks = if (originalSize == 0L) 0 else
             ((originalSize + FNX2_CHUNK_SIZE - 1) / FNX2_CHUNK_SIZE).toInt()
         val baseNonce = ByteArray(NONCE_SIZE).also(secureRandom::nextBytes)
@@ -202,7 +202,7 @@ class FenixHttpServer(
         Log.d(TAG, "Serving $contentId — ${originalSize / 1024} KB, $totalChunks FNX2 chunks")
         val startMs = System.currentTimeMillis()
 
-        // FNX2 v2: per-chunk AES-GCM (64 KB chunks). Desktop stream-decrypts
+        // FNX2 v2: per-chunk AES-GCM. Desktop stream-decrypts
         // directly to disk — no full-file buffer needed on either side.
         response.headers.append(ENCRYPTED_HEADER, "2")
         respondBytesWriter(contentType = contentType) {
@@ -219,6 +219,7 @@ class FenixHttpServer(
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             val chunkNonce = ByteArray(NONCE_SIZE)
             val buf = ByteArray(FNX2_CHUNK_SIZE)
+            val encryptedBuf = ByteArray(FNX2_CHUNK_SIZE + FNX2_GCM_TAG_BYTES)
 
             file.inputStream().buffered(FNX2_CHUNK_SIZE).use { input ->
                 for (chunkIndex in 0 until totalChunks) {
@@ -243,7 +244,8 @@ class FenixHttpServer(
                     }
 
                     cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, chunkNonce))
-                    writeFully(cipher.doFinal(buf, 0, read))
+                    val encryptedLen = cipher.doFinal(buf, 0, read, encryptedBuf, 0)
+                    writeFully(encryptedBuf, 0, encryptedLen)
                 }
             }
 
@@ -413,7 +415,8 @@ class FenixHttpServer(
         const val NONCE_SIZE = 12
         const val GCM_TAG_BITS = 128
         const val CHUNK_SIZE = 256 * 1024       // 256 KB (ephemeral plaintext streaming)
-        const val FNX2_CHUNK_SIZE = 64 * 1024  // 64 KB — matches desktop FNX2 decoder
+        const val FNX2_CHUNK_SIZE = 4 * 1024 * 1024 // 4 MB — fewer AES-GCM init/doFinal calls for video
+        const val FNX2_GCM_TAG_BYTES = 16
         const val FNX2_COMPRESSION_NONE = 0x00
         const val MAX_REPLAY_CACHE_ENTRIES = 8_192
         val secureRandom = SecureRandom()
