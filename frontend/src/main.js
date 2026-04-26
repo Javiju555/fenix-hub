@@ -363,7 +363,12 @@ function renderSettings(profiles, transport, feedback) {
           <div class="settings-grid one-col">
             <label class="settings-field">
               <span class="settings-label">Cambiar identidad (nuevo grupo, mantiene caché)</span>
-              <input id="settings-passphrase" type="password" placeholder="Nueva passphrase del grupo" />
+              <div class="password-field">
+                <input id="settings-passphrase" type="password" placeholder="Nueva passphrase del grupo" autocomplete="off" />
+                <button class="password-toggle" id="settings-passphrase-toggle" type="button" aria-label="Mostrar passphrase" aria-pressed="false" title="Mostrar passphrase">
+                  ${iconEye(15)}
+                </button>
+              </div>
             </label>
           </div>
           <div class="settings-actions">
@@ -447,6 +452,7 @@ function renderSettings(profiles, transport, feedback) {
     document.getElementById('btn-settings-close').addEventListener('click', async () => {
         await invoke('close_settings');
     });
+    bindPasswordToggle('settings-passphrase', 'settings-passphrase-toggle');
     document.getElementById('btn-copy-gid')?.addEventListener('click', () => {
         if (identity?.group_id)
             navigator.clipboard.writeText(identity.group_id);
@@ -656,7 +662,12 @@ function renderSetup() {
       </div>
       <div class="setup-fields">
         <input type="text"     id="device-name" placeholder="Nombre de este dispositivo" style="max-width:190px" autocomplete="off" />
-        <input type="password" id="passphrase"   placeholder="Nombre del grupo (igual en todos)" autocomplete="off" />
+        <div class="password-field setup-password-field">
+          <input type="password" id="passphrase" placeholder="Nombre del grupo (igual en todos)" autocomplete="off" />
+          <button class="password-toggle" id="passphrase-toggle" type="button" aria-label="Mostrar passphrase" aria-pressed="false" title="Mostrar passphrase">
+            ${iconEye(15)}
+          </button>
+        </div>
         <button id="setup-btn">${iconCheckmark(11)} Activar</button>
       </div>
       <p class="setup-error" id="setup-error" aria-live="polite"></p>
@@ -668,6 +679,7 @@ function renderSetup() {
             document.querySelectorAll('.device-type-btn').forEach(b => b.classList.toggle('active', b.dataset.dtype === selectedDeviceType));
         });
     });
+    bindPasswordToggle('passphrase', 'passphrase-toggle');
     const submit = async () => {
         const passphrase = document.getElementById('passphrase').value.trim();
         const deviceName = document.getElementById('device-name').value.trim();
@@ -698,6 +710,25 @@ function renderSetup() {
             submit();
             document.removeEventListener('keydown', h);
         }
+    });
+}
+function bindPasswordToggle(inputId, buttonId) {
+    const input = document.getElementById(inputId);
+    const button = document.getElementById(buttonId);
+    if (!input || !button)
+        return;
+    const setVisible = (visible) => {
+        input.type = visible ? 'text' : 'password';
+        button.setAttribute('aria-pressed', String(visible));
+        button.setAttribute('aria-label', visible ? 'Ocultar passphrase' : 'Mostrar passphrase');
+        button.title = visible ? 'Ocultar passphrase' : 'Mostrar passphrase';
+        button.innerHTML = visible ? iconEyeOff(15) : iconEye(15);
+    };
+    setVisible(false);
+    button.addEventListener('click', event => {
+        event.preventDefault();
+        setVisible(input.type === 'password');
+        input.focus();
     });
 }
 // ── Hub ───────────────────────────────────────────────────────────────────────
@@ -1559,6 +1590,12 @@ function iconChevronDown(s) {
 }
 function iconLock(s) {
     return svg(s, '0 0 14 14', '<rect x="2" y="6" width="10" height="7" rx="1.5" stroke-width="1.6"/><path d="M4,6 V4 a4,4 0 0 1 6,0 V6" stroke-width="1.6" fill="none"/>');
+}
+function iconEye(s) {
+    return svg(s, '0 0 18 18', '<path d="M1.8,9s2.7-4.5 7.2-4.5S16.2,9 16.2,9 13.5,13.5 9,13.5 1.8,9 1.8,9Z" stroke-width="1.6"/><circle cx="9" cy="9" r="2.2" stroke-width="1.6"/>');
+}
+function iconEyeOff(s) {
+    return svg(s, '0 0 18 18', '<path d="M2.2,2.2 15.8,15.8" stroke-width="1.7"/><path d="M6.5,4.9A7.4,7.4 0 0 1 9,4.5C13.5,4.5 16.2,9 16.2,9a13.2,13.2 0 0 1-2.5,2.8" stroke-width="1.6"/><path d="M11.1,13.1A7.2,7.2 0 0 1 9,13.5C4.5,13.5 1.8,9 1.8,9a13.2,13.2 0 0 1 2.4-2.7" stroke-width="1.6"/><path d="M7.4,7.4a2.2,2.2 0 0 0 3.2,3.2" stroke-width="1.6"/>');
 }
 function iconInboxLarge() {
     return svg(36, '0 0 24 24', '<rect x="2" y="2" width="20" height="20" rx="3" stroke-width="1.2"/><polyline points="2,15 7,15 8.5,19 15.5,19 17,15 22,15" stroke-width="1.2"/>');
