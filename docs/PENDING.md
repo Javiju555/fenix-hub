@@ -71,3 +71,28 @@ implementarlo.
 ### Preparacion release OSS
 - [ ] CI minima: build desktop + tests Rust + tests Android unitarios en cada PR.
 - [ ] Politica de versionado y changelog de release estable.
+
+## Batch de tareas pendientes (Próximas iteraciones)
+
+### Transporte y Seguridad Cercana (Modo Público / WiFi Direct)
+- [ ] **Generación de QR para vinculación rápida**:
+    - Implementar generador de códigos QR para facilitar la conexión entre dispositivos ajenos al grupo.
+    - Investigar alternativas estéticas al QR clásico de "cuadraditos gigantes" (diseños más compactos/modernos).
+    - El QR debe contener la información necesaria para el handoff cifrado (comunicación similar a BLE/WiFi-Direct).
+- [ ] **Salt aleatorio en modo no-local**:
+    - Implementar el uso de salts aleatorios específicamente para transferencias fuera del grupo de confianza local.
+- [ ] **Group ID dinámico y enriquecido**:
+    - Evolucionar la generación del `group_id` para que no sea solo aleatorio, sino que use parámetros de los archivos a transferir (ej: número de archivos y tamaño de cada uno) como parte de la entropía/semilla.
+
+### Gestión de Contenido y Compresión
+- [ ] **Soporte para carpetas completas**:
+    - Verificar la implementación para compartir directorios enteros.
+    - Flujo automático: empaquetado en `tar.zstd` transparente para el transporte.
+- [ ] **Compresión inteligente de archivos grandes**:
+    - Los archivos grandes marcados como "válidos para compresión" deben comprimirse en `tar.zstd` mientras residen en el hub.
+    - El "anuncio" mDNS debe mantener los metadatos del archivo original.
+    - El frontend debe detectar que el transporte es comprimido para mostrar el tipo de archivo original (ej: no mostrar un `.mp4` como un `.tar.zstd` genérico durante la descarga).
+
+### Optimización y Rendimiento
+- [ ] **Re-evaluación de Argon2**:
+    - Realizar nuevas pruebas de rendimiento con configuraciones de memoria de 64KiB y 256KiB para encontrar el balance óptimo.
