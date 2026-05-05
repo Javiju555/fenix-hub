@@ -1,0 +1,77 @@
+{
+    "app_id": "fenixhub",
+    "app_name": "FenixHub",
+    "display_name": "FenixHub",
+    "publisher": "Fenix Motion Systems",
+    "version": "0.3.5",
+    "mode": "offline",
+    "ui_language": "es",
+    "attract_texts": [
+        "Portapapeles P2P efímero",
+        "Cifrado extremo a extremo",
+        "Sin nube. Sin cuentas. Solo tu red."
+    ],
+    "eula_file": "locales\\eula_{lang}.txt",
+    "install_path_default": "%LOCALAPPDATA%\\Programs\\FenixHub",
+    "default_install_scope": "user",
+    "main_executable": "FenixHub.exe",
+    "launch_after_install": "FenixHub.exe",
+    "program_group_name": "Fenix Motion Systems",
+    "pages": [
+        { "id": "welcome" },
+        { "id": "eula" },
+        { "id": "options" },
+        { "id": "progress" },
+        { "id": "complete" }
+    ],
+    "components": [
+        {
+            "id": "fenixhub_core",
+            "name": "FenixHub",
+            "description": "Aplicación principal y archivos necesarios.",
+            "required": true,
+            "size": 0,
+            "source": {
+                "type": "directory",
+                "path": "app"
+            }
+        }
+    ],
+    "shortcuts": [
+        {
+            "name": "FenixHub",
+            "target": "FenixHub.exe",
+            "location": "start_menu",
+            "description": "Portapapeles P2P efímero — Fenix Motion Systems"
+        }
+    ],
+    "autostart": [
+        {
+            "name": "FenixHub",
+            "target": "FenixHub.exe",
+            "args": ["--background"],
+            "scope": "user"
+        }
+    ],
+    "uninstall": {
+        "stop_processes": ["FenixHub.exe"],
+        "data_paths": ["%APPDATA%\\dev.fenix.hub"],
+        "remove_data_on_uninstall": false
+    },
+    "theme": {
+        "brand_hsl": [228, 88, 58],
+        "brand_hsl_secondary": [198, 92, 64],
+        "brand_hsl_tertiary": [260, 80, 65],
+        "default_mode": "dark",
+        "ambient_effects": {
+            "enabled": true,
+            "animated": true,
+            "effect_count": 5,
+            "color_count": 2,
+            "colors": ["#1a45ff", "#55d7ff"],
+            "animation_speed": 0.7,
+            "style": "orbs",
+            "intensity": "subtle"
+        }
+    }
+}
