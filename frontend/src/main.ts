@@ -1010,8 +1010,14 @@ function renderHub() {
     const cd = e.clipboardData;
     if (!cd) return;
 
+    // Files from file explorer (Ctrl+C on one or more files)
+    if (cd.files.length > 0) {
+      await commitDroppedItems(Array.from(cd.files).map(addBrowserFileToHub));
+      return;
+    }
+
     // Image from clipboard (screenshot, copied image)
-    const imgItem = Array.from(cd.items).find(i => i.type.startsWith('image/'));
+    const imgItem = Array.from(cd.items).find(i => i.kind === 'file' && i.type.startsWith('image/'));
     if (imgItem) {
       const blob = imgItem.getAsFile();
       if (!blob) return;
