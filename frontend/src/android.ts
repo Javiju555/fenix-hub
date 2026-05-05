@@ -400,6 +400,11 @@ async function invokeMock<T>(cmd: string, args?: unknown): Promise<T> {
       mockPublished.delete(contentId);
       return undefined as T;
     }
+    case 'publish_all': {
+      const ids = (a as unknown as { content_ids: string[] })?.content_ids ?? [];
+      ids.forEach((id: string) => mockPublished.add(id));
+      return undefined as T;
+    }
     case 'stop_server':
       mockPublished.clear();
       return undefined as T;

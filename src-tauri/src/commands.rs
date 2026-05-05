@@ -768,6 +768,18 @@ pub async fn remove_content(id: String, state: State<'_, HubState>) -> Result<()
     Ok(())
 }
 
+/// Stop announcing a single content item via mDNS without removing the content itself.
+#[tauri::command]
+pub async fn unpublish_content(id: String, state: State<'_, HubState>) -> Result<(), String> {
+    let rec = state.active_announcements.write().await.remove(&id);
+    if let Some(rec) = rec {
+        unannounce_content(&state.mdns, &rec.instance_name)
+            .map_err(|e| tracing::warn!("Failed to unannounce {}: {}", id, e))
+            .ok();
+    }
+    Ok(())
+}
+
 // ── Publishing ────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -864,6 +876,107 @@ pub async fn publish_content(
             local_ip: std::net::IpAddr::V4(local_ip),
         });
     tracing::info!("Published {} on port {} via mDNS", args.content_id, port);
+    Ok(())
+}
+
+/// Publish multiple content items in one call — server guard is started only once
+/// for the whole batch instead of once per item.
+#[tauri::command]
+pub async fn publish_all(
+    content_ids: Vec<String>,
+    state: State<'_, HubState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    if content_ids.is_empty() {
+        return Ok(());
+    }
+
+    let identity = state
+        .identity
+        .read()
+        .await
+        .clone()
+        .ok_or("Identity not configured")?;
+    let content_store: ContentStore = state.local_content.clone();
+
+    // Start content server once for the whole batch
+    let port = {
+        let existing = state.server_port.read().await;
+        if let Some(p) = *existing {
+            p
+        } else {
+            drop(existing);
+            let (port, shutdown_tx) = start_content_server(identity.clone(), content_store)
+                .await
+                .map_err(|e| e.to_string())?;
+            *state.server_shutdown.write().await = Some(shutdown_tx);
+            *state.server_port.write().await = Some(port);
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                let status = desktop_firewall_status(port);
+                tracing::info!(
+                    "Firewall status: active={} rule_present={} type={}",
+                    status.active,
+                    status.rule_present,
+                    status.firewall_type,
+                );
+                if status.active && !status.rule_present {
+                    let _ = app.emit("firewall-blocked", &status);
+                }
+            }
+            port
+        }
+    };
+
+    // Start server guard ONCE for the entire batch
+    start_server_guard(&state).await;
+
+    let local_ip = local_ipv4().ok_or("Cannot determine local IP")?;
+    let content = state.local_content.read().await;
+
+    for content_id in content_ids {
+        let item = match content.get(&content_id) {
+            Some(item) => item,
+            None => {
+                tracing::warn!("publish_all: content {} not found, skipping", content_id);
+                continue;
+            }
+        };
+
+        let announcement = compact_announcement_for_mdns(Announcement {
+            protocol_version: fenix_hub_core::protocol::PROTOCOL_VERSION,
+            group_id: identity.group_id(),
+            content_id: item.id.clone(),
+            device_name: identity.device_name.clone(),
+            preview: preview_for_announcement(item),
+            content_type: item.content_type.clone(),
+            size_bytes: item.size_bytes,
+            file_name: item.file_name.clone(),
+            mime_type: item.mime_type.clone(),
+            send_mode: fenix_hub_core::protocol::SendMode::Broadcast {},
+            created_at: item.created_at,
+            port,
+        });
+
+        let instance_name = match announce_content(&state.mdns, &announcement, local_ip) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("publish_all: failed to announce {}: {}", content_id, e);
+                continue;
+            }
+        };
+
+        state
+            .active_announcements
+            .write()
+            .await
+            .insert(content_id.clone(), crate::state::AnnouncementRecord {
+                instance_name,
+                announcement,
+                local_ip: std::net::IpAddr::V4(local_ip),
+            });
+        tracing::info!("Published {} on port {} via mDNS", content_id, port);
+    }
     Ok(())
 }
 
