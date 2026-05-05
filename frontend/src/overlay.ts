@@ -149,6 +149,7 @@ export async function initOverlay() {
   };
   window.__fenixOverlaySetMinimized = (minimized: boolean) => {
     overlayMinimized = minimized;
+    document.body.classList.toggle('overlay-mode', !minimized);
     render();
   };
   await loadState();
