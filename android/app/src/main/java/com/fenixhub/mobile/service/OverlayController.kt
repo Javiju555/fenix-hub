@@ -230,6 +230,7 @@ class OverlayController(
             gravity = Gravity.END or Gravity.TOP
             x = dp(PANEL_MARGIN_DP)
             y = dp(PANEL_MARGIN_DP)
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
     }
 
