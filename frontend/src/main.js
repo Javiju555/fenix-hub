@@ -782,12 +782,12 @@ function renderHub() {
     });
     // Share all
     document.getElementById('btn-share-all').addEventListener('click', async () => {
-        for (const item of localContent) {
-            if (!publishedIds.has(item.id)) {
-                await invoke('publish_content', { args: { content_id: item.id, target_device: null } });
-                publishedIds.add(item.id);
-            }
-        }
+        const unpublished = localContent.filter(i => !publishedIds.has(i.id));
+        if (unpublished.length === 0)
+            return;
+        const ids = unpublished.map(i => i.id);
+        await invoke('publish_all', { content_ids: ids });
+        ids.forEach(id => publishedIds.add(id));
         renderLocalContent();
     });
     // Settings
@@ -1117,8 +1117,8 @@ function renderLocalContent() {
             const el = btn;
             const id = el.dataset.id;
             if (el.dataset.action === 'stop') {
-                await invoke('stop_server');
-                publishedIds.clear();
+                await invoke('unpublish_content', { id });
+                publishedIds.delete(id);
             }
             else if (el.dataset.action === 'broadcast') {
                 await invoke('publish_content', { args: { content_id: id, target_device: null } });

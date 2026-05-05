@@ -266,6 +266,11 @@ async function invokeMock(cmd, args) {
             mockPublished.delete(contentId);
             return undefined;
         }
+        case 'publish_all': {
+            const ids = a?.content_ids ?? [];
+            ids.forEach((id) => mockPublished.add(id));
+            return undefined;
+        }
         case 'stop_server':
             mockPublished.clear();
             return undefined;

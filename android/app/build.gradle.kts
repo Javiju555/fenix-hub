@@ -21,8 +21,8 @@ android {
         applicationId = "com.fenixhub.mobile"
         minSdk = 31
         targetSdk = 34
-        versionCode = 10
-        versionName = "0.3.4"
+        versionCode = 11
+        versionName = "0.3.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
