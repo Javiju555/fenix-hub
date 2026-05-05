@@ -206,6 +206,8 @@ pub fn run() {
             commands::add_binary_content,
             commands::remove_content,
             commands::publish_content,
+            commands::publish_all,
+            commands::unpublish_content,
             commands::stop_server,
             commands::pull_peer_content,
             commands::copy_peer_content,
