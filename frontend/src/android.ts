@@ -1264,14 +1264,14 @@ function renderPeerContent(area: HTMLElement) {
 }
 
 function renderMediaPreview(item: ContentItem) {
-  if (item.content_type === 'image' && item.preview.startsWith('data:image')) {
+  if (item.content_type === 'image' && item.preview?.startsWith('data:image')) {
     return `<div class="a-media a-media-image a-media-image-local"><img class="a-card-img a-card-img-local" src="${item.preview}" alt="" /></div>`;
   }
   return renderMediaShell(item.content_type, item.file_name || item.preview);
 }
 
 function renderPeerMediaPreview(item: PeerAnnouncement) {
-  if (item.content_type === 'image' && item.preview.startsWith('data:image')) {
+  if (item.content_type === 'image' && item.preview?.startsWith('data:image')) {
     return `<div class="a-media a-media-image a-media-image-peer"><img class="a-card-img a-card-img-peer" src="${item.preview}" alt="" /></div>`;
   }
   return renderMediaShell(item.content_type, item.file_name || item.preview);
@@ -1701,8 +1701,8 @@ function errorMessage(error: unknown) {
   return 'Operación no completada';
 }
 
-function escapeHtml(value: string) {
-  return value
+function escapeHtml(value: string | null | undefined) {
+  return (value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
@@ -1713,6 +1713,7 @@ function escapeAttribute(value: string) {
 }
 
 function humanSize(bytes: number) {
+  if (!bytes || isNaN(bytes)) return '—';
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1_048_576) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1_048_576).toFixed(1)} MB`;
@@ -1756,8 +1757,8 @@ function saveAsPeerActionLabel(type: ContentItem['content_type']) {
   return 'Guardar como...';
 }
 
-function compactLabel(value: string) {
-  const sanitized = value.trim();
+function compactLabel(value: string | null | undefined) {
+  const sanitized = (value ?? '').trim();
   if (sanitized.length <= 34) return sanitized;
   return `${sanitized.slice(0, 31)}...`;
 }

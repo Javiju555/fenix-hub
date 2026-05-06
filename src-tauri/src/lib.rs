@@ -208,6 +208,7 @@ pub fn run() {
             commands::publish_content,
             commands::publish_all,
             commands::unpublish_content,
+            commands::unpublish_all,
             commands::stop_server,
             commands::pull_peer_content,
             commands::copy_peer_content,

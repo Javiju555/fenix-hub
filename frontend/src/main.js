@@ -582,6 +582,7 @@ async function loadContent() {
         invoke('get_local_content'),
         invoke('get_peers'),
     ]);
+    publishedIds = new Set(localContent.filter(i => i.is_published).map(i => i.id));
     onlineDevices = [...new Set(peerContent.map(p => p.device_name))];
 }
 // ── Tauri events ──────────────────────────────────────────────────────────────
@@ -782,13 +783,25 @@ function renderHub() {
     });
     // Share all
     document.getElementById('btn-share-all').addEventListener('click', async () => {
-        const unpublished = localContent.filter(i => !publishedIds.has(i.id));
-        if (unpublished.length === 0)
-            return;
-        const ids = unpublished.map(i => i.id);
-        await invoke('publish_all', { content_ids: ids });
-        ids.forEach(id => publishedIds.add(id));
-        renderLocalContent();
+        try {
+            const allPublished = localContent.length > 0 && localContent.every(i => publishedIds.has(i.id));
+            if (allPublished) {
+                await invoke('unpublish_all');
+                publishedIds.clear();
+                renderLocalContent();
+            }
+            else {
+                const ids = localContent.filter(i => !publishedIds.has(i.id)).map(i => i.id);
+                if (ids.length === 0)
+                    return;
+                await invoke('publish_all', { contentIds: ids });
+                ids.forEach(id => publishedIds.add(id));
+                renderLocalContent();
+            }
+        }
+        catch (e) {
+            showToast(`Error: ${e instanceof Error ? e.message : e}`);
+        }
     });
     // Settings
     document.getElementById('btn-settings').addEventListener('click', async () => {
@@ -893,7 +906,13 @@ function renderHub() {
                 // HTML5 drop handler above covers the remaining cases.
             }
             try {
+                await listen('fenix://drag-enter', () => hub.classList.add('drag-over'));
+                await listen('fenix://drag-leave', () => hub.classList.remove('drag-over'));
+            }
+            catch { /* ignore */ }
+            try {
                 await listen('fenix://drag-received', async ({ payload }) => {
+                    hub.classList.remove('drag-over');
                     const paths = (payload?.paths ?? []).filter((p) => typeof p === 'string' && p.length > 0);
                     if (paths.length > 0) {
                         // If both WebView2 and native IDropTarget paths arrive, keep one insert.

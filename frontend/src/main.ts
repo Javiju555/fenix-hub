@@ -234,7 +234,7 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface IdentityInfo   { device_name: string; group_id: string; configured: boolean; device_type: string; }
-interface ContentItem    { id: string; content_type: 'text'|'image'|'file'; preview: string; size_bytes: number; created_at: number; file_name?: string | null; mime_type?: string | null; transfer_path?: string | null; data_text?: string | null; }
+interface ContentItem    { id: string; content_type: 'text'|'image'|'file'; preview: string; size_bytes: number; created_at: number; file_name?: string | null; mime_type?: string | null; transfer_path?: string | null; data_text?: string | null; is_published?: boolean; }
 interface PeerAnnouncement { group_id: string; content_id: string; device_name: string; preview: string; content_type: 'text'|'image'|'file'; size_bytes: number; send_mode: { Broadcast: null }|{ Direct: { target_device: string } }; created_at: number; port: number; file_name?: string | null; mime_type?: string | null; _localSrc?: string; }
 interface PeerContentPayload { announcement: PeerAnnouncement; peer_ip: string; }
 interface DragPayload { text?: string | null; uri_list?: string | null; }
@@ -652,6 +652,7 @@ async function loadContent() {
     invoke<ContentItem[]>('get_local_content'),
     invoke<PeerAnnouncement[]>('get_peers'),
   ]);
+  publishedIds = new Set(localContent.filter(i => i.is_published).map(i => i.id));
   onlineDevices = [...new Set(peerContent.map(p => p.device_name))];
 }
 
@@ -852,12 +853,22 @@ function renderHub() {
 
   // Share all
   document.getElementById('btn-share-all')!.addEventListener('click', async () => {
-    const unpublished = localContent.filter(i => !publishedIds.has(i.id));
-    if (unpublished.length === 0) return;
-    const ids = unpublished.map(i => i.id);
-    await invoke('publish_all', { content_ids: ids });
-    ids.forEach(id => publishedIds.add(id));
-    renderLocalContent();
+    try {
+      const allPublished = localContent.length > 0 && localContent.every(i => publishedIds.has(i.id));
+      if (allPublished) {
+        await invoke('unpublish_all');
+        publishedIds.clear();
+        renderLocalContent();
+      } else {
+        const ids = localContent.filter(i => !publishedIds.has(i.id)).map(i => i.id);
+        if (ids.length === 0) return;
+        await invoke('publish_all', { contentIds: ids });
+        ids.forEach(id => publishedIds.add(id));
+        renderLocalContent();
+      }
+    } catch (e) {
+      showToast(`Error: ${e instanceof Error ? e.message : e}`);
+    }
   });
 
   // Settings
@@ -964,7 +975,13 @@ function renderHub() {
       }
 
       try {
+        await listen('fenix://drag-enter', () => hub.classList.add('drag-over'));
+        await listen('fenix://drag-leave', () => hub.classList.remove('drag-over'));
+      } catch { /* ignore */ }
+
+      try {
         await listen<NativeDragReceivedPayload>('fenix://drag-received', async ({ payload }) => {
+          hub.classList.remove('drag-over');
           const paths = (payload?.paths ?? []).filter(
             (p): p is string => typeof p === 'string' && p.length > 0,
           );
