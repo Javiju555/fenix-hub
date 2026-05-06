@@ -6,9 +6,11 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.os.Build
 import android.provider.Settings
 import android.view.DragEvent
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -17,6 +19,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.view.WindowManager
 import androidx.webkit.WebViewAssetLoader
+import kotlin.math.abs
 import com.fenixhub.mobile.MainActivity
 import com.fenixhub.mobile.data.ContentRepository
 import com.fenixhub.mobile.data.ReceivedContentHandler
@@ -50,6 +53,14 @@ class OverlayController(
     private var webView: WebView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
     private var minimized = false
+    private var snapSide: String = "right"
+
+    // Native drag state
+    private var dragStartRawX = 0f
+    private var dragStartRawY = 0f
+    private var dragStartParamX = 0
+    private var dragStartParamY = 0
+    private var isDragging = false
 
     fun show(onDismissed: (() -> Unit)? = null) {
         if (!Settings.canDrawOverlays(context)) return
@@ -76,6 +87,7 @@ class OverlayController(
                 onDismissed?.invoke()
                 dismiss()
             },
+            onSnapOverlay = ::snapOverlay,
         )
         bridge = currentBridge
         val view = createWebView(currentBridge)
@@ -114,7 +126,18 @@ class OverlayController(
         layoutParams = params
         windowManager.updateViewLayout(current, params)
         minimized = true
+        installDragListener(current)
         setOverlayMinimized(true)
+    }
+
+    fun snapOverlay(side: String) {
+        val current = webView ?: return
+        if (!minimized) return
+        if (current.parent == null) return
+        snapSide = side
+        snapToSide(snapSide)
+        val script = "window.__fenixOverlaySetSnapSide && window.__fenixOverlaySetSnapSide('$side');"
+        current.post { current.evaluateJavascript(script, null) }
     }
 
     fun expand() {
@@ -122,11 +145,82 @@ class OverlayController(
         if (!minimized) return
         if (current.parent == null) return
 
+        current.setOnTouchListener(null)
         val params = baseLayoutParams()
         layoutParams = params
         windowManager.updateViewLayout(current, params)
         minimized = false
         setOverlayMinimized(false)
+    }
+
+    private fun installDragListener(view: WebView) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val size = dp(MINIMIZED_SIZE_DP)
+            view.systemGestureExclusionRects = listOf(Rect(0, 0, size, size))
+        }
+        view.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    dragStartRawX = event.rawX
+                    dragStartRawY = event.rawY
+                    dragStartParamX = layoutParams?.x ?: 0
+                    dragStartParamY = layoutParams?.y ?: 0
+                    isDragging = false
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.rawX - dragStartRawX).toInt()
+                    val dy = (event.rawY - dragStartRawY).toInt()
+                    if (!isDragging && (abs(dx) > 8 || abs(dy) > 8)) isDragging = true
+                    if (isDragging) {
+                        moveBubbleTo(dragStartParamX + dx, dragStartParamY + dy)
+                        true
+                    } else false
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (isDragging) {
+                        isDragging = false
+                        snapToNearestEdge()
+                        true
+                    } else false
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun moveBubbleTo(x: Int, y: Int) {
+        val current = webView ?: return
+        if (current.parent == null) return
+        val params = layoutParams ?: return
+        val bounds = currentBounds()
+        val size = dp(MINIMIZED_SIZE_DP)
+        params.x = x.coerceIn(0, bounds.width() - size)
+        params.y = y.coerceIn(0, bounds.height() - size)
+        runCatching { windowManager.updateViewLayout(current, params) }
+    }
+
+    private fun snapToNearestEdge() {
+        val bounds = currentBounds()
+        val size = dp(MINIMIZED_SIZE_DP)
+        val margin = dp(MINIMIZED_MARGIN_DP)
+        val currentX = layoutParams?.x ?: 0
+        val currentY = layoutParams?.y ?: 0
+        val newSide = if (currentX + size / 2 < bounds.width() / 2) "left" else "right"
+        snapSide = newSide
+        val snapX = if (newSide == "left") margin else bounds.width() - size - margin
+        moveBubbleTo(snapX, currentY)
+        val script = "window.__fenixOverlaySetSnapSide && window.__fenixOverlaySetSnapSide('$newSide');"
+        webView?.post { webView?.evaluateJavascript(script, null) }
+    }
+
+    private fun snapToSide(side: String) {
+        val bounds = currentBounds()
+        val size = dp(MINIMIZED_SIZE_DP)
+        val margin = dp(MINIMIZED_MARGIN_DP)
+        val currentY = layoutParams?.y ?: margin
+        val snapX = if (side == "left") margin else bounds.width() - size - margin
+        moveBubbleTo(snapX, currentY)
     }
 
     fun dismiss() {
@@ -198,6 +292,10 @@ class OverlayController(
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     setOverlayMinimized(minimized)
+                    if (minimized) {
+                        val script = "window.__fenixOverlaySetSnapSide && window.__fenixOverlaySetSnapSide('$snapSide');"
+                        view?.post { view.evaluateJavascript(script, null) }
+                    }
                 }
             }
         }
@@ -224,28 +322,33 @@ class OverlayController(
             height,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.END or Gravity.TOP
             x = dp(PANEL_MARGIN_DP)
             y = dp(PANEL_MARGIN_DP)
-            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
     }
 
     private fun minimizedLayoutParams(): WindowManager.LayoutParams {
+        val bounds = currentBounds()
+        val size = dp(MINIMIZED_SIZE_DP)
+        val margin = dp(MINIMIZED_MARGIN_DP)
+        val snapX = if (snapSide == "left") margin else bounds.width() - size - margin
         return WindowManager.LayoutParams(
-            dp(MINIMIZED_SIZE_DP),
-            dp(MINIMIZED_SIZE_DP),
+            size,
+            size,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.END or Gravity.TOP
-            x = dp(MINIMIZED_MARGIN_DP)
-            y = dp(MINIMIZED_MARGIN_DP)
+            gravity = Gravity.TOP or Gravity.LEFT
+            x = snapX
+            y = margin
         }
     }
 
@@ -270,13 +373,13 @@ class OverlayController(
         private const val BRIDGE_NAME = "FenixHubBridge"
         private const val OVERLAY_URL = "https://appassets.androidplatform.net/assets/overlay.html"
 
-        private const val PANEL_WIDTH_DP = 360
-        private const val PANEL_HEIGHT_DP = 540
-        private const val PANEL_MIN_WIDTH_DP = 250
+        private const val PANEL_WIDTH_DP = 340
+        private const val PANEL_HEIGHT_DP = 660
+        private const val PANEL_MIN_WIDTH_DP = 160
         private const val PANEL_MIN_HEIGHT_DP = 330
         private const val PANEL_MARGIN_DP = 12
-        private const val PANEL_WIDTH_RATIO_PORTRAIT = 0.60f
-        private const val PANEL_HEIGHT_RATIO_PORTRAIT = 0.74f
+        private const val PANEL_WIDTH_RATIO_PORTRAIT = 0.42f
+        private const val PANEL_HEIGHT_RATIO_PORTRAIT = 0.82f
         private const val PANEL_WIDTH_RATIO_LANDSCAPE = 0.46f
         private const val PANEL_HEIGHT_RATIO_LANDSCAPE = 0.86f
 

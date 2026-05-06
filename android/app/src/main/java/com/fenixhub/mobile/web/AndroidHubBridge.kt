@@ -41,7 +41,7 @@ import org.json.JSONObject
 class AndroidHubBridge(
     private val activity: ComponentActivity,
     private val container: AppContainer,
-    private val launchFilePicker: suspend () -> Uri?,
+    private val launchFilePicker: suspend () -> List<Uri>?,
     private val launchCreateDocument: suspend (fileName: String, mimeType: String) -> Uri?,
     private val readClipboardText: () -> String?,
     private val openOverlayPermissionSettings: () -> Unit,
@@ -89,12 +89,17 @@ class AndroidHubBridge(
         }
     }
 
-    suspend fun importPickedFile(): LocalContent? {
-        val uri = launchFilePicker() ?: return null
+    suspend fun importPickedFiles(): JSONArray {
+        val uris = launchFilePicker() ?: return JSONArray()
         return withContext(Dispatchers.IO) {
-            container.localContentFactory.fromUri(uri, deferLargeImagePreview = true)
-                ?.also(container.contentRepository::addLocalContent)
-                ?.also(::scheduleDeferredPreviewRefresh)
+            val result = JSONArray()
+            for (uri in uris) {
+                container.localContentFactory.fromUri(uri, deferLargeImagePreview = true)
+                    ?.also(container.contentRepository::addLocalContent)
+                    ?.also(::scheduleDeferredPreviewRefresh)
+                    ?.let { result.put(localContentJson(it)) }
+            }
+            result
         }
     }
 
@@ -120,7 +125,7 @@ class AndroidHubBridge(
             "add_text_content" -> addTextContent(args).toString()
             "paste_clipboard_text" -> pasteClipboardText().toString()
             "add_binary_content" -> addBinaryContent(requirePayloadArgs(args)).toString()
-            "pick_file" -> importPickedFile()?.let(::localContentJson)?.toString() ?: "null"
+            "pick_file" -> importPickedFiles().toString()
             "copy_local_content" -> JSONObject.quote(copyLocalContent(args))
             "copy_peer_content" -> JSONObject.quote(copyPeerContent(args))
             "save_peer_content_as" -> savePeerContentAs(args)?.let(JSONObject::quote) ?: "null"
@@ -134,6 +139,10 @@ class AndroidHubBridge(
             }
             "unpublish_content" -> {
                 unpublishContent(args)
+                "null"
+            }
+            "unpublish_all" -> {
+                container.contentRepository.unpublishAll()
                 "null"
             }
             "start_direct_mode_sender" -> {

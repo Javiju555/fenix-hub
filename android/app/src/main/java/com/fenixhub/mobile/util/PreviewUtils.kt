@@ -12,7 +12,6 @@ object PreviewUtils {
     fun textPreview(text: String): String = text.trim().take(80)
 
     fun imagePreviewDataUrl(bytes: ByteArray, mimeType: String? = null): String {
-        val isLosslessSource = mimeType.equals("image/png", ignoreCase = true)
         return imagePreviewDataUrl(
             decodeBounds = { options ->
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
@@ -22,14 +21,13 @@ object PreviewUtils {
             },
             sourceMimeType = mimeType,
             maxEdge = LOCAL_PREVIEW_MAX_EDGE,
-            quality = if (isLosslessSource) 100 else LOCAL_PREVIEW_QUALITY,
-            format = if (isLosslessSource) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.WEBP_LOSSY,
-            outputMimeType = if (isLosslessSource) "image/png" else "image/webp",
+            quality = LOCAL_PREVIEW_QUALITY,
+            format = Bitmap.CompressFormat.WEBP_LOSSY,
+            outputMimeType = "image/webp",
         )
     }
 
     fun imagePreviewDataUrl(file: File, mimeType: String? = null): String {
-        val isLosslessSource = mimeType.equals("image/png", ignoreCase = true)
         return imagePreviewDataUrl(
             decodeBounds = { options ->
                 file.inputStream().buffered().use { input ->
@@ -43,9 +41,9 @@ object PreviewUtils {
             },
             sourceMimeType = mimeType,
             maxEdge = LOCAL_PREVIEW_MAX_EDGE,
-            quality = if (isLosslessSource) 100 else LOCAL_PREVIEW_QUALITY,
-            format = if (isLosslessSource) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.WEBP_LOSSY,
-            outputMimeType = if (isLosslessSource) "image/png" else "image/webp",
+            quality = LOCAL_PREVIEW_QUALITY,
+            format = Bitmap.CompressFormat.WEBP_LOSSY,
+            outputMimeType = "image/webp",
         )
     }
 
