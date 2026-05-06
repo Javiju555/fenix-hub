@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
-use windows::core::{implement, w, Interface, BOOL, IUnknownImpl, Result as WinResult};
+use windows::core::{implement, w, BOOL, IUnknownImpl, Result as WinResult};
 use windows::Win32::Foundation::{HWND, LPARAM, POINTL};
 use windows::Win32::System::Com::{
     DVASPECT_CONTENT, FORMATETC, IDataObject, IStream, TYMED_HGLOBAL, TYMED_ISTREAM,
@@ -77,6 +77,9 @@ impl IDropTarget_Impl for FenixDropTarget_Impl {
         };
         if can_accept_drop(data_obj) {
             unsafe { *pdweffect = DROPEFFECT_COPY };
+            if let Ok(app) = self.get_impl().app.try_borrow() {
+                let _ = app.emit("fenix://drag-enter", ());
+            }
         } else {
             unsafe { *pdweffect = DROPEFFECT_NONE };
         }
@@ -95,6 +98,9 @@ impl IDropTarget_Impl for FenixDropTarget_Impl {
     }
 
     fn DragLeave(&self) -> WinResult<()> {
+        if let Ok(app) = self.get_impl().app.try_borrow() {
+            let _ = app.emit("fenix://drag-leave", ());
+        }
         Ok(())
     }
 
@@ -368,89 +374,35 @@ pub fn register_fenix_drop_target(window: &tauri::WebviewWindow) {
 
     #[cfg(target_os = "windows")]
     {
-        // Step 1: Disable WebView2's built-in external drop handler via raw COM.
-        let _ = window.with_webview(|webview| {
-            let controller = webview.controller();
-            // ICoreWebView2Controller4 IID
-            let iid = windows::core::GUID::from_u128(0x3191c66b_9f7b_4d7b_9d35_93cb9d2d766d);
-
-            let raw = Interface::as_raw(&controller) as *mut std::ffi::c_void;
-            if raw.is_null() {
-                tracing::warn!("WebView2 controller raw pointer is null");
-                return;
-            }
-
-            // QI for ICoreWebView2Controller4
-            let mut ppv: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hr = unsafe {
-                let vtable = &*(raw as *const *const *const std::ffi::c_void);
-                let qi: unsafe extern "system" fn(
-                    *mut std::ffi::c_void,
-                    *const windows::core::GUID,
-                    *mut *mut std::ffi::c_void,
-                ) -> windows::core::HRESULT = std::mem::transmute(
-                    (*vtable).wrapping_add(0).read()
-                );
-                qi(raw, &iid, &mut ppv)
+        // Run inside with_webview so the callback fires only after WebView2 is
+        // fully initialized (Chrome_RenderWidgetHostHWND exists) and on the main
+        // UI thread (STA), which is required by RegisterDragDrop.
+        let window_clone = window.clone();
+        let _ = window.with_webview(move |_webview| {
+            let parent_hwnd = match window_clone.hwnd() {
+                Ok(h) => h,
+                Err(_) => {
+                    tracing::warn!("Cannot get window HWND — drop interception disabled");
+                    return;
+                }
             };
 
-            if hr.is_err() || ppv.is_null() {
-                tracing::debug!(
-                    "QI for ICoreWebView2Controller4 failed (hr={hr:?})"
-                );
-                return;
-            }
-
-            // SetAllowExternalDrop(BOOL) is vtable slot 8 on ICoreWebView2Controller4
-            let set_hr = unsafe {
-                type SetFn = unsafe extern "system" fn(*mut std::ffi::c_void, i32) -> windows::core::HRESULT;
-                let vtable = &*(ppv as *const *const *const std::ffi::c_void);
-                let func: SetFn = std::mem::transmute(
-                    (*vtable).wrapping_add(8).read()
-                );
-                func(ppv, 0) // FALSE
+            let child_hwnd = match find_webview2_hwnd(parent_hwnd) {
+                Some(h) => h,
+                None => {
+                    tracing::warn!("Cannot find WebView2 child HWND — drop interception disabled");
+                    return;
+                }
             };
 
-            // Release the QI'd pointer
-            unsafe {
-                let vtable = &*(ppv as *const *const *const std::ffi::c_void);
-                let release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32 =
-                    std::mem::transmute((*vtable).wrapping_add(2).read());
-                release(ppv);
-            }
+            let _ = unsafe { RevokeDragDrop(child_hwnd) };
 
-            if set_hr.is_ok() {
-                tracing::debug!("SetAllowExternalDrop(false) succeeded");
+            let drop_target: IDropTarget = FenixDropTarget::new(window_clone.app_handle().clone()).into();
+            if let Err(e) = unsafe { RegisterDragDrop(child_hwnd, &drop_target) } {
+                tracing::warn!("Failed to register custom drop target: {e:?}");
             } else {
-                tracing::warn!("SetAllowExternalDrop returned: {set_hr:?}");
+                tracing::info!("FenixDropTarget registered on WebView2 child HWND");
             }
         });
-
-        // Step 2: Find the WebView2 child HWND
-        let parent_hwnd = match window.hwnd() {
-            Ok(h) => h,
-            Err(_) => {
-                tracing::warn!("Cannot get window HWND — drop interception disabled");
-                return;
-            }
-        };
-
-        let child_hwnd = match find_webview2_hwnd(parent_hwnd) {
-            Some(h) => h,
-            None => {
-                tracing::warn!("Cannot find WebView2 child HWND — drop interception disabled");
-                return;
-            }
-        };
-
-        // Step 3: Revoke any existing drop target, then register ours
-        let _ = unsafe { RevokeDragDrop(child_hwnd) };
-
-        let drop_target: IDropTarget = FenixDropTarget::new(window.app_handle().clone()).into();
-        if let Err(e) = unsafe { RegisterDragDrop(child_hwnd, &drop_target) } {
-            tracing::warn!("Failed to register custom drop target: {e:?}");
-        } else {
-            tracing::info!("FenixDropTarget registered on WebView2 child HWND");
-        }
     }
 }

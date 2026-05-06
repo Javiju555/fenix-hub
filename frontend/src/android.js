@@ -1077,13 +1077,13 @@ function renderPeerContent(area) {
         .join('')}</div>`;
 }
 function renderMediaPreview(item) {
-    if (item.content_type === 'image' && item.preview.startsWith('data:image')) {
+    if (item.content_type === 'image' && item.preview?.startsWith('data:image')) {
         return `<div class="a-media a-media-image a-media-image-local"><img class="a-card-img a-card-img-local" src="${item.preview}" alt="" /></div>`;
     }
     return renderMediaShell(item.content_type, item.file_name || item.preview);
 }
 function renderPeerMediaPreview(item) {
-    if (item.content_type === 'image' && item.preview.startsWith('data:image')) {
+    if (item.content_type === 'image' && item.preview?.startsWith('data:image')) {
         return `<div class="a-media a-media-image a-media-image-peer"><img class="a-card-img a-card-img-peer" src="${item.preview}" alt="" /></div>`;
     }
     return renderMediaShell(item.content_type, item.file_name || item.preview);
@@ -1488,7 +1488,7 @@ function errorMessage(error) {
     return 'Operación no completada';
 }
 function escapeHtml(value) {
-    return value
+    return (value ?? '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
@@ -1497,6 +1497,8 @@ function escapeAttribute(value) {
     return escapeHtml(value).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function humanSize(bytes) {
+    if (!bytes || isNaN(bytes))
+        return '—';
     if (bytes < 1024)
         return `${bytes} B`;
     if (bytes < 1048576)
@@ -1544,7 +1546,7 @@ function saveAsPeerActionLabel(type) {
     return 'Guardar como...';
 }
 function compactLabel(value) {
-    const sanitized = value.trim();
+    const sanitized = (value ?? '').trim();
     if (sanitized.length <= 34)
         return sanitized;
     return `${sanitized.slice(0, 31)}...`;

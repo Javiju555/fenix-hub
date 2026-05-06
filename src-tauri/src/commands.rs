@@ -780,6 +780,20 @@ pub async fn unpublish_content(id: String, state: State<'_, HubState>) -> Result
     Ok(())
 }
 
+#[tauri::command]
+pub async fn unpublish_all(state: State<'_, HubState>) -> Result<(), String> {
+    let ids: Vec<String> = state.active_announcements.read().await.keys().cloned().collect();
+    for id in ids {
+        let rec = state.active_announcements.write().await.remove(&id);
+        if let Some(rec) = rec {
+            unannounce_content(&state.mdns, &rec.instance_name)
+                .map_err(|e| tracing::warn!("Failed to unannounce {}: {}", id, e))
+                .ok();
+        }
+    }
+    Ok(())
+}
+
 // ── Publishing ────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
