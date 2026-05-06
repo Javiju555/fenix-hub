@@ -1,7 +1,7 @@
 import './overlay.css';
 const IS_TAURI = '__TAURI_INTERNALS__' in window;
 const IS_NATIVE_ANDROID = 'FenixHubBridge' in window;
-const POLL_INTERVAL_MS = 8000;
+const POLL_INTERVAL_MS = 3000;
 const LOGO_SRC = './logo-mark.png';
 let nativeBridgeReady = false;
 let nativeRequestId = 0;
@@ -12,6 +12,7 @@ let localContent = [];
 let peerContent = [];
 let activeTab = 'local';
 let overlayMinimized = false;
+let snapSide = 'right';
 function localFingerprint(item) {
     return [
         item.id,
@@ -97,7 +98,16 @@ export async function initOverlay() {
     };
     window.__fenixOverlaySetMinimized = (minimized) => {
         overlayMinimized = minimized;
+        document.body.classList.toggle('overlay-mode', !minimized);
         render();
+    };
+    window.__fenixOverlaySetSnapSide = (side) => {
+        snapSide = side;
+        if (overlayMinimized) {
+            const shell = document.querySelector('.overlay-mini-shell');
+            if (shell)
+                shell.className = `overlay-mini-shell snap-${snapSide}`;
+        }
     };
     await loadState();
     render();
@@ -226,6 +236,9 @@ async function invokeMock(cmd, args) {
             return true;
         case 'close_overlay':
             return true;
+        case 'snap_overlay':
+            snapSide = a?.side || 'right';
+            return undefined;
         default:
             return undefined;
     }
@@ -283,11 +296,11 @@ async function refreshState() {
 function render() {
     if (overlayMinimized) {
         document.getElementById('app').innerHTML = `
-      <div class="overlay-mini-shell">
+      <div class="overlay-mini-shell snap-${snapSide}">
         <button class="overlay-mini-main" id="overlay-mini-main" title="Restaurar FenixHub">
           <img class="overlay-mini-logo" src="${LOGO_SRC}" alt="FenixHub" />
         </button>
-        <button class="overlay-mini-close" id="overlay-mini-close" title="Cerrar overlay">${iconX(11)}</button>
+        <button class="overlay-mini-close" id="overlay-mini-close" title="Cerrar overlay">${iconX(9)}</button>
       </div>
     `;
         document.getElementById('overlay-mini-main').addEventListener('click', async () => {
@@ -303,11 +316,9 @@ function render() {
     document.getElementById('app').innerHTML = `
     <div class="overlay-shell">
       <header class="overlay-header">
-        <div class="overlay-brand">
-          <img class="overlay-logo" src="${LOGO_SRC}" alt="FenixHub" />
-          <span>FenixHub</span>
-        </div>
+        <div class="overlay-brand"><img class="overlay-logo" src="${LOGO_SRC}" alt="FenixHub" /></div>
         <div class="overlay-window-actions">
+          <button class="overlay-control" id="overlay-expand" title="Abrir app">${iconExpand(14)}</button>
           <button class="overlay-control" id="overlay-minimize" title="Minimizar">${iconMinus(14)}</button>
           <button class="overlay-control danger" id="overlay-close" title="Cerrar">${iconX(14)}</button>
         </div>
@@ -317,13 +328,10 @@ function render() {
           <button class="overlay-tab ${activeTab === 'local' ? 'active' : ''}" data-tab="local">Local</button>
           <button class="overlay-tab ${activeTab === 'red' ? 'active' : ''}" data-tab="red">Red</button>
         </div>
-        <button class="overlay-expand" id="overlay-expand">${iconExpand(16)} Abrir</button>
       </div>
       <section class="overlay-stack" id="overlay-stack"></section>
       <footer class="overlay-footer-bar">
-        <button class="overlay-footer-btn" id="act-paste">${iconClipboard(16)} Pegar</button>
-        <button class="overlay-footer-btn accent" id="act-share-all">${iconBroadcast(16)} Todo</button>
-        <button class="overlay-footer-btn subtle" id="act-close-overlay">${iconX(16)} Cerrar</button>
+        <button class="overlay-footer-btn accent" id="act-paste">${iconClipboard(16)} Pegar</button>
       </footer>
     </div>
   `;
@@ -346,10 +354,6 @@ function render() {
         await invoke('close_overlay');
     });
     document.getElementById('act-paste').addEventListener('click', () => void copyOrPasteLocal());
-    document.getElementById('act-share-all').addEventListener('click', () => void publishAllLocal());
-    document.getElementById('act-close-overlay').addEventListener('click', async () => {
-        await invoke('close_overlay');
-    });
     update();
 }
 function update() {
@@ -360,6 +364,44 @@ function update() {
     });
     renderCards();
 }
+function renderThumb(item) {
+    const ct = item.content_type;
+    const preview = item.preview;
+    if (ct === 'image' && preview?.startsWith('data:image')) {
+        return `<img class="overlay-thumb-img" src="${preview}" alt="" loading="lazy" />`;
+    }
+    if (ct === 'image')
+        return `<span class="overlay-thumb-icon">${iconImage(20)}</span>`;
+    if (ct === 'file')
+        return `<span class="overlay-thumb-icon">${iconFile(20)}</span>`;
+    return `<span class="overlay-thumb-icon">${iconDoc(20)}</span>`;
+}
+function bindCardAction(button, handler) {
+    let longPressTimer = null;
+    let didLongPress = false;
+    button.addEventListener('touchstart', () => {
+        didLongPress = false;
+        longPressTimer = setTimeout(() => {
+            didLongPress = true;
+            longPressTimer = null;
+            handler();
+        }, 450);
+    }, { passive: true });
+    const clearTimer = () => {
+        if (longPressTimer !== null) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+    };
+    button.addEventListener('touchmove', clearTimer, { passive: true });
+    button.addEventListener('touchend', clearTimer, { passive: true });
+    button.addEventListener('touchcancel', clearTimer, { passive: true });
+    button.addEventListener('click', () => {
+        if (!didLongPress)
+            handler();
+        didLongPress = false;
+    });
+}
 function renderCards() {
     const stack = document.getElementById('overlay-stack');
     if (!stack)
@@ -369,25 +411,26 @@ function renderCards() {
             stack.innerHTML = emptyState('Nada local', 'Pulsa Pegar para capturar el portapapeles.');
             return;
         }
-        stack.innerHTML = localContent.map(item => {
-            return `
-        <button class="overlay-card ${item.is_published ? 'published' : ''}" data-local-id="${item.id}">
-          <div class="overlay-card-top">
-            <span class="overlay-type ${item.content_type}">${typeLabel(item.content_type)}</span>
-            ${item.is_published ? '<span class="overlay-live">LIVE</span>' : ''}
+        stack.innerHTML = localContent.map(item => `
+      <button class="overlay-card ${item.is_published ? 'published' : ''}" data-local-id="${item.id}">
+        <div class="overlay-card-row">
+          <div class="overlay-thumb">${renderThumb(item)}</div>
+          <div class="overlay-card-body">
+            <div class="overlay-card-top">
+              <span class="overlay-type ${item.content_type}">${typeLabel(item.content_type)}</span>
+              ${item.is_published ? '<span class="overlay-live">LIVE</span>' : ''}
+            </div>
+            <div class="overlay-title">${escapeHtml(item.file_name || item.preview)}</div>
+            <div class="overlay-meta">${humanSize(item.size_bytes)}</div>
           </div>
-          <div class="overlay-title">${escapeHtml(item.file_name || item.preview)}</div>
-          <div class="overlay-meta">${humanSize(item.size_bytes)}</div>
-        </button>
-      `;
-        }).join('');
+        </div>
+      </button>
+    `).join('');
         stack.querySelectorAll('[data-local-id]').forEach(button => {
-            button.addEventListener('click', () => {
-                const id = button.dataset.localId;
-                const item = localContent.find(i => i.id === id);
-                if (item)
-                    showActionSheet(item, 'local');
-            });
+            const id = button.dataset.localId;
+            const item = localContent.find(i => i.id === id);
+            if (item)
+                bindCardAction(button, () => showActionSheet(item, 'local'));
         });
     }
     else {
@@ -395,25 +438,26 @@ function renderCards() {
             stack.innerHTML = emptyState('Sin peers', 'Los anuncios de red aparecerán aquí.');
             return;
         }
-        stack.innerHTML = peerContent.map(item => {
-            return `
-        <button class="overlay-card peer" data-peer-id="${item.content_id}">
-          <div class="overlay-card-top">
-            <span class="overlay-type ${item.content_type}">${typeLabel(item.content_type)}</span>
-            <span class="overlay-device">${escapeHtml(item.device_name)}</span>
+        stack.innerHTML = peerContent.map(item => `
+      <button class="overlay-card peer" data-peer-id="${item.content_id}">
+        <div class="overlay-card-row">
+          <div class="overlay-thumb">${renderThumb(item)}</div>
+          <div class="overlay-card-body">
+            <div class="overlay-card-top">
+              <span class="overlay-type ${item.content_type}">${typeLabel(item.content_type)}</span>
+              <span class="overlay-device">${escapeHtml(item.device_name)}</span>
+            </div>
+            <div class="overlay-title">${escapeHtml(item.file_name || item.preview)}</div>
+            <div class="overlay-meta">${humanSize(item.size_bytes)}</div>
           </div>
-          <div class="overlay-title">${escapeHtml(item.file_name || item.preview)}</div>
-          <div class="overlay-meta">${humanSize(item.size_bytes)}</div>
-        </button>
-      `;
-        }).join('');
+        </div>
+      </button>
+    `).join('');
         stack.querySelectorAll('[data-peer-id]').forEach(button => {
-            button.addEventListener('click', () => {
-                const id = button.dataset.peerId;
-                const item = peerContent.find(i => i.content_id === id);
-                if (item)
-                    showActionSheet(item, 'red');
-            });
+            const id = button.dataset.peerId;
+            const item = peerContent.find(i => i.content_id === id);
+            if (item)
+                bindCardAction(button, () => showActionSheet(item, 'red'));
         });
     }
 }
@@ -479,16 +523,6 @@ async function copyOrPasteLocal() {
         showToast(errorMessage(error));
     }
 }
-async function publishAllLocal() {
-    try {
-        await invoke('publish_all_local');
-        showToast('Todo publicado en la red');
-        await refreshState();
-    }
-    catch (error) {
-        showToast(errorMessage(error));
-    }
-}
 async function downloadSinglePeer(id) {
     try {
         await invoke('pull_peer_content', { content_id: id });
@@ -510,9 +544,9 @@ function showActionSheet(item, tab) {
         const pub = localItem.is_published;
         buttonsHtml = `
       <button class="overlay-sheet-item" data-sheet-action="publish">
-        ${pub ? '⏹ Parar difusión' : '📡 Publicar para todos'}
+        ${pub ? `${iconMute(16)} Detener` : `${iconBroadcast(16)} Publicar`}
       </button>
-      ${pub ? `<button class="overlay-sheet-item" data-sheet-action="direct">↗ Mandar directo</button>` : ''}
+      ${pub ? `<button class="overlay-sheet-item" data-sheet-action="direct">${iconArrow(16)} Directo</button>` : ''}
       <button class="overlay-sheet-item" data-sheet-action="copy">${iconCopy(16)} Copiar</button>
       <button class="overlay-sheet-item danger" data-sheet-action="delete">${iconTrash(16)} Borrar</button>
       <button class="overlay-sheet-item ghost" data-sheet-action="cancel">Cancelar</button>
@@ -521,7 +555,7 @@ function showActionSheet(item, tab) {
     else {
         buttonsHtml = `
       <button class="overlay-sheet-item success" data-sheet-action="download">${iconDownload(16)} Descargar</button>
-      <button class="overlay-sheet-item" data-sheet-action="copy">${iconCopy(16)} Copiar directo</button>
+      <button class="overlay-sheet-item" data-sheet-action="copy">${iconCopy(16)} Copiar</button>
       <button class="overlay-sheet-item danger" data-sheet-action="ignore">${iconMute(16)} Ignorar</button>
       <button class="overlay-sheet-item ghost" data-sheet-action="cancel">Cancelar</button>
     `;
@@ -611,6 +645,8 @@ function errorMessage(error) {
     return 'Operación no completada';
 }
 function humanSize(bytes) {
+    if (!bytes || isNaN(bytes))
+        return '—';
     if (bytes < 1024)
         return `${bytes} B`;
     if (bytes < 1048576)
@@ -625,7 +661,7 @@ function typeLabel(type) {
     return 'Archivo';
 }
 function escapeHtml(value) {
-    return value
+    return (value ?? '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
@@ -647,7 +683,7 @@ function iconCopy(size = 18) {
     return icon('<rect x="7" y="5" width="9" height="11" rx="2"/><path d="M5 13H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v1"/>', size);
 }
 function iconExpand(size = 18) {
-    return icon('<path d="M7 5H5v2"/><path d="M13 5h2v2"/><path d="M5 13v2h2"/><path d="M15 13v2h-2"/><path d="M5 5l4 4"/><path d="M15 5l-4 4"/><path d="M5 15l4-4"/><path d="M15 15l-4-4"/>', size);
+    return icon('<path d="M13 3h4v4"/><path d="M17 3l-6 6"/><path d="M10 5H5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-5"/>', size);
 }
 function iconMinus(size = 18) {
     return icon('<path d="M4 10h12"/>', size);
@@ -656,6 +692,18 @@ function iconX(size = 18) {
     return icon('<path d="M5 5l10 10"/><path d="M15 5L5 15"/>', size);
 }
 function iconBroadcast(size = 18) {
-    return icon('<circle cx="9" cy="5" r="1.5"/><circle cx="16" cy="5" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><path d="M9 5 L16 12"/><path d="M16 5 L9 12"/>', size);
+    return icon('<path d="M3 10a7 7 0 0 1 14 0"/><path d="M6.3 13a4 4 0 0 1 7.4 0"/><circle cx="10" cy="16" r="1.5"/>', size);
+}
+function iconArrow(size = 18) {
+    return icon('<path d="M5 10h10"/><path d="M11 6l4 4-4 4"/>', size);
+}
+function iconImage(size = 18) {
+    return icon('<rect x="3" y="3" width="14" height="14" rx="2"/><circle cx="7.5" cy="7.5" r="1.5"/><path d="M3 13l4-4 3 3 2-2 5 5"/>', size);
+}
+function iconFile(size = 18) {
+    return icon('<path d="M12 3H7a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V8l-5-5z"/><path d="M12 3v5h5"/>', size);
+}
+function iconDoc(size = 18) {
+    return icon('<path d="M4 7h12"/><path d="M4 11h12"/><path d="M4 15h8"/>', size);
 }
 initOverlay();

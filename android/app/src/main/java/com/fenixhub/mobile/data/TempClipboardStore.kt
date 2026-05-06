@@ -76,6 +76,7 @@ class TempClipboardStore(private val context: Context) {
         mimeType: String,
         fileName: String? = null,
         previewOverride: String? = null,
+        deferImagePreview: Boolean = false,
     ): LocalContent {
         return createBinaryContent(
             contentId = UUID.randomUUID().toString(),
@@ -85,6 +86,7 @@ class TempClipboardStore(private val context: Context) {
             mimeType = mimeType,
             fileName = fileName,
             previewOverride = previewOverride,
+            deferImagePreview = deferImagePreview && contentType == HubContentType.IMAGE,
         )
     }
 

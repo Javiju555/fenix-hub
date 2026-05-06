@@ -41,14 +41,14 @@ class MainActivity : ComponentActivity() {
     private lateinit var assetLoader: WebViewAssetLoader
     private lateinit var bridge: AndroidHubBridge
 
-    private var pendingFilePicker: CompletableDeferred<Uri?>? = null
+    private var pendingFilePicker: CompletableDeferred<List<Uri>?>? = null
     private var pendingCreateDocument: CompletableDeferred<Uri?>? = null
     private var pendingRuntimePermissions: CompletableDeferred<Map<String, Boolean>>? = null
 
     private val filePickerLauncher = registerForActivityResult(
-        ActivityResultContracts.GetContent(),
-    ) { uri: Uri? ->
-        pendingFilePicker?.takeIf { it.isActive }?.complete(uri)
+        ActivityResultContracts.GetMultipleContents(),
+    ) { uris: List<Uri> ->
+        pendingFilePicker?.takeIf { it.isActive }?.complete(uris.ifEmpty { null })
         pendingFilePicker = null
     }
 
@@ -198,12 +198,12 @@ class MainActivity : ComponentActivity() {
             }
 
             if (launchImagePicker) {
-                val item = runCatching { bridge.importPickedFile() }
+                val items = runCatching { bridge.importPickedFiles() }
                     .getOrElse {
                         toast("No se pudo anadir el archivo")
                         return@launch
                     }
-                if (item != null) {
+                if (items.length() > 0) {
                     toast("Contenido anadido al hub")
                     shouldRefresh = true
                 }
@@ -231,11 +231,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private suspend fun launchFilePicker(): Uri? {
+    private suspend fun launchFilePicker(): List<Uri>? {
         if (pendingFilePicker?.isActive == true) {
             error("Ya hay un selector de archivos abierto")
         }
-        val deferred = CompletableDeferred<Uri?>()
+        val deferred = CompletableDeferred<List<Uri>?>()
         pendingFilePicker = deferred
         withContext(Dispatchers.Main.immediate) {
             filePickerLauncher.launch("*/*")
@@ -306,8 +306,11 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions += Manifest.permission.NEARBY_WIFI_DEVICES
             permissions += Manifest.permission.POST_NOTIFICATIONS
+            permissions += Manifest.permission.READ_MEDIA_IMAGES
+            permissions += Manifest.permission.READ_MEDIA_VIDEO
         } else {
             permissions += Manifest.permission.ACCESS_FINE_LOCATION
+            permissions += Manifest.permission.READ_EXTERNAL_STORAGE
         }
 
         return permissions.distinct()

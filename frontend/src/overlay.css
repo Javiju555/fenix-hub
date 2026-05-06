@@ -28,10 +28,7 @@ body {
 }
 
 body.overlay-mode {
-  background:
-    radial-gradient(circle at top left, rgba(94, 140, 244, 0.18), transparent 34%),
-    radial-gradient(circle at top right, rgba(173, 94, 244, 0.10), transparent 28%),
-    linear-gradient(180deg, rgba(9, 13, 24, 0.98), rgba(9, 13, 24, 0.92));
+  background: transparent;
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
@@ -59,12 +56,11 @@ textarea {
 }
 
 .overlay-mini-main {
-  width: 54px;
-  height: 54px;
+  width: 52px;
+  height: 52px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: radial-gradient(circle at 30% 30%, rgba(94, 140, 244, 0.34), rgba(12, 18, 33, 0.92));
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(8, 12, 22, 0.88);
   display: grid;
   place-items: center;
   padding: 0;
@@ -78,13 +74,11 @@ textarea {
 
 .overlay-mini-close {
   position: absolute;
-  top: 0;
-  right: 0;
-  width: 20px;
-  height: 20px;
-  border-radius: 999px;
-  background: rgba(9, 13, 24, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(30, 10, 12, 0.95);
+  border: 1px solid rgba(240, 107, 113, 0.5);
   color: var(--overlay-red);
   display: inline-flex;
   align-items: center;
@@ -92,14 +86,33 @@ textarea {
   padding: 0;
 }
 
+/* snapped right → badge top-left */
+.overlay-mini-shell.snap-right .overlay-mini-close {
+  top: 1px;
+  left: 1px;
+  right: auto;
+}
+
+/* snapped left → badge top-right */
+.overlay-mini-shell.snap-left .overlay-mini-close {
+  top: 1px;
+  right: 1px;
+  left: auto;
+}
+
 .overlay-shell {
   width: 100%;
   height: 100%;
   display: grid;
   grid-template-rows: auto auto 1fr auto;
-  gap: 12px;
-  padding: 14px;
-  background: var(--overlay-bg);
+  gap: 10px;
+  padding: 12px;
+  border-radius: 20px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top left, rgba(94, 140, 244, 0.18), transparent 34%),
+    radial-gradient(circle at top right, rgba(173, 94, 244, 0.10), transparent 28%),
+    var(--overlay-bg);
 }
 
 .overlay-header {
@@ -112,9 +125,10 @@ textarea {
 .overlay-brand {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-size: 17px;
+  gap: 8px;
+  font-size: 15px;
   font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .overlay-logo {
@@ -126,7 +140,7 @@ textarea {
 .overlay-window-actions {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .overlay-tabs-row {
@@ -157,8 +171,8 @@ textarea {
 }
 
 .overlay-tab {
-  min-width: 70px;
-  padding: 10px 14px;
+  min-width: 48px;
+  padding: 8px 12px;
   border-radius: 999px;
   background: transparent;
   color: var(--overlay-dim);
@@ -173,8 +187,8 @@ textarea {
 }
 
 .overlay-control {
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid var(--overlay-border);
@@ -212,15 +226,54 @@ textarea {
 
 .overlay-card {
   width: 100%;
-  padding: 14px;
+  padding: 12px 14px;
   border-radius: var(--overlay-radius);
   text-align: left;
   background: var(--overlay-panel);
   border: 1px solid transparent;
+  touch-action: manipulation;
+}
+
+.overlay-card-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.overlay-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  display: grid;
+  place-items: center;
+}
+
+.overlay-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.overlay-thumb-icon {
+  color: var(--overlay-dim);
+  display: flex;
+}
+
+.overlay-card-body {
+  min-width: 0;
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  touch-action: manipulation;
+  gap: 3px;
+}
+
+.overlay-card-body .overlay-title {
+  font-size: 13px;
+  -webkit-line-clamp: 1;
 }
 
 .overlay-card.selected {
@@ -401,18 +454,26 @@ textarea {
 
 .overlay-sheet-title {
   padding: 4px 2px 8px;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .overlay-sheet-item {
   width: 100%;
-  padding: 14px 16px;
+  padding: 12px 14px;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.06);
   text-align: left;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .overlay-sheet-item.ghost {

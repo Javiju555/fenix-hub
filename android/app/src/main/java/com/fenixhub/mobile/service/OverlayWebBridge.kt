@@ -5,6 +5,7 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -13,6 +14,7 @@ import com.fenixhub.mobile.data.ReceivedContentHandler
 import com.fenixhub.mobile.data.SettingsStore
 import com.fenixhub.mobile.data.TempClipboardStore
 import com.fenixhub.mobile.model.Announcement
+import com.fenixhub.mobile.model.HubContentType
 import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.model.PeerContent
 import com.fenixhub.mobile.model.SendMode
@@ -39,6 +41,7 @@ class OverlayWebBridge(
     private val onMinimizeOverlay: () -> Unit,
     private val onExpandOverlay: () -> Unit,
     private val onCloseOverlay: () -> Unit,
+    private val onSnapOverlay: (side: String) -> Unit,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -56,12 +59,82 @@ class OverlayWebBridge(
 
     fun importDroppedClipData(clipData: ClipData?): Boolean {
         if (clipData == null || clipData.itemCount == 0) return false
-        scope.launch {
-            runCatching { importClipData(clipData) }
-                .onFailure { error ->
-                    Log.w(TAG, "Overlay drop import failed", error)
+
+        // Read URI bytes synchronously on the calling thread (main) while the drag-event
+        // URI permission is still active. A coroutine launched here would run after
+        // ACTION_DRAG_ENDED fires, at which point the temporary grant expires.
+        class DropItem(
+            val bytes: ByteArray?,
+            val mimeType: String?,
+            val fileName: String?,
+            val text: String?,
+        )
+
+        val items = buildList {
+            repeat(clipData.itemCount) { i ->
+                val item = clipData.getItemAt(i)
+                val uri = item.uri ?: item.intent?.data
+                if (uri != null) {
+                    val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull()
+                    val name = runCatching {
+                        context.contentResolver.query(
+                            uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null,
+                        )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+                    }.getOrNull()
+                    val bytes = try {
+                        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Drop URI read failed [$mime] $uri — ${e::class.simpleName}: ${e.message}")
+                        null
+                    }
+                    Log.i(TAG, "Drop item: uri=$uri mime=$mime name=$name bytes=${bytes?.size}")
+                    add(DropItem(bytes, mime, name, null))
+                } else {
+                    val text = runCatching {
+                        item.coerceToText(context)?.toString()?.trim().orEmpty()
+                    }.getOrNull().orEmpty()
+                    if (text.isNotBlank()) add(DropItem(null, null, null, text))
                 }
+            }
         }
+
+        if (items.isEmpty()) return false
+
+        scope.launch(Dispatchers.IO) {
+            var imported = 0
+            items.forEach { drop ->
+                runCatching {
+                    val localContent = when {
+                        drop.bytes != null && drop.bytes.isNotEmpty() -> {
+                            val mime = drop.mimeType ?: "application/octet-stream"
+                            val contentType = if (mime.startsWith("image/")) HubContentType.IMAGE else HubContentType.FILE
+                            tempClipboardStore.createBinaryContent(
+                                bytes = drop.bytes,
+                                contentType = contentType,
+                                mimeType = mime,
+                                fileName = drop.fileName,
+                                deferImagePreview = true,
+                            )
+                        }
+                        drop.text != null -> localContentFactory.fromText(drop.text)
+                        else -> null
+                    }
+                    if (localContent != null) {
+                        repository.addLocalContent(localContent)
+                        scheduleDeferredPreviewRefresh(localContent)
+                        imported++
+                    }
+                }.onFailure { e -> Log.w(TAG, "Overlay drop item failed", e) }
+            }
+            if (imported > 0) {
+                Log.i(TAG, "Imported $imported item(s) from drag-drop")
+                dispatch("window.__fenixExternalRefresh && window.__fenixExternalRefresh();")
+            } else {
+                Log.w(TAG, "Drop received but nothing imported (${items.size} items tried)")
+                dispatch("window.__fenixShowToast && window.__fenixShowToast('No se pudo importar el contenido');")
+            }
+        }
+
         return true
     }
 
@@ -128,6 +201,11 @@ class OverlayWebBridge(
                 Log.i(TAG, "Overlay command: close_overlay")
                 onCloseOverlay()
                 "true"
+            }
+            "snap_overlay" -> {
+                val side = args?.optString("side")?.takeIf { it == "left" || it == "right" } ?: "right"
+                onSnapOverlay(side)
+                "null"
             }
             else -> error("Comando no soportado: $command")
         }
