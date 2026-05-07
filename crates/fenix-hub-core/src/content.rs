@@ -9,7 +9,7 @@ pub enum ContentType {
     Text,
     Image,
     File,
-    // Future: Url (with OG preview)
+    Folder,
 }
 
 /// A piece of content held in the local hub, ready to be shared.

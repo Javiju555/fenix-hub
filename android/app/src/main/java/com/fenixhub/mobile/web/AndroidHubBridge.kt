@@ -429,7 +429,7 @@ class AndroidHubBridge(
         return JSONObject()
             .put("identity", identityJson(settings))
             .put("group_changed", groupChanged)
-            .put("requires_restart", groupChanged)
+            .put("requires_restart", false)
     }
 
     private fun profilesPayloadJson(): JSONObject {
