@@ -1064,6 +1064,36 @@ pub async fn prepare_local_drag(
     Ok(payload)
 }
 
+#[tauri::command]
+pub async fn start_native_file_drag(
+    id: String,
+    state: State<'_, HubState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let content = state.local_content.read().await;
+    let item = content.get(&id).ok_or("Content not found")?;
+    let path = match &item.data {
+        ContentData::FilePath(p) => p.to_string_lossy().to_string(),
+        ContentData::Bytes(bytes) => {
+            crate::temp_store::write_item_bytes(
+                &item.id,
+                item.file_name.as_deref().unwrap_or("fenixhub-item.bin"),
+                bytes,
+            )
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .to_string()
+        }
+        _ => return Err("Item has no file data".to_string()),
+    };
+    drop(content);
+    #[cfg(target_os = "windows")]
+    app.run_on_main_thread(move || {
+        crate::drop_target::start_native_file_drag(path);
+    }).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── Peer content ──────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1176,7 +1206,9 @@ pub async fn copy_peer_content(
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
         }
-        fenix_hub_core::content::ContentType::Image | fenix_hub_core::content::ContentType::File => {
+        fenix_hub_core::content::ContentType::Image
+        | fenix_hub_core::content::ContentType::File
+        | fenix_hub_core::content::ContentType::Folder => {
             let path = pulled.file_path.clone()
                 .or_else(|| {
                     let p = peer_received_path(&content_id, &announcement);
@@ -1427,8 +1459,8 @@ async fn ensure_peer_cached(
 
     if temp_path.exists() {
         tracing::debug!("Cache hit for {content_id}: {:?}", temp_path);
-        // For File type: avoid loading large files into RAM — point at the cached path.
-        let pulled = if announcement.content_type == fenix_hub_core::content::ContentType::File {
+        // For File/Folder type: avoid loading large files into RAM — point at the cached path.
+        let pulled = if matches!(announcement.content_type, fenix_hub_core::content::ContentType::File | fenix_hub_core::content::ContentType::Folder) {
             fenix_hub_core::client::PulledContent {
                 bytes: vec![],
                 file_path: Some(temp_path.clone()),
@@ -1455,8 +1487,8 @@ async fn ensure_peer_cached(
         .clone()
         .ok_or("Identity not configured")?;
 
-    // For File content type: stream directly to disk — don't buffer in RAM.
-    let pulled = if announcement.content_type == fenix_hub_core::content::ContentType::File {
+    // For File/Folder content type: stream directly to disk — don't buffer in RAM.
+    let pulled = if matches!(announcement.content_type, fenix_hub_core::content::ContentType::File | fenix_hub_core::content::ContentType::Folder) {
         fenix_hub_core::client::pull_content_to_file(
             peer_ip,
             announcement.port,
@@ -1513,16 +1545,17 @@ fn build_peer_item(
             )
             .map_err(|e| e.to_string())
         }
-        fenix_hub_core::content::ContentType::File => {
+        fenix_hub_core::content::ContentType::File
+        | fenix_hub_core::content::ContentType::Folder => {
+            let ct = announcement.content_type.clone();
             if let Some(path) = pulled.file_path {
-                // Already on disk from streaming — point ContentItem at existing file.
                 let final_name = pulled
                     .file_name
                     .or_else(|| announcement.file_name.clone())
                     .unwrap_or_else(|| "archivo".to_string());
                 ContentItem::from_temp_file(
                     path,
-                    fenix_hub_core::content::ContentType::File,
+                    ct,
                     Some(final_name),
                     pulled.mime_type.or_else(|| announcement.mime_type.clone()),
                     Some(announcement.preview.clone()),
@@ -1531,7 +1564,7 @@ fn build_peer_item(
             } else {
                 create_temp_binary_item(
                     pulled.bytes,
-                    fenix_hub_core::content::ContentType::File,
+                    ct,
                     pulled.file_name.or_else(|| announcement.file_name.clone()),
                     pulled.mime_type.or_else(|| announcement.mime_type.clone()),
                     Some(announcement.preview.clone()),
@@ -1813,6 +1846,7 @@ fn default_file_name(
             fenix_hub_core::content::ContentType::Image => "png",
             fenix_hub_core::content::ContentType::File => "bin",
             fenix_hub_core::content::ContentType::Text => "txt",
+            fenix_hub_core::content::ContentType::Folder => "zip",
         });
     format!("fenixhub-{}.{}", seed, extension)
 }
@@ -1914,6 +1948,154 @@ pub async fn add_file_by_path(
     state.local_content.write().await.insert(item.id.clone(), item);
     evict_fifo(&state).await;
     Ok(dto)
+}
+
+// ── Folder sharing ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn share_folder(state: State<'_, HubState>) -> Result<Option<ContentItemDto>, String> {
+    let Some(folder_path) = rfd::FileDialog::new().pick_folder() else {
+        return Ok(None);
+    };
+
+    let folder_name = folder_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("folder")
+        .to_string();
+    let zip_name = format!("{}.zip", folder_name);
+
+    let zip_bytes = tokio::task::spawn_blocking({
+        let fp = folder_path.clone();
+        let fn_ = folder_name.clone();
+        move || zip_directory(&fp, &fn_)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let file_count = count_dir_files(&folder_path);
+    let size = zip_bytes.len() as u64;
+    let preview = format!("{} ({} archivos, {})", folder_name, file_count, human_size(size));
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let created_at = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let zip_path = temp_store::write_item_bytes(&id, &zip_name, &zip_bytes)
+        .map_err(|e| e.to_string())?;
+
+    let item = ContentItem {
+        id: id.clone(),
+        content_type: fenix_hub_core::content::ContentType::Folder,
+        preview,
+        size_bytes: size,
+        mime_type: Some("application/zip".to_string()),
+        file_name: Some(zip_name),
+        data: ContentData::FilePath(zip_path),
+        created_at,
+    };
+
+    temp_store::write_item_meta(&item, "bytes").ok();
+    let dto = ContentItemDto::from(&item);
+    state.local_content.write().await.insert(item.id.clone(), item);
+    evict_fifo(&state).await;
+    Ok(Some(dto))
+}
+
+#[tauri::command]
+pub async fn extract_folder(id: String, state: State<'_, HubState>) -> Result<bool, String> {
+    let content = state.local_content.read().await;
+    let item = content.get(&id).ok_or("Content not found")?;
+
+    let zip_path = match &item.data {
+        ContentData::FilePath(p) => p.clone(),
+        _ => return Err("Not a folder item".to_string()),
+    };
+
+    let folder_stem = item
+        .file_name
+        .as_deref()
+        .and_then(|n| std::path::Path::new(n).file_stem())
+        .and_then(|s| s.to_str())
+        .unwrap_or("carpeta");
+
+    let Some(dest) = rfd::FileDialog::new()
+        .set_title(format!("Extraer \"{}\" en…", folder_stem))
+        .pick_folder()
+    else {
+        return Ok(false);
+    };
+    drop(content);
+
+    let zip_bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || extract_zip(&zip_bytes, &dest))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+    Ok(true)
+}
+
+fn zip_directory(source: &std::path::Path, _base_name: &str) -> anyhow::Result<Vec<u8>> {
+    use std::io::Write;
+    let buf = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(buf);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored);
+
+    for entry in walkdir::WalkDir::new(source).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let relative = match path.strip_prefix(source.parent().unwrap_or(source)) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let name = relative.to_string_lossy().replace('\\', "/");
+        if name.is_empty() { continue; }
+        if path.is_dir() {
+            zip.add_directory(format!("{}/", name), options)?;
+        } else {
+            zip.start_file(&name, options)?;
+            zip.write_all(&std::fs::read(path)?)?;
+        }
+    }
+
+    Ok(zip.finish()?.into_inner())
+}
+
+fn extract_zip(bytes: &[u8], dest: &std::path::Path) -> anyhow::Result<()> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor)?;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let out_path = dest.join(file.name());
+        if file.name().ends_with('/') {
+            std::fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::io::copy(&mut file, &mut std::fs::File::create(&out_path)?)?;
+        }
+    }
+    Ok(())
+}
+
+fn count_dir_files(path: &std::path::Path) -> usize {
+    walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .count()
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes < 1024 { return format!("{} B", bytes); }
+    if bytes < 1024 * 1024 { return format!("{:.1} KB", bytes as f64 / 1024.0); }
+    if bytes < 1024 * 1024 * 1024 { return format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)); }
+    format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
 fn is_text_mime(mime: Option<&str>, file_name: &str) -> bool {
@@ -2119,7 +2301,13 @@ fn announcement_preview_fallback(announcement: &Announcement) -> String {
         fenix_hub_core::content::ContentType::File => announcement
             .file_name
             .as_deref()
-            .map(|name| format!("Archivo: {}", truncate_utf8_bytes(name, 48)))            .unwrap_or_else(|| "Archivo listo para descargar".to_string()),
+            .map(|name| format!("Archivo: {}", truncate_utf8_bytes(name, 48)))
+            .unwrap_or_else(|| "Archivo listo para descargar".to_string()),
+        fenix_hub_core::content::ContentType::Folder => announcement
+            .file_name
+            .as_deref()
+            .map(|name| format!("Carpeta: {}", truncate_utf8_bytes(name, 48)))
+            .unwrap_or_else(|| "Carpeta lista para descargar".to_string()),
     }
 }
 
@@ -2175,6 +2363,7 @@ fn announcement_kind_label(content_type: &fenix_hub_core::content::ContentType) 
         fenix_hub_core::content::ContentType::Text => "Texto",
         fenix_hub_core::content::ContentType::Image => "Imagen",
         fenix_hub_core::content::ContentType::File => "Archivo",
+        fenix_hub_core::content::ContentType::Folder => "Carpeta",
     }
 }
 

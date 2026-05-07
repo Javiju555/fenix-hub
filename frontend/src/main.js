@@ -757,6 +757,7 @@ function renderHub() {
         </div>
 
         <div class="hub-actions">
+          <button class="btn-icon" id="btn-share-folder" title="Compartir carpeta">${iconFolder(13)}</button>
           <button class="btn-icon" id="btn-share-all" title="Compartir todo con todos">${iconBroadcast(13)}</button>
           <button class="btn-icon" id="btn-settings"  title="Ajustes">${iconGear(13)}</button>
           <button class="btn-icon" id="btn-collapse"  title="Minimizar a notch">${iconMinus(13)}</button>
@@ -781,26 +782,55 @@ function renderHub() {
         if (btn?.dataset.tab)
             switchTab(btn.dataset.tab);
     });
-    // Share all
-    document.getElementById('btn-share-all').addEventListener('click', async () => {
+    // Share folder
+    document.getElementById('btn-share-folder').addEventListener('click', async () => {
+        if (!IS_TAURI) {
+            showToast('Solo disponible en desktop');
+            return;
+        }
         try {
-            const allPublished = localContent.length > 0 && localContent.every(i => publishedIds.has(i.id));
-            if (allPublished) {
-                await invoke('unpublish_all');
-                publishedIds.clear();
-                renderLocalContent();
-            }
-            else {
-                const ids = localContent.filter(i => !publishedIds.has(i.id)).map(i => i.id);
-                if (ids.length === 0)
-                    return;
-                await invoke('publish_all', { contentIds: ids });
-                ids.forEach(id => publishedIds.add(id));
-                renderLocalContent();
+            const item = await invoke('share_folder');
+            if (item) {
+                localContent.unshift(item);
+                if (activeTab !== 'local')
+                    switchTab('local');
+                else
+                    renderLocalContent();
             }
         }
         catch (e) {
             showToast(`Error: ${e instanceof Error ? e.message : e}`);
+        }
+    });
+    // Share all
+    document.getElementById('btn-share-all').addEventListener('click', async () => {
+        const allPublished = localContent.length > 0 && localContent.every(i => publishedIds.has(i.id));
+        if (allPublished) {
+            publishedIds.clear();
+            renderLocalContent();
+            try {
+                await invoke('unpublish_all');
+            }
+            catch (e) {
+                await loadContent();
+                renderLocalContent();
+                showToast(`Error: ${e instanceof Error ? e.message : e}`);
+            }
+        }
+        else {
+            const ids = localContent.filter(i => !publishedIds.has(i.id)).map(i => i.id);
+            if (ids.length === 0)
+                return;
+            ids.forEach(id => publishedIds.add(id));
+            renderLocalContent();
+            try {
+                await invoke('publish_all', { contentIds: ids });
+            }
+            catch (e) {
+                ids.forEach(id => publishedIds.delete(id));
+                renderLocalContent();
+                showToast(`Error: ${e instanceof Error ? e.message : e}`);
+            }
         }
     });
     // Settings
@@ -1059,16 +1089,17 @@ function attachDragScroll(el) {
     let startX = 0;
     let scrollLeft = 0;
     el.addEventListener('mousedown', (e) => {
-        if (e.target.closest('button, a, input'))
+        if (e.target.closest('button, a, input, .content-card'))
             return;
         isDown = true;
         el.style.cursor = 'grabbing';
         startX = e.pageX - el.offsetLeft;
         scrollLeft = el.scrollLeft;
-        e.preventDefault();
+        // NOTE: do NOT call e.preventDefault() here — it cancels dragstart on child cards
+        el.style.userSelect = 'none';
     });
-    el.addEventListener('mouseleave', () => { isDown = false; el.style.cursor = ''; });
-    el.addEventListener('mouseup', () => { isDown = false; el.style.cursor = ''; });
+    el.addEventListener('mouseleave', () => { isDown = false; el.style.cursor = ''; el.style.userSelect = ''; });
+    el.addEventListener('mouseup', () => { isDown = false; el.style.cursor = ''; el.style.userSelect = ''; });
     el.addEventListener('mousemove', (e) => {
         if (!isDown)
             return;
@@ -1109,7 +1140,7 @@ function renderLocalContent() {
             ].join('');
         const isImg = item.content_type === 'image' && item.preview.startsWith('data:image');
         const topContent = isImg
-            ? `<img class="card-thumb" src="${item.preview}" />
+            ? `<img class="card-thumb" src="${item.preview}" draggable="false" />
          <div class="card-image-caption">${escapeHtml(item.file_name || 'imagen recibida')}</div>`
             : `<div class="card-top">
            <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
@@ -1128,7 +1159,7 @@ function renderLocalContent() {
             : `<div class="card-actions">${actionBtns}</div>`;
         return `
     <div class="card-wrap">
-      <div class="content-card${pub ? ' broadcasting' : ''}${isImg ? ' image-card' : ''}" data-id="${item.id}" draggable="true">
+      <div class="content-card${pub ? ' broadcasting' : ''}${isImg ? ' image-card' : ''}" data-id="${item.id}" draggable="${item.content_type === 'text' ? 'true' : 'false'}">
         ${topContent}
         ${metaRow}
         ${actionsRow}
@@ -1137,29 +1168,45 @@ function renderLocalContent() {
     </div>`;
     }).join('')}</div>`;
     container.querySelectorAll('[data-action]').forEach(btn => {
-        btn.addEventListener('click', async () => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
             const el = btn;
             const id = el.dataset.id;
-            if (el.dataset.action === 'stop') {
-                await invoke('unpublish_content', { id });
-                publishedIds.delete(id);
-            }
-            else if (el.dataset.action === 'broadcast') {
-                await invoke('publish_content', { args: { content_id: id, target_device: null } });
-                publishedIds.add(id);
-            }
-            else if (el.dataset.action === 'direct') {
-                await invoke('publish_content', { args: { content_id: id, target_device: el.dataset.device } });
-                publishedIds.add(id);
-            }
-            else if (el.dataset.action === 'direct-mode') {
+            const action = el.dataset.action;
+            if (action === 'direct-mode') {
                 if (!directModeSupported()) {
                     showToast('Modo Directo no disponible en este equipo.');
                     return;
                 }
                 openDirectModeModal(id);
+                return;
             }
+            // Optimistic: update UI immediately, then invoke backend
+            if (action === 'stop')
+                publishedIds.delete(id);
+            else if (action === 'broadcast' || action === 'direct')
+                publishedIds.add(id);
             renderLocalContent();
+            try {
+                if (action === 'stop') {
+                    await invoke('unpublish_content', { id });
+                }
+                else if (action === 'broadcast') {
+                    await invoke('publish_content', { args: { content_id: id, target_device: null } });
+                }
+                else if (action === 'direct') {
+                    await invoke('publish_content', { args: { content_id: id, target_device: el.dataset.device } });
+                }
+            }
+            catch (err) {
+                // Roll back optimistic update on failure
+                if (action === 'stop')
+                    publishedIds.add(id);
+                else
+                    publishedIds.delete(id);
+                renderLocalContent();
+                showToast(`Error: ${err instanceof Error ? err.message : err}`);
+            }
         });
     });
     container.querySelectorAll('.btn-delete').forEach(btn => {
@@ -1172,67 +1219,117 @@ function renderLocalContent() {
             renderLocalContent();
         });
     });
-    // Click on card body/thumb/caption → copy to local clipboard
+    // Click on card body/thumb/caption → copy to clipboard, or extract for folders
     container.querySelectorAll('.card-body, .card-thumb, .card-image-caption').forEach(el => {
         el.style.cursor = 'pointer';
         el.addEventListener('click', async () => {
             const card = el.closest('.content-card');
+            if (card?.dataset.suppressClick === '1') {
+                delete card.dataset.suppressClick;
+                return;
+            }
             const item = localContent.find(i => i.id === card?.dataset.id);
             if (!item)
                 return;
+            if (item.content_type === 'folder' && IS_TAURI) {
+                await invoke('extract_folder', { id: item.id }).catch(() => { });
+                return;
+            }
             if (IS_TAURI) {
                 await invoke('write_local_to_clipboard', { id: item.id }).catch(() => { });
             }
             else {
                 await navigator.clipboard.writeText(item.preview).catch(() => { });
             }
-            // Brief visual feedback
             card.style.outline = '1px solid var(--accent)';
             setTimeout(() => card.style.outline = '', 600);
         });
     });
     container.querySelectorAll('.content-card').forEach(card => {
-        const id = card.dataset.id;
+        const cardEl = card;
+        const id = cardEl.dataset.id;
+        const item = localContent.find(entry => entry.id === id);
         if (id) {
-            card.addEventListener('pointerdown', () => {
+            cardEl.addEventListener('pointerdown', () => {
                 void warmupDragPayload(id);
             }, { passive: true });
-            card.addEventListener('mouseenter', () => {
+            cardEl.addEventListener('mouseenter', () => {
                 void warmupDragPayload(id);
             });
         }
-        // dragstart MUST be synchronous — any await empties dataTransfer before the OS reads it
-        card.addEventListener('dragstart', (event) => {
-            const id = card.dataset.id;
-            const item = localContent.find(entry => entry.id === id);
-            if (!id || !item)
+        if (id && item && item.content_type !== 'text') {
+            let dragStartPoint = null;
+            let nativeDragStarted = false;
+            cardEl.addEventListener('pointerdown', (event) => {
+                if (event.button !== 0 || event.target.closest('button'))
+                    return;
+                dragStartPoint = { x: event.clientX, y: event.clientY };
+                nativeDragStarted = false;
+                // Capture pointer so the browser can't start an HTML drag ghost
+                cardEl.setPointerCapture(event.pointerId);
+            }, { passive: true });
+            cardEl.addEventListener('pointermove', (event) => {
+                if (!dragStartPoint || nativeDragStarted)
+                    return;
+                if ((event.buttons & 1) === 0) {
+                    dragStartPoint = null;
+                    return;
+                }
+                const dx = event.clientX - dragStartPoint.x;
+                const dy = event.clientY - dragStartPoint.y;
+                if ((dx * dx) + (dy * dy) < 36)
+                    return;
+                nativeDragStarted = true;
+                dragStartPoint = null;
+                cardEl.dataset.suppressClick = '1';
+                setTimeout(() => {
+                    if (cardEl.dataset.suppressClick === '1')
+                        delete cardEl.dataset.suppressClick;
+                }, 800);
+                // Release capture so Windows receives mouse messages for DoDragDrop
+                try {
+                    cardEl.releasePointerCapture(event.pointerId);
+                }
+                catch (_) { }
+                event.preventDefault();
+                if (IS_TAURI) {
+                    invoke('start_native_file_drag', { id }).catch((err) => {
+                        showToast(`No se pudo arrastrar: ${err}`);
+                    });
+                }
+                else {
+                    showDragFallbackHint();
+                }
+            });
+            const clearNativeDragStart = () => {
+                dragStartPoint = null;
+                nativeDragStarted = false;
+            };
+            cardEl.addEventListener('pointerup', clearNativeDragStart, { passive: true });
+            cardEl.addEventListener('pointercancel', clearNativeDragStart, { passive: true });
+        }
+        // dragstart: text drags via HTML5; file/image/folder use native OLE drag
+        // to bypass WebView2's asset:// → CF_HDROP conversion gap.
+        cardEl.addEventListener('dragstart', (event) => {
+            if (event.target.closest('button')) {
+                event.preventDefault();
                 return;
-            const dataTransfer = event.dataTransfer;
-            if (!dataTransfer)
+            }
+            if (!id || !item) {
+                event.preventDefault();
                 return;
-            dataTransfer.effectAllowed = 'copy';
+            }
             if (item.content_type === 'text') {
-                const text = item.data_text || item.preview;
-                dataTransfer.setData('text/plain', text);
-                // Silently copy to clipboard so Ctrl+V always works as fallback
+                const dataTransfer = event.dataTransfer;
+                if (!dataTransfer)
+                    return;
+                dataTransfer.effectAllowed = 'copy';
+                dataTransfer.setData('text/plain', item.data_text || item.preview);
                 if (IS_TAURI)
                     invoke('write_local_to_clipboard', { id }).catch(() => { });
+                return;
             }
-            else if (item.transfer_path) {
-                const fwdPath = item.transfer_path.replace(/\\/g, '/');
-                const uri = fwdPath.startsWith('/') ? `file://${fwdPath}` : `file:///${fwdPath}`;
-                dataTransfer.setData('text/plain', item.transfer_path);
-                dataTransfer.setData('text/uri-list', uri);
-            }
-            else {
-                dataTransfer.setData('text/plain', item.file_name || item.preview);
-            }
-        });
-        // If WebView2 couldn't complete the native drop (forbidden cursor), show hint
-        card.addEventListener('dragend', (event) => {
-            if (event.dataTransfer?.dropEffect === 'none') {
-                showDragFallbackHint();
-            }
+            event.preventDefault();
         });
     });
     attachDragScroll(document.getElementById('panel-local'));
@@ -1632,8 +1729,11 @@ function typeIcon(type) {
         return svg(14, '0 0 16 16', '<line x1="3" y1="5" x2="13" y2="5" stroke-width="1.8"/><line x1="3" y1="8" x2="13" y2="8" stroke-width="1.8"/><line x1="3" y1="11" x2="9" y2="11" stroke-width="1.8"/>');
     if (type === 'image')
         return svg(14, '0 0 16 16', '<rect x="2" y="3" width="12" height="10" rx="1.5" stroke-width="1.8"/><circle cx="6" cy="6.5" r="1" stroke-width="1.8"/><polyline points="2,11 5.5,8 7.5,10 10,7.5 14,11" stroke-width="1.8"/>');
+    if (type === 'folder')
+        return svg(14, '0 0 16 16', '<path d="M1.5,4.5 h5 l1.5,2 h6 a1,1 0 0 1 1,1 v5 a1,1 0 0 1 -1,1 h-12 a1,1 0 0 1 -1,-1 v-7 a1,1 0 0 1 1,-1 z" stroke-width="1.8"/>');
     return svg(14, '0 0 16 16', '<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.8"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.8"/>');
 }
+function iconFolder(s) { return svg(s, '0 0 16 16', '<path d="M1.5,4.5 h5 l1.5,2 h6 a1,1 0 0 1 1,1 v5 a1,1 0 0 1 -1,1 h-12 a1,1 0 0 1 -1,-1 v-7 a1,1 0 0 1 1,-1 z" stroke-width="1.8"/>'); }
 async function warmupDragPayload(id) {
     if (!IS_TAURI || dragPayloadCache.has(id))
         return;
