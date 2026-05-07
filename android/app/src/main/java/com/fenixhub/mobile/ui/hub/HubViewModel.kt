@@ -101,6 +101,11 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
         FenixHubService.start(getApplication(), FenixHubService.ACTION_STOP_HOTSPOT)
     }
 
+    val publishedContentIds: List<String>
+        get() = repository.localContent.value
+            .filter { it.isPublished }
+            .map { it.contentId }
+
     // ── WiFi Direct Transfer ──────────────────────────────────────────────
 
     /**

@@ -129,6 +129,45 @@ class WifiDirectTransferController(private val context: Context) {
         })
     }
 
+    @Suppress("DEPRECATION")
+    @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.Q)
+    fun createGroupWithConfig(
+        config: android.net.wifi.p2p.WifiP2pConfig,
+        onGroupCreated: (WifiDirectGroupInfo) -> Unit,
+    ) {
+        val manager = wifiP2pManager ?: return
+        val ch = channel ?: return
+
+        registerReceiverIfNeeded()
+        _transferState.value = WifiDirectTransferState.CreatingGroup
+        isGroupOwner = true
+
+        manager.createGroup(ch, config, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                manager.requestGroupInfo(ch) { group ->
+                    val info = group.toGroupInfo()
+                    if (info != null) {
+                        _groupInfo.value = info
+                        p2pInterface = findP2pInterface()
+                        onGroupCreated(info)
+                    } else {
+                        android.os.Handler(Looper.getMainLooper()).postDelayed({
+                            manager.requestGroupInfo(ch) { retry ->
+                                val retryInfo = retry.toGroupInfo() ?: return@requestGroupInfo
+                                _groupInfo.value = retryInfo
+                                p2pInterface = findP2pInterface()
+                                onGroupCreated(retryInfo)
+                            }
+                        }, 1500)
+                    }
+                }
+            }
+            override fun onFailure(reason: Int) {
+                _transferState.value = WifiDirectTransferState.Error("create_group_config_failed_$reason")
+            }
+        })
+    }
+
     /**
      * RECEIVER: Conecta a un grupo WiFi Direct existente.
      * [goDeviceAddress] es la dirección MAC del dispositivo GO (obtenida por BLE).

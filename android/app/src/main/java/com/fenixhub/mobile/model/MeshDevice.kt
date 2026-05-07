@@ -1,5 +1,7 @@
 package com.fenixhub.mobile.model
 
+import android.bluetooth.BluetoothDevice
+
 data class MeshDevice(
     val id: String,
     val name: String,
@@ -7,6 +9,8 @@ data class MeshDevice(
     val status: MeshDeviceStatus = MeshDeviceStatus.PENDING,
     val joinedAt: Long? = null,
     val meshId: String? = null,
+    val gattDevice: BluetoothDevice? = null,
+    val pubKeyBytes: ByteArray? = null,
 )
 
 enum class MeshDeviceStatus {

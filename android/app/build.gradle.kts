@@ -120,6 +120,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.lambdapioneer.argon2kt:argon2kt:1.4.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     testImplementation("junit:junit:4.13.2")
 
