@@ -1,6 +1,6 @@
 [package]
 name = "fenix-hub-app"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 
 [lib]
@@ -42,6 +42,10 @@ mime_guess = "2"
 local-ip-address = "0.6"
 # Native save dialog for peer exports
 rfd = "0.15"
+# ZIP archive creation/extraction (store mode for folder sharing)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Directory traversal for folder zipping
+walkdir = "2"
 # Secure keyring storage for identity persistence
 keyring = "3"
 

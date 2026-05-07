@@ -6,19 +6,23 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
-use windows::core::{implement, w, BOOL, IUnknownImpl, Result as WinResult};
-use windows::Win32::Foundation::{HWND, LPARAM, POINTL};
+use windows::core::{implement, w, BOOL, HRESULT, IUnknownImpl, Result as WinResult};
+use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, POINTL};
 use windows::Win32::System::Com::{
     DVASPECT_CONTENT, FORMATETC, IDataObject, IStream, TYMED_HGLOBAL, TYMED_ISTREAM,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
-use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT};
 use windows::Win32::System::Ole::{
-    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl,
+    DoDragDrop, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, IDropSource, IDropSource_Impl,
+    IDropTarget, IDropTarget_Impl, OleInitialize, OleUninitialize,
     RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop, CF_HDROP,
 };
+use windows::Win32::System::Com::{
+    IAdviseSink, IDataObject_Impl, IEnumFORMATETC, IEnumFORMATETC_Impl, IEnumSTATDATA, STGMEDIUM,
+};
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
-use windows::Win32::UI::Shell::{DragQueryFileW, FILEDESCRIPTORW, FILEGROUPDESCRIPTORW, HDROP};
+use windows::Win32::UI::Shell::{DragQueryFileW, DROPFILES, FILEDESCRIPTORW, FILEGROUPDESCRIPTORW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
 
 // ── Drag-received payload sent to the frontend ──────────────────────────────
@@ -367,42 +371,243 @@ unsafe extern "system" fn enum_child_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
 // ── Public setup helper ────────────────────────────────────────────────────
 
 pub fn register_fenix_drop_target(window: &tauri::WebviewWindow) {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = window;
-    }
+    register_fenix_drop_target_attempt(window, 0);
+}
 
-    #[cfg(target_os = "windows")]
-    {
-        // Run inside with_webview so the callback fires only after WebView2 is
-        // fully initialized (Chrome_RenderWidgetHostHWND exists) and on the main
-        // UI thread (STA), which is required by RegisterDragDrop.
-        let window_clone = window.clone();
-        let _ = window.with_webview(move |_webview| {
-            let parent_hwnd = match window_clone.hwnd() {
-                Ok(h) => h,
-                Err(_) => {
-                    tracing::warn!("Cannot get window HWND — drop interception disabled");
-                    return;
-                }
-            };
-
-            let child_hwnd = match find_webview2_hwnd(parent_hwnd) {
-                Some(h) => h,
-                None => {
-                    tracing::warn!("Cannot find WebView2 child HWND — drop interception disabled");
-                    return;
-                }
-            };
-
-            let _ = unsafe { RevokeDragDrop(child_hwnd) };
-
-            let drop_target: IDropTarget = FenixDropTarget::new(window_clone.app_handle().clone()).into();
-            if let Err(e) = unsafe { RegisterDragDrop(child_hwnd, &drop_target) } {
-                tracing::warn!("Failed to register custom drop target: {e:?}");
-            } else {
-                tracing::info!("FenixDropTarget registered on WebView2 child HWND");
+#[cfg(target_os = "windows")]
+fn register_fenix_drop_target_attempt(window: &tauri::WebviewWindow, attempt: u8) {
+    // 0x80040101 = DRAGDROP_E_ALREADYREGISTERED (not exported as a named constant in this crate version)
+    const ALREADY_REGISTERED: windows::core::HRESULT = windows::core::HRESULT(0x80040101u32 as i32);
+    let window_clone = window.clone();
+    let _ = window.with_webview(move |_webview| {
+        let parent_hwnd = match window_clone.hwnd() {
+            Ok(h) => h,
+            Err(_) => {
+                tracing::warn!("Cannot get window HWND — drop interception disabled");
+                return;
             }
-        });
+        };
+
+        let child_hwnd = match find_webview2_hwnd(parent_hwnd) {
+            Some(h) => h,
+            None => {
+                if attempt < 3 {
+                    let w = window_clone.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        register_fenix_drop_target_attempt(&w, attempt + 1);
+                    });
+                } else {
+                    tracing::warn!("WebView2 child HWND not found after retries — drop interception disabled");
+                }
+                return;
+            }
+        };
+
+        let drop_target: IDropTarget = FenixDropTarget::new(window_clone.app_handle().clone()).into();
+
+        // Try registering without revoking first — this succeeds if no target is registered yet.
+        match unsafe { RegisterDragDrop(child_hwnd, &drop_target) } {
+            Ok(_) => {
+                tracing::info!("FenixDropTarget registered (attempt {})", attempt);
+            }
+            Err(e) if e.code() == ALREADY_REGISTERED => {
+                // WebView2 has its own target registered. Revoke it and replace with ours.
+                // If RegisterDragDrop then fails, leave without a target and retry.
+                let _ = unsafe { RevokeDragDrop(child_hwnd) };
+                match unsafe { RegisterDragDrop(child_hwnd, &drop_target) } {
+                    Ok(_) => {
+                        tracing::info!("FenixDropTarget replaced WebView2 target (attempt {})", attempt);
+                    }
+                    Err(e2) => {
+                        tracing::warn!("RegisterDragDrop failed after revoke: {e2:?}");
+                        // Raced with WebView2 re-registering. Schedule a retry.
+                        if attempt < 3 {
+                            let w = window_clone.clone();
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                                register_fenix_drop_target_attempt(&w, attempt + 1);
+                            });
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("RegisterDragDrop failed: {e:?}");
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn register_fenix_drop_target_attempt(_window: &tauri::WebviewWindow, _attempt: u8) {}
+
+// ── Native file drag-out (IDataObject + IDropSource) ──────────────────────────
+//
+// WebView2 served from asset:// does not convert text/uri-list to CF_HDROP for
+// Explorer during HTML5 drag. We bypass it entirely: cancel the HTML5 dragstart
+// and start a real OLE DoDragDrop from a background STA thread instead.
+
+// Success HRESULTs used by IDropSource (positive — not mapped by HRESULT::ok())
+const DRAGDROP_S_DROP:              HRESULT = HRESULT(0x00040100_u32 as i32);
+const DRAGDROP_S_CANCEL:            HRESULT = HRESULT(0x00040101_u32 as i32);
+const DRAGDROP_S_USEDEFAULTCURSORS: HRESULT = HRESULT(0x00040102_u32 as i32);
+// Error HRESULTs
+const OLE_E_ADVISENOTSUPPORTED: HRESULT = HRESULT(0x80040003_u32 as i32);
+const E_NOTIMPL_HR:             HRESULT = HRESULT(0x80004001_u32 as i32);
+const DV_E_FORMATETC:           HRESULT = HRESULT(0x80040064_u32 as i32);
+
+#[cfg(target_os = "windows")]
+unsafe fn alloc_cf_hdrop(path: &str) -> WinResult<HGLOBAL> {
+    let mut wide: Vec<u16> = path.encode_utf16().collect();
+    wide.push(0); // null-terminate filename
+    wide.push(0); // end-of-list extra null
+
+    let hdr  = std::mem::size_of::<DROPFILES>();
+    let total = hdr + wide.len() * 2;
+    let hg = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, total)?;
+    let ptr = GlobalLock(hg);
+    if ptr.is_null() {
+        return Err(windows::core::Error::from_win32());
+    }
+    let df = &mut *(ptr as *mut DROPFILES);
+    df.pFiles = hdr as u32;
+    df.fWide  = BOOL(1);
+    let dst = (ptr as *mut u8).add(hdr) as *mut u16;
+    std::ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
+    let _ = GlobalUnlock(hg);
+    Ok(hg)
+}
+
+#[cfg(target_os = "windows")]
+#[implement(IDataObject)]
+struct FileDataObject {
+    path: String,
+}
+
+#[cfg(target_os = "windows")]
+impl IDataObject_Impl for FileDataObject_Impl {
+    fn GetData(&self, pformatetcin: *const FORMATETC) -> WinResult<STGMEDIUM> {
+        if unsafe { (*pformatetcin).cfFormat } != CF_HDROP.0 {
+            return Err(windows::core::Error::from(DV_E_FORMATETC));
+        }
+        let hg = unsafe { alloc_cf_hdrop(&self.get_impl().path)? };
+        let mut med: STGMEDIUM = unsafe { std::mem::zeroed() };
+        med.tymed = TYMED_HGLOBAL.0 as u32;
+        med.u.hGlobal = hg;
+        Ok(med)
+    }
+    fn GetDataHere(&self, _: *const FORMATETC, _: *mut STGMEDIUM) -> WinResult<()> {
+        Err(windows::core::Error::from(E_NOTIMPL_HR))
+    }
+    fn QueryGetData(&self, pformatetc: *const FORMATETC) -> HRESULT {
+        if unsafe { (*pformatetc).cfFormat } == CF_HDROP.0 {
+            HRESULT(0)
+        } else {
+            DV_E_FORMATETC
+        }
+    }
+    fn GetCanonicalFormatEtc(&self, _: *const FORMATETC, pformatetcout: *mut FORMATETC) -> HRESULT {
+        unsafe { (*pformatetcout).ptd = std::ptr::null_mut(); }
+        E_NOTIMPL_HR
+    }
+    fn SetData(&self, _: *const FORMATETC, _: *const STGMEDIUM, _: BOOL) -> WinResult<()> {
+        Err(windows::core::Error::from(E_NOTIMPL_HR))
+    }
+    fn EnumFormatEtc(&self, dwdirection: u32) -> WinResult<IEnumFORMATETC> {
+        if dwdirection != 1 { // DATADIR_GET = 1
+            return Err(windows::core::Error::from(E_NOTIMPL_HR));
+        }
+        Ok(HdropEnumerator { pos: std::sync::atomic::AtomicU32::new(0) }.into())
+    }
+    fn DAdvise(&self, _: *const FORMATETC, _: u32, _: windows::core::Ref<'_, IAdviseSink>) -> WinResult<u32> {
+        Err(windows::core::Error::from(OLE_E_ADVISENOTSUPPORTED))
+    }
+    fn DUnadvise(&self, _: u32) -> WinResult<()> {
+        Err(windows::core::Error::from(OLE_E_ADVISENOTSUPPORTED))
+    }
+    fn EnumDAdvise(&self) -> WinResult<IEnumSTATDATA> {
+        Err(windows::core::Error::from(OLE_E_ADVISENOTSUPPORTED))
+    }
+}
+
+// ── IEnumFORMATETC — enumerates the single CF_HDROP format we expose ──────────
+// Explorer calls this before deciding whether to accept a drop. Returning
+// E_NOTIMPL causes Explorer (but not Chrome/VSCode) to silently reject.
+
+#[cfg(target_os = "windows")]
+#[implement(IEnumFORMATETC)]
+struct HdropEnumerator {
+    pos: std::sync::atomic::AtomicU32,
+}
+
+#[cfg(target_os = "windows")]
+impl IEnumFORMATETC_Impl for HdropEnumerator_Impl {
+    fn Next(&self, celt: u32, rgelt: *mut FORMATETC, pceltfetched: *mut u32) -> HRESULT {
+        let pos = self.get_impl().pos.load(std::sync::atomic::Ordering::Relaxed);
+        let fetched = if pos == 0 && celt > 0 {
+            unsafe {
+                *rgelt = FORMATETC {
+                    cfFormat: CF_HDROP.0,
+                    ptd: std::ptr::null_mut(),
+                    dwAspect: DVASPECT_CONTENT.0,
+                    lindex: -1,
+                    tymed: TYMED_HGLOBAL.0 as u32,
+                };
+            }
+            self.get_impl().pos.store(1, std::sync::atomic::Ordering::Relaxed);
+            1u32
+        } else {
+            0u32
+        };
+        if !pceltfetched.is_null() {
+            unsafe { *pceltfetched = fetched; }
+        }
+        if fetched == celt { HRESULT(0) } else { HRESULT(1) }
+    }
+    fn Skip(&self, celt: u32) -> WinResult<()> {
+        let prev = self.get_impl().pos.fetch_add(celt, std::sync::atomic::Ordering::Relaxed);
+        if prev + celt <= 1 { Ok(()) } else { Err(windows::core::Error::from(HRESULT(1))) }
+    }
+    fn Reset(&self) -> WinResult<()> {
+        self.get_impl().pos.store(0, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    fn Clone(&self) -> WinResult<IEnumFORMATETC> {
+        let pos = self.get_impl().pos.load(std::sync::atomic::Ordering::Relaxed);
+        Ok(HdropEnumerator { pos: std::sync::atomic::AtomicU32::new(pos) }.into())
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[implement(IDropSource)]
+struct FileDropSource;
+
+#[cfg(target_os = "windows")]
+impl IDropSource_Impl for FileDropSource_Impl {
+    fn QueryContinueDrag(&self, fescapepressed: BOOL, grfkeystate: MODIFIERKEYS_FLAGS) -> HRESULT {
+        if fescapepressed.as_bool() {
+            return DRAGDROP_S_CANCEL;
+        }
+        // MK_LBUTTON = 0x0001 — drop when left button released
+        if grfkeystate.0 & 0x0001 == 0 {
+            return DRAGDROP_S_DROP;
+        }
+        HRESULT(0)
+    }
+    fn GiveFeedback(&self, _dweffect: DROPEFFECT) -> HRESULT {
+        DRAGDROP_S_USEDEFAULTCURSORS
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn start_native_file_drag(path: String) {
+    unsafe {
+        let _ = OleInitialize(None);
+        let data: IDataObject = FileDataObject { path }.into();
+        let src:  IDropSource = FileDropSource.into();
+        let mut effect = DROPEFFECT_NONE;
+        let _ = DoDragDrop(&data, &src, DROPEFFECT_COPY, &mut effect);
+        OleUninitialize();
     }
 }
