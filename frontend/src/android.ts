@@ -1062,10 +1062,10 @@ function renderSettingsView(
     }
 
     await reloadSettingsView({
-      message: result.requires_restart
-        ? 'Identidad cambiada sin borrar cache. Reinicia la app para completar el cambio.'
+      message: result.group_changed
+        ? 'Grupo cambiado. La red se reinicia automáticamente.'
         : 'Identidad cambiada.',
-      tone: result.requires_restart ? 'warn' : 'ok',
+      tone: 'ok',
     });
   });
 

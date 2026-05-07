@@ -1940,6 +1940,46 @@ pub async fn add_file_by_path(
         return Ok(dto);
     }
 
+    // Folders: zip them the same way the "share folder" button does
+    if path.is_dir() {
+        let folder_name = file_name.clone();
+        let zip_name = format!("{}.zip", folder_name);
+        let zip_bytes = tokio::task::spawn_blocking({
+            let fp = path.clone();
+            let fn_ = folder_name.clone();
+            move || zip_directory(&fp, &fn_)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+        let file_count = count_dir_files(&path);
+        let size = zip_bytes.len() as u64;
+        let preview = format!("{} ({} archivos, {})", folder_name, file_count, human_size(size));
+        let id = uuid::Uuid::new_v4().to_string();
+        let created_at = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let zip_path = temp_store::write_item_bytes(&id, &zip_name, &zip_bytes)
+            .map_err(|e| e.to_string())?;
+        let item = ContentItem {
+            id: id.clone(),
+            content_type: fenix_hub_core::content::ContentType::Folder,
+            preview,
+            size_bytes: size,
+            mime_type: Some("application/zip".to_string()),
+            file_name: Some(zip_name),
+            data: ContentData::FilePath(zip_path),
+            created_at,
+        };
+        temp_store::write_item_meta(&item, "bytes").ok();
+        let dto = ContentItemDto::from(&item);
+        state.local_content.write().await.insert(item.id.clone(), item);
+        evict_fifo(&state).await;
+        return Ok(dto);
+    }
+
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let item = create_temp_binary_item(bytes, content_type, Some(file_name), mime_type, None)
         .map_err(|e| e.to_string())?;
