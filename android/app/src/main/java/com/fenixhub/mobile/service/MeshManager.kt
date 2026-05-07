@@ -1,6 +1,7 @@
 package com.fenixhub.mobile.service
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import com.fenixhub.mobile.model.MeshDevice
 import com.fenixhub.mobile.model.MeshDeviceStatus
@@ -9,8 +10,10 @@ import com.fenixhub.mobile.model.MeshRole
 import com.fenixhub.mobile.model.MeshState
 import com.fenixhub.mobile.model.MeshStatus
 import com.fenixhub.mobile.network.BleDirectController
+import com.fenixhub.mobile.network.MeshGattService
 import com.fenixhub.mobile.network.WifiDirectTransferController
 import com.fenixhub.mobile.util.CryptoUtils
+import com.fenixhub.mobile.util.MeshGattCrypto
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,6 +35,7 @@ class MeshManager(
     private val wfdController: WifiDirectTransferController,
     private var bleBridge: MeshBleBridge? = null,
     private var bleExchange: MeshBleExchange? = null,
+    private val gattService: MeshGattService? = null,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val secureRandom = SecureRandom()
@@ -62,6 +66,9 @@ class MeshManager(
         data object LeaveMesh : MeshCommand()
         data object FinalizeTransfer : MeshCommand()
         data object ConfirmAllReceived : MeshCommand()
+        data object CreateMesh : MeshCommand()
+        data object GenerateQrInvite : MeshCommand()
+        data class ValidateQrToken(val token: String) : MeshCommand()
     }
 
     fun dispatch(command: MeshCommand) {
@@ -81,6 +88,9 @@ class MeshManager(
                     is MeshCommand.LeaveMesh -> leaveMesh()
                     is MeshCommand.FinalizeTransfer -> finalizeTransfer()
                     is MeshCommand.ConfirmAllReceived -> confirmAllReceived()
+                    is MeshCommand.CreateMesh -> createMesh()
+                    is MeshCommand.GenerateQrInvite -> generateQrInvite()
+                    is MeshCommand.ValidateQrToken -> validateQrToken(command.token)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Mesh command failed", e)
@@ -125,11 +135,24 @@ class MeshManager(
     }
 
     private suspend fun startBleMeshDiscovery(timeoutMs: Long = MESH_TIMEOUT_MS) {
-        bleBridge = MeshBleBridge(context, this)
-        bleBridge?.startMeshDiscovery(
-            meshId = _state.value.meshId,
-            asHost = _state.value.role == MeshRole.HOST,
-        )
+        if (gattService != null) {
+            val current = _state.value
+            if (current.role == MeshRole.HOST) {
+                gattService.startGattServer(android.os.Build.MODEL)
+                gattService.startAdvertising(android.os.Build.MODEL)
+                collectGattEvents()
+            } else {
+                gattService.startScanning()
+                collectGattScanEvents()
+            }
+        } else {
+            bleBridge = MeshBleBridge(context, this)
+            bleBridge?.startMeshDiscovery(
+                meshId = _state.value.meshId,
+                asHost = _state.value.role == MeshRole.HOST,
+            )
+        }
+
         bleDiscoveryJob?.cancel()
         if (timeoutMs <= 0L) {
             bleDiscoveryJob = null
@@ -140,18 +163,110 @@ class MeshManager(
             while (remaining > 0 && _state.value.status == MeshStatus.DISCOVERING) {
                 delay(1000)
                 remaining -= 1000
-                if (_state.value.status != MeshStatus.DISCOVERING) break
             }
-            if (_state.value.status == MeshStatus.DISCOVERING) {
-                cancelDiscovery()
+            if (_state.value.status == MeshStatus.DISCOVERING) cancelDiscovery()
+        }
+    }
+
+    private fun collectGattEvents() {
+        scope.launch {
+            gattService!!.events.collect { event ->
+                when (event) {
+                    is MeshGattService.GattEvent.JoinRequested -> {
+                        val current = _state.value
+                        if (current.role != MeshRole.HOST) return@collect
+                        if (current.status != MeshStatus.DISCOVERING) return@collect
+                        val exists = current.pendingDevices.any { it.id == event.deviceBleId } ||
+                                current.activeDevices.any { it.id == event.deviceBleId }
+                        if (!exists && current.pendingDevices.size + current.activeDevices.size < current.maxDevices) {
+                            val device = MeshDevice(
+                                id = event.deviceBleId,
+                                name = event.deviceName,
+                                rssi = 0,
+                                status = MeshDeviceStatus.PENDING,
+                                meshId = current.meshId,
+                                gattDevice = event.gattDevice,
+                                pubKeyBytes = event.devicePubKeyBytes,
+                            )
+                            _state.value = current.copy(pendingDevices = current.pendingDevices + device)
+                            _events.emit(MeshEvent.DeviceDiscovered(device))
+                        }
+                    }
+                    else -> {}
+                }
+            }
+        }
+    }
+
+    private fun collectGattScanEvents() {
+        scope.launch {
+            gattService!!.scanEvents.collect { event ->
+                when (event) {
+                    is MeshGattService.ScanEvent.HostFound -> {
+                        val current = _state.value
+                        if (current.role != MeshRole.DEVICE) return@collect
+                        if (current.status != MeshStatus.DISCOVERING) return@collect
+                        val exists = current.pendingDevices.any {
+                            it.id == event.device.address
+                        }
+                        if (!exists) {
+                            val host = MeshDevice(
+                                id = event.device.address,
+                                name = event.hostName,
+                                rssi = 0,
+                                status = MeshDeviceStatus.PENDING,
+                                meshId = null,
+                                gattDevice = event.device,
+                                pubKeyBytes = null,
+                            )
+                            _state.value = current.copy(pendingDevices = current.pendingDevices + host)
+                            _events.emit(MeshEvent.DeviceDiscovered(host))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun collectDeviceGattEvents() {
+        scope.launch {
+            gattService!!.events.collect { event ->
+                when (event) {
+                    is MeshGattService.GattEvent.LobbyAcked -> {
+                        _state.value = _state.value.copy(status = MeshStatus.PENDING)
+                        _events.emit(MeshEvent.DeviceJoined(
+                            MeshDevice(id = "host", name = event.hostName, rssi = 0,
+                                status = MeshDeviceStatus.CONNECTED)
+                        ))
+                    }
+                    is MeshGattService.GattEvent.LobbyKicked -> {
+                        _state.value = MeshState()
+                        _events.emit(MeshEvent.Error("removed_from_lobby"))
+                    }
+                    is MeshGattService.GattEvent.CredentialsReceived -> {
+                        handleCredentialsReceived(event.encryptedBytes)
+                    }
+                    is MeshGattService.GattEvent.RekeyReceived -> {
+                        handleCredentialsReceived(event.encryptedBytes)
+                    }
+                    is MeshGattService.GattEvent.MeshTerminated -> {
+                        _state.value = MeshState()
+                        _events.emit(MeshEvent.MeshDestroyed)
+                    }
+                    else -> {}
+                }
             }
         }
     }
 
     private suspend fun onModalOpened() {
         val current = _state.value
-        if (current.role == MeshRole.HOST && (current.status == MeshStatus.ACTIVE || current.status == MeshStatus.TRANSFERRING)) {
-            startBleMeshDiscovery(timeoutMs = 0)
+        if (current.role == MeshRole.HOST &&
+            (current.status == MeshStatus.ACTIVE_GHOST || current.status == MeshStatus.TRANSFERRING)
+        ) {
+            gattService?.startAdvertising(android.os.Build.MODEL)
+            _state.value = current.copy(status = MeshStatus.ACTIVE)
+            _events.emit(MeshEvent.MeshGhostModeOff)
         }
     }
 
@@ -159,11 +274,19 @@ class MeshManager(
         val current = _state.value
         bleDiscoveryJob?.cancel()
         bleDiscoveryJob = null
-        bleBridge?.stopMeshDiscovery()
-        bleBridge = null
 
-        if (current.status == MeshStatus.DISCOVERING || current.status == MeshStatus.PENDING) {
-            cancelDiscovery()
+        when {
+            current.status == MeshStatus.ACTIVE || current.status == MeshStatus.TRANSFERRING -> {
+                gattService?.stopAdvertising()
+                bleBridge?.stopMeshDiscovery()
+                bleBridge = null
+                _state.value = current.copy(status = MeshStatus.ACTIVE_GHOST)
+                _events.emit(MeshEvent.MeshGhostModeOn)
+            }
+            current.status == MeshStatus.DISCOVERING || current.status == MeshStatus.PENDING -> {
+                cancelDiscovery()
+            }
+            else -> {}
         }
     }
 
@@ -176,26 +299,27 @@ class MeshManager(
         if (index == -1) return
 
         val device = pending[index]
-        val connected = device.copy(status = MeshDeviceStatus.CONNECTED, joinedAt = System.currentTimeMillis())
-
-        if (current.status == MeshStatus.ACTIVE || current.status == MeshStatus.TRANSFERRING) {
-            pending.removeAt(index)
-            val active = (current.activeDevices + connected).distinctBy { it.id }
-            _state.value = current.copy(
-                pendingDevices = pending,
-                activeDevices = active,
-            )
-            renegotiatePassphraseForActiveGroup()
-        } else {
-            pending[index] = connected
-            _state.value = current.copy(pendingDevices = pending)
-        }
+        val accepted = device.copy(status = MeshDeviceStatus.CONNECTED, joinedAt = System.currentTimeMillis())
+        pending[index] = accepted
+        _state.value = current.copy(pendingDevices = pending)
         _events.emit(MeshEvent.DeviceAccepted(deviceId))
+
+        device.gattDevice?.let { bt ->
+            gattService?.indicateTo(bt, mapOf(
+                "type" to MeshGattService.MSG_LOBBY_ACK,
+                "host_name" to android.os.Build.MODEL,
+            ))
+        }
     }
 
     private suspend fun rejectDevice(deviceId: String) {
         val current = _state.value
         if (current.role != MeshRole.HOST) return
+
+        val device = current.pendingDevices.firstOrNull { it.id == deviceId }
+        device?.gattDevice?.let { bt ->
+            gattService?.indicateTo(bt, mapOf("type" to MeshGattService.MSG_LOBBY_KICKED))
+        }
 
         val pending = current.pendingDevices.filterNot { it.id == deviceId }
         _state.value = current.copy(pendingDevices = pending)
@@ -205,20 +329,70 @@ class MeshManager(
     private suspend fun expelDevice(deviceId: String) {
         val current = _state.value
         if (current.role != MeshRole.HOST) return
-        if (current.status != MeshStatus.ACTIVE && current.status != MeshStatus.TRANSFERRING) return
+        if (!current.isActive) return
 
-        val nextActive = current.activeDevices.filterNot { it.id == deviceId }
-        val nextPending = current.pendingDevices.filterNot { it.id == deviceId }
-        if (nextActive.size == current.activeDevices.size && nextPending.size == current.pendingDevices.size) {
-            return
+        val expelled = current.activeDevices.firstOrNull { it.id == deviceId }
+            ?: current.pendingDevices.firstOrNull { it.id == deviceId }
+        expelled?.gattDevice?.let { bt ->
+            gattService?.indicateTo(bt, mapOf("type" to MeshGattService.MSG_LOBBY_KICKED))
         }
 
-        _state.value = current.copy(
-            activeDevices = nextActive,
-            pendingDevices = nextPending,
-        )
+        val nextActive = current.activeDevices.filterNot { it.id == deviceId }
+        _state.value = current.copy(activeDevices = nextActive)
         _events.emit(MeshEvent.DeviceExpelled(deviceId))
-        renegotiatePassphraseForActiveGroup()
+
+        if (nextActive.isEmpty()) return
+
+        val newGroupKey = ByteArray(32).also { secureRandom.nextBytes(it) }
+        val newGroupKeyHex = newGroupKey.joinToString("") { "%02x".format(it) }
+        val newGroupId = UUID.randomUUID().toString()
+        val newP2pPass = generatePassphrase()
+        val newSsid = "DIRECT-FX-${newGroupId.take(6).uppercase()}"
+        val hostKeyPair = MeshGattCrypto.generateEcKeyPair()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            wfdController.cleanup()
+            val config = android.net.wifi.p2p.WifiP2pConfig.Builder()
+                .setNetworkName(newSsid)
+                .setPassphrase(newP2pPass)
+                .build()
+            wfdController.createGroupWithConfig(config) { groupInfo ->
+                scope.launch {
+                    _state.value = _state.value.copy(
+                        meshId = newGroupId,
+                        groupKey = newGroupKey,
+                    )
+                    nextActive.forEach { member ->
+                        val pubKeyBytes = member.pubKeyBytes ?: return@forEach
+                        val encBlob = MeshGattCrypto.encryptCredentials(
+                            payload = MeshGattCrypto.MeshCredentialPayload(
+                                groupId = newGroupId,
+                                groupKeyHex = newGroupKeyHex,
+                                ssid = newSsid,
+                                p2pPass = newP2pPass,
+                                hostIp = groupInfo.groupOwnerAddress,
+                                port = 8765,
+                            ),
+                            devicePubKeyBytes = pubKeyBytes,
+                            hostPrivKey = hostKeyPair.privateKey,
+                            hostPubKeyBytes = hostKeyPair.publicKeyBytes,
+                        )
+                        member.gattDevice?.let { bt ->
+                            gattService?.indicateTo(bt, mapOf(
+                                "type" to MeshGattService.MSG_MESH_REKEYED,
+                                "enc_blob_hex" to encBlob.joinToString("") { "%02x".format(it) },
+                            ))
+                        }
+                    }
+                    _events.emit(MeshEvent.GroupFormed(
+                        meshId = newGroupId,
+                        groupKeyHex = newGroupKeyHex,
+                        hostIp = groupInfo.groupOwnerAddress,
+                        port = 8765,
+                    ))
+                }
+            }
+        }
     }
 
     private suspend fun requestJoin(hostMeshId: String, hostName: String) {
@@ -227,18 +401,11 @@ class MeshManager(
         if (current.status != MeshStatus.DISCOVERING) return
         if (hostMeshId.isBlank()) return
 
-        val host = current.pendingDevices.firstOrNull { it.meshId == hostMeshId } ?: MeshDevice(
-            id = UUID.randomUUID().toString().take(8),
-            name = hostName,
-            rssi = 0,
-            status = MeshDeviceStatus.PENDING,
-            meshId = hostMeshId,
-        )
+        val host = current.pendingDevices.firstOrNull { it.id == hostMeshId } ?: return
+        val gattDevice = host.gattDevice ?: return
 
         bleDiscoveryJob?.cancel()
         bleDiscoveryJob = null
-        bleBridge?.stopMeshDiscovery()
-        bleBridge = null
 
         _state.value = current.copy(
             status = MeshStatus.PENDING,
@@ -246,20 +413,143 @@ class MeshManager(
             pendingDevices = listOf(host),
         )
 
-        // Publicar solicitud de unión por BLE y escuchar passphrase cifrada del host.
-        startPassphraseReceive(hostMeshId)
+        gattService?.connectToHost(gattDevice, android.os.Build.MODEL)
+        collectDeviceGattEvents()
     }
 
-    private fun renegotiatePassphraseForActiveGroup() {
+    private suspend fun createMesh() {
         val current = _state.value
         if (current.role != MeshRole.HOST) return
-        if (current.status != MeshStatus.ACTIVE && current.status != MeshStatus.TRANSFERRING) return
+        if (current.status != MeshStatus.DISCOVERING) return
 
-        val passphrase = generatePassphrase()
-        _state.value = current.copy(passphrase = passphrase)
-        startPassphraseExchange(passphrase)
-        Log.i(TAG, "Mesh passphrase renegotiated for active group")
+        val accepted = current.pendingDevices.filter { it.status == MeshDeviceStatus.CONNECTED }
+        if (accepted.isEmpty()) {
+            _events.emit(MeshEvent.Error("No hay dispositivos en el lobby"))
+            return
+        }
+
+        val groupKey = ByteArray(32).also { secureRandom.nextBytes(it) }
+        val groupKeyHex = groupKey.joinToString("") { "%02x".format(it) }
+        val groupId = UUID.randomUUID().toString()
+
+        val hostKeyPair = MeshGattCrypto.generateEcKeyPair()
+
+        _state.value = current.copy(
+            status = MeshStatus.FORMING,
+            groupKey = groupKey,
+            activeDevices = accepted,
+            pendingDevices = emptyList(),
+        )
+
+        val p2pPass = generatePassphrase()
+        val meshSsid = "DIRECT-FX-${current.meshId ?: groupId.take(6).uppercase()}"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val config = android.net.wifi.p2p.WifiP2pConfig.Builder()
+                .setNetworkName(meshSsid)
+                .setPassphrase(p2pPass)
+                .build()
+            wfdController.createGroupWithConfig(config) { groupInfo ->
+                scope.launch {
+                    val hostIp = groupInfo.groupOwnerAddress
+                    burstCredentials(
+                        accepted = accepted,
+                        groupId = groupId,
+                        groupKeyHex = groupKeyHex,
+                        ssid = meshSsid,
+                        p2pPass = p2pPass,
+                        hostIp = hostIp,
+                        port = 8765,
+                        hostKeyPair = hostKeyPair,
+                    )
+                    _state.value = _state.value.copy(status = MeshStatus.ACTIVE)
+                    _events.emit(MeshEvent.GroupFormed(groupId, groupKeyHex, hostIp, 8765))
+                }
+            }
+        } else {
+            _events.emit(MeshEvent.Error("mesh_requires_android_10"))
+            _state.value = MeshState()
+        }
     }
+
+    private fun burstCredentials(
+        accepted: List<MeshDevice>,
+        groupId: String,
+        groupKeyHex: String,
+        ssid: String,
+        p2pPass: String,
+        hostIp: String,
+        port: Int,
+        hostKeyPair: MeshGattCrypto.EcKeyPair,
+    ) {
+        val payload = MeshGattCrypto.MeshCredentialPayload(
+            groupId = groupId,
+            groupKeyHex = groupKeyHex,
+            ssid = ssid,
+            p2pPass = p2pPass,
+            hostIp = hostIp,
+            port = port,
+        )
+        accepted.forEach { member ->
+            val pubKeyBytes = member.pubKeyBytes ?: return@forEach
+            val encBlob = MeshGattCrypto.encryptCredentials(
+                payload           = payload,
+                devicePubKeyBytes = pubKeyBytes,
+                hostPrivKey       = hostKeyPair.privateKey,
+                hostPubKeyBytes   = hostKeyPair.publicKeyBytes,
+            )
+            member.gattDevice?.let { bt ->
+                gattService?.indicateTo(bt, mapOf(
+                    "type"         to MeshGattService.MSG_MESH_CREDENTIALS,
+                    "enc_blob_hex" to encBlob.joinToString("") { "%02x".format(it) },
+                ))
+            }
+        }
+    }
+
+    private suspend fun handleCredentialsReceived(encryptedBytes: ByteArray) {
+        val creds = gattService?.decryptCredentials(encryptedBytes) ?: return
+
+        gattService?.stopScanning()
+
+        _state.value = _state.value.copy(
+            status = MeshStatus.FORMING,
+            meshId = creds.groupId,
+            groupKey = hexToBytes(creds.groupKeyHex),
+        )
+
+        connectToMeshWifi(creds)
+    }
+
+    private fun connectToMeshWifi(creds: MeshGattCrypto.MeshCredentialPayload) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val suggestion = android.net.wifi.WifiNetworkSuggestion.Builder()
+                .setSsid(creds.ssid)
+                .setWpa2Passphrase(creds.p2pPass)
+                .setIsAppInteractionRequired(false)
+                .build()
+            val wifiManager = context.applicationContext.getSystemService(
+                android.net.wifi.WifiManager::class.java
+            )
+            wifiManager?.removeNetworkSuggestions(emptyList())
+            val result = wifiManager?.addNetworkSuggestions(listOf(suggestion))
+            Log.i(TAG, "WiFi suggestion added: result=$result ssid=${creds.ssid}")
+
+            scope.launch {
+                delay(3000)
+                _state.value = _state.value.copy(status = MeshStatus.ACTIVE)
+                _events.emit(MeshEvent.GroupFormed(
+                    meshId = creds.groupId,
+                    groupKeyHex = creds.groupKeyHex,
+                    hostIp = creds.hostIp ?: "",
+                    port = creds.port,
+                ))
+            }
+        }
+    }
+
+    private fun hexToBytes(hex: String): ByteArray =
+        ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 
     private suspend fun cancelDiscovery() {
         bleDiscoveryJob?.cancel()
@@ -268,12 +558,10 @@ class MeshManager(
         bleBridge = null
         bleExchange?.stop()
         bleExchange = null
-        val current = _state.value
-        if (current.role == MeshRole.HOST) {
-            _state.value = MeshState()
-        } else {
-            _state.value = MeshState()
-        }
+        gattService?.stopGattServer()
+        gattService?.stopAdvertising()
+        gattService?.stopScanning()
+        _state.value = MeshState()
     }
 
     private suspend fun closeModal() {
@@ -322,65 +610,21 @@ class MeshManager(
             isHost = true,
             listener = object : MeshPassphraseListener {
                 override fun onPassphraseReceived(exchange: MeshPassphraseExchange) {
-                    // Host doesn't need to receive passphrase, ignore
                 }
             },
         )
         bleExchange?.start()
     }
 
-    private fun startPassphraseReceive(meshId: String) {
-        bleExchange?.stop()
-        bleExchange = MeshBleExchange(
-            context = context,
-            meshId = meshId,
-            passphrase = "",
-            deviceName = android.os.Build.MODEL,
-            isHost = false,
-            listener = object : MeshPassphraseListener {
-                override fun onPassphraseReceived(exchange: MeshPassphraseExchange) {
-                    if (exchange.encryptedPassphrase.isBlank()) {
-                        return
-                    }
-                    scope.launch {
-                        handlePassphraseReceived(exchange)
-                    }
-                }
-            },
-            discoveryMode = true,
-        )
-        bleExchange?.start()
-    }
+    private fun renegotiatePassphraseForActiveGroup() {
+        val current = _state.value
+        if (current.role != MeshRole.HOST) return
+        if (current.status != MeshStatus.ACTIVE && current.status != MeshStatus.TRANSFERRING) return
 
-    private suspend fun handlePassphraseReceived(exchange: MeshPassphraseExchange) {
-        val meshId = _state.value.meshId ?: return
-        val passphrase = decryptPassphrase(exchange.encryptedPassphrase, meshId) ?: return
-
-        bleExchange?.stop()
-        bleExchange = null
-
-        _state.value = _state.value.copy(
-            passphrase = passphrase,
-            activeDevices = _state.value.pendingDevices.map {
-                it.copy(status = MeshDeviceStatus.CONNECTED, joinedAt = System.currentTimeMillis())
-            },
-            pendingDevices = emptyList(),
-            status = MeshStatus.FORMING,
-        )
-
-        wfdController.connectToGroup(
-            goDeviceAddress = exchange.hostDeviceId,
-            passphrase = passphrase,
-            networkName = "DIRECT-$meshId",
-        ) { groupInfo ->
-            scope.launch {
-                _state.value = _state.value.copy(
-                    status = MeshStatus.ACTIVE,
-                    groupCreatedAt = System.currentTimeMillis(),
-                )
-                _events.emit(MeshEvent.GroupFormed(meshId))
-            }
-        }
+        val passphrase = generatePassphrase()
+        _state.value = current.copy(passphrase = passphrase)
+        startPassphraseExchange(passphrase)
+        Log.i(TAG, "Mesh passphrase renegotiated for active group")
     }
 
     private suspend fun formWifiDirectGroup() {
@@ -394,7 +638,12 @@ class MeshManager(
                     status = MeshStatus.ACTIVE,
                     groupCreatedAt = System.currentTimeMillis(),
                 )
-                _events.emit(MeshEvent.GroupFormed(current.meshId ?: "unknown"))
+                _events.emit(MeshEvent.GroupFormed(
+                    meshId = current.meshId ?: "unknown",
+                    groupKeyHex = CryptoUtils.toHex(current.groupKey ?: ByteArray(32)),
+                    hostIp = groupInfo.groupOwnerAddress,
+                    port = 8765,
+                ))
             }
         }
     }
@@ -411,6 +660,7 @@ class MeshManager(
         bleBridge = null
         bleExchange?.stop()
         bleExchange = null
+        gattService?.disconnectFromHost()
         wfdController.cleanup()
         _state.value = MeshState()
         _events.emit(MeshEvent.MeshDestroyed)
@@ -439,6 +689,8 @@ class MeshManager(
     private suspend fun destroyMesh() {
         val current = _state.value
         bleDiscoveryJob?.cancel()
+        gattService?.stopGattServer()
+        gattService?.stopAdvertising()
         wfdController.cleanup()
         _state.value = MeshState()
         _events.emit(MeshEvent.MeshDestroyed)
@@ -500,6 +752,29 @@ class MeshManager(
                 renegotiatePassphraseForActiveGroup()
             }
         }
+    }
+
+    private val validQrTokens = mutableMapOf<String, Long>()
+
+    private fun generateQrInvite() {
+        val current = _state.value
+        if (current.role != MeshRole.HOST) return
+        if (!current.isActive && current.status != MeshStatus.DISCOVERING) return
+
+        val bleMac = context.getSystemService(android.bluetooth.BluetoothManager::class.java)
+            ?.adapter?.address ?: "00:00:00:00:00:00"
+        val invite = com.fenixhub.mobile.util.MeshQrUtils.generateInvite(bleMac)
+        validQrTokens[invite.token] = invite.expiresAt
+        scope.launch { _events.emit(MeshEvent.QrInviteGenerated(invite.uri, invite.token)) }
+    }
+
+    private fun validateQrToken(token: String) {
+        val expiresAt = validQrTokens[token] ?: return
+        if (!com.fenixhub.mobile.util.MeshQrUtils.isTokenValid(token, expiresAt)) {
+            validQrTokens.remove(token)
+            return
+        }
+        validQrTokens.remove(token)
     }
 
     private fun generateMeshId(): String {

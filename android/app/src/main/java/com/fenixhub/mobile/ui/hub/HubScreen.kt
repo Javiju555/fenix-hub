@@ -37,7 +37,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -48,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import com.fenixhub.mobile.model.HubContentType
 import com.fenixhub.mobile.model.LocalContent
 import com.fenixhub.mobile.model.PeerContent
+import com.fenixhub.mobile.model.MeshStatus
 import com.fenixhub.mobile.ui.theme.HubBlue
 import com.fenixhub.mobile.ui.theme.HubNight
 import com.fenixhub.mobile.ui.theme.HubPanel
@@ -58,6 +63,7 @@ import com.fenixhub.mobile.util.PreviewUtils
 @Composable
 fun HubScreen(
     uiState: HubUiState,
+    meshViewModel: MeshViewModel,
     overlayPermissionGranted: Boolean,
     notificationPermissionGranted: Boolean,
     onOpenOverlay: () -> Unit,
@@ -70,6 +76,9 @@ fun HubScreen(
     onSelectLocalContent: (String) -> Unit,
     onReceivePeer: (PeerContent) -> Unit,
 ) {
+    var showMeshModal by remember { mutableStateOf(false) }
+    val meshState by meshViewModel.state.collectAsState()
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -147,6 +156,27 @@ fun HubScreen(
                 }
             }
         }
+    }
+
+    if (showMeshModal) {
+        val publishedContentIds = uiState.localContent
+            .filter { it.isPublished }
+            .map { it.contentId }
+        MeshModal(
+            state            = meshState,
+            onDismiss        = { showMeshModal = false },
+            onStartHost      = { meshViewModel.startAsHost(publishedContentIds) },
+            onStartDevice    = { meshViewModel.startAsDevice() },
+            onAccept         = { meshViewModel.acceptDevice(it) },
+            onReject         = { meshViewModel.rejectDevice(it) },
+            onCreateMesh     = { meshViewModel.createMesh() },
+            onRequestJoin    = { meshViewModel.requestJoin(it) },
+            onKick           = { meshViewModel.kickDevice(it) },
+            onEndMesh        = {
+                meshViewModel.endMesh()
+                showMeshModal = false
+            },
+        )
     }
 }
 
@@ -234,6 +264,12 @@ private fun ComposerCard(
                 Icon(Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Overlay")
+            }
+            ElevatedButton(
+                onClick = { showMeshModal = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (meshState.isActive) "Mesh ●" else "Mesh")
             }
         }
     }

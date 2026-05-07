@@ -21,7 +21,21 @@ class SettingsStore(private val context: Context) {
     private val mutableSettings = MutableStateFlow(loadSafely())
     val settingsFlow: StateFlow<AppSettings> = mutableSettings.asStateFlow()
 
-    fun current(): AppSettings = mutableSettings.value
+    // Transient in-memory override for mesh sessions. Never persisted.
+    @Volatile private var meshSessionOverride: AppSettings? = null
+
+    fun current(): AppSettings = meshSessionOverride ?: mutableSettings.value
+
+    fun overrideMeshSession(groupId: String, groupKeyHex: String) {
+        val base = mutableSettings.value
+        meshSessionOverride = base.copy(groupId = groupId, groupKeyHex = groupKeyHex)
+        mutableSettings.value = meshSessionOverride!!
+    }
+
+    fun clearMeshSessionOverride() {
+        meshSessionOverride = null
+        mutableSettings.value = loadSafely()
+    }
 
     fun consumeStorageRecoveryMessage(): String? {
         val message = storageRecoveryMessage

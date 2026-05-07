@@ -112,17 +112,22 @@ class FenixHubService : Service() {
             meshManager.events.collect { event ->
                 when (event) {
                     is MeshEvent.GroupFormed -> {
-                        val state = meshManager.state.value
-                        if (state.role == MeshRole.HOST) {
-                            onMeshActive(state.localContentPool, isHost = true)
-                        }
+                        val current = meshManager.state.value
+                        settingsStore.overrideMeshSession(
+                            groupId = event.meshId,
+                            groupKeyHex = event.groupKeyHex,
+                        )
+                        onMeshActive(current.localContentPool, isHost = current.role == MeshRole.HOST)
                     }
                     is MeshEvent.MeshDestroyed -> {
+                        settingsStore.clearMeshSessionOverride()
                         stopMeshHttpServer()
                     }
                     is MeshEvent.Error -> {
                         showToast(event.message)
                     }
+                    is MeshEvent.MeshGhostModeOn -> { /* advertising stopped, transfers continue */ }
+                    is MeshEvent.MeshGhostModeOff -> { /* advertising resumed */ }
                     else -> {}
                 }
             }
