@@ -1,6 +1,10 @@
 package com.fenixhub.mobile.service
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.util.Log
 import com.fenixhub.mobile.model.MeshDevice
@@ -48,6 +52,9 @@ class MeshManager(
 
     private var bleDiscoveryJob: Job? = null
     private var modalCloseGuardJob: Job? = null
+    private var meshWifiSuggestion: android.net.wifi.WifiNetworkSuggestion? = null
+    private var meshNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private var meshWifiTimeoutJob: Job? = null
 
     private val MESH_SERVICE_UUID = "6f8d3a52-7a6b-4b62-b2c0-5c0d49f45713"
     private val MESH_TIMEOUT_MS = 5 * 60 * 1000L
@@ -522,30 +529,76 @@ class MeshManager(
     }
 
     private fun connectToMeshWifi(creds: MeshGattCrypto.MeshCredentialPayload) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val suggestion = android.net.wifi.WifiNetworkSuggestion.Builder()
-                .setSsid(creds.ssid)
-                .setWpa2Passphrase(creds.p2pPass)
-                .setIsAppInteractionRequired(false)
-                .build()
-            val wifiManager = context.applicationContext.getSystemService(
-                android.net.wifi.WifiManager::class.java
-            )
-            wifiManager?.removeNetworkSuggestions(emptyList())
-            val result = wifiManager?.addNetworkSuggestions(listOf(suggestion))
-            Log.i(TAG, "WiFi suggestion added: result=$result ssid=${creds.ssid}")
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val wifiManager = context.applicationContext
+            .getSystemService(android.net.wifi.WifiManager::class.java) ?: return
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return
 
-            scope.launch {
-                delay(3000)
-                _state.value = _state.value.copy(status = MeshStatus.ACTIVE)
-                _events.emit(MeshEvent.GroupFormed(
-                    meshId = creds.groupId,
-                    groupKeyHex = creds.groupKeyHex,
-                    hostIp = creds.hostIp ?: "",
-                    port = creds.port,
-                ))
+        meshWifiSuggestion?.let { wifiManager.removeNetworkSuggestions(listOf(it)) }
+        val suggestion = android.net.wifi.WifiNetworkSuggestion.Builder()
+            .setSsid(creds.ssid)
+            .setWpa2Passphrase(creds.p2pPass)
+            .setIsAppInteractionRequired(false)
+            .build()
+        meshWifiSuggestion = suggestion
+        val result = wifiManager.addNetworkSuggestions(listOf(suggestion))
+        Log.i(TAG, "WiFi suggestion added: result=$result ssid=${creds.ssid}")
+
+        val fired = java.util.concurrent.atomic.AtomicBoolean(false)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (!fired.compareAndSet(false, true)) return
+                Log.i(TAG, "Mesh WiFi connected")
+                runCatching { cm.unregisterNetworkCallback(this) }
+                if (meshNetworkCallback === this) meshNetworkCallback = null
+                meshWifiTimeoutJob?.cancel()
+                meshWifiTimeoutJob = null
+                scope.launch {
+                    _state.value = _state.value.copy(status = MeshStatus.ACTIVE)
+                    _events.emit(MeshEvent.GroupFormed(
+                        meshId = creds.groupId,
+                        groupKeyHex = creds.groupKeyHex,
+                        hostIp = creds.hostIp ?: "",
+                        port = creds.port,
+                    ))
+                }
             }
         }
+
+        meshNetworkCallback?.let { runCatching { cm.unregisterNetworkCallback(it) } }
+        meshNetworkCallback = callback
+        cm.registerNetworkCallback(
+            NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build(),
+            callback,
+        )
+
+        meshWifiTimeoutJob?.cancel()
+        meshWifiTimeoutJob = scope.launch {
+            delay(30_000)
+            if (_state.value.status == MeshStatus.FORMING) {
+                Log.w(TAG, "Mesh WiFi connect timeout after 30s")
+                runCatching { cm.unregisterNetworkCallback(callback) }
+                if (meshNetworkCallback === callback) meshNetworkCallback = null
+                meshWifiSuggestion?.let { wifiManager.removeNetworkSuggestions(listOf(it)) }
+                meshWifiSuggestion = null
+                _state.value = MeshState()
+                _events.emit(MeshEvent.Error("mesh_wifi_connect_timeout"))
+            }
+        }
+    }
+
+    private fun cleanupMeshWifi() {
+        meshWifiTimeoutJob?.cancel()
+        meshWifiTimeoutJob = null
+        val cm = context.getSystemService(ConnectivityManager::class.java)
+        meshNetworkCallback?.let { cb -> runCatching { cm?.unregisterNetworkCallback(cb) } }
+        meshNetworkCallback = null
+        val wifiManager = context.applicationContext
+            .getSystemService(android.net.wifi.WifiManager::class.java)
+        meshWifiSuggestion?.let { wifiManager?.removeNetworkSuggestions(listOf(it)) }
+        meshWifiSuggestion = null
     }
 
     private fun hexToBytes(hex: String): ByteArray =
@@ -561,6 +614,7 @@ class MeshManager(
         gattService?.stopGattServer()
         gattService?.stopAdvertising()
         gattService?.stopScanning()
+        cleanupMeshWifi()
         _state.value = MeshState()
     }
 
@@ -662,6 +716,7 @@ class MeshManager(
         bleExchange = null
         gattService?.disconnectFromHost()
         wfdController.cleanup()
+        cleanupMeshWifi()
         _state.value = MeshState()
         _events.emit(MeshEvent.MeshDestroyed)
     }
@@ -692,6 +747,7 @@ class MeshManager(
         gattService?.stopGattServer()
         gattService?.stopAdvertising()
         wfdController.cleanup()
+        cleanupMeshWifi()
         _state.value = MeshState()
         _events.emit(MeshEvent.MeshDestroyed)
     }
