@@ -68,20 +68,20 @@ object TransportHardwareInspector {
     }
 
     fun hasBlePermissions(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            return true
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            hasPermission(context, Manifest.permission.BLUETOOTH_SCAN) &&
+                hasPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            // API 29-30: BLE scanning requires ACCESS_FINE_LOCATION at runtime
+            hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
         }
-
-        return hasPermission(context, Manifest.permission.BLUETOOTH_SCAN) &&
-            hasPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
     }
 
     fun hasBleAdvertisePermission(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            return true
-        }
-
-        return hasPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE)
+        // API 31+: BLUETOOTH_ADVERTISE is dangerous and requires runtime grant.
+        // API 29-30: BLUETOOTH_ADMIN is a normal permission, auto-granted from manifest.
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            hasPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE)
     }
 
     fun hasWifiDirectPermissions(context: Context): Boolean {

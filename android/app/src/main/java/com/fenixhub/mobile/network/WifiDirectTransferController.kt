@@ -1,5 +1,6 @@
 package com.fenixhub.mobile.network
 
+import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -32,6 +33,7 @@ import java.net.NetworkInterface
  * El GO (Group Owner) es siempre el que envía contenido. El client es quien recibe.
  * Esto simplifica el modelo: no necesitamos coordinación bidireccional.
  */
+@SuppressLint("MissingPermission")
 class WifiDirectTransferController(private val context: Context) {
 
     private val appContext = context.applicationContext
@@ -356,13 +358,16 @@ class WifiDirectTransferController(private val context: Context) {
                     }
                 }
                 WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        val device = intent?.getParcelableExtra(
+                    val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent?.getParcelableExtra(
                             WifiP2pManager.EXTRA_WIFI_P2P_DEVICE,
                             android.net.wifi.p2p.WifiP2pDevice::class.java,
                         )
-                        device?.let { Log.d(TAG, "This device: ${it.deviceName} (${it.deviceAddress})") }
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent?.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE)
                     }
+                    device?.let { Log.d(TAG, "This device: ${it.deviceName} (${it.deviceAddress})") }
                 }
             }
         }

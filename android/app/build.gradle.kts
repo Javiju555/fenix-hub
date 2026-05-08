@@ -19,7 +19,7 @@ android {
 
     defaultConfig {
         applicationId = "com.fenixhub.mobile"
-        minSdk = 31
+        minSdk = 29
         targetSdk = 34
         versionCode = 11
         versionName = "0.3.5"
