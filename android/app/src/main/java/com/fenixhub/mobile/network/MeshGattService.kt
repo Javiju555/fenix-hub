@@ -4,8 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
+import android.os.Build
 import android.os.ParcelUuid
 import android.util.Log
 import com.fenixhub.mobile.util.MeshGattCrypto
@@ -15,6 +14,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import org.json.JSONObject
 import java.security.PrivateKey
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArraySet
 
 @SuppressLint("MissingPermission")
 class MeshGattService(private val context: Context) {
@@ -56,9 +57,9 @@ class MeshGattService(private val context: Context) {
     val events: SharedFlow<GattEvent> = _events.asSharedFlow()
 
     private var gattServer: BluetoothGattServer? = null
-    private val connectedClients = mutableMapOf<String, BluetoothDevice>()
-    private val subscribedClients = mutableSetOf<String>()
-    private val mainHandler = Handler(Looper.getMainLooper())
+    // Accessed from both BluetoothGattServerCallback (Binder thread) and coroutine scope
+    private val connectedClients = ConcurrentHashMap<String, BluetoothDevice>()
+    private val subscribedClients = CopyOnWriteArraySet<String>()
 
     fun startGattServer(hostName: String) {
         val manager = context.getSystemService(BluetoothManager::class.java) ?: return
@@ -107,10 +108,9 @@ class MeshGattService(private val context: Context) {
             ?.getCharacteristic(CONTROL_CHAR_UUID) ?: return 0
         val payload = JSONObject(message).toString().toByteArray(Charsets.UTF_8)
         var count = 0
-        subscribedClients.toList().forEach { addr ->
+        subscribedClients.forEach { addr ->
             val device = connectedClients[addr] ?: return@forEach
-            char.value = payload
-            server.notifyCharacteristicChanged(device, char, true)
+            notifyDevice(server, char, device, payload)
             count++
         }
         return count
@@ -121,8 +121,22 @@ class MeshGattService(private val context: Context) {
         val char = server.getService(MESH_SERVICE_UUID)
             ?.getCharacteristic(CONTROL_CHAR_UUID) ?: return
         val payload = JSONObject(message).toString().toByteArray(Charsets.UTF_8)
-        char.value = payload
-        server.notifyCharacteristicChanged(device, char, true)
+        notifyDevice(server, char, device, payload)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun notifyDevice(
+        server: BluetoothGattServer,
+        char: BluetoothGattCharacteristic,
+        device: BluetoothDevice,
+        payload: ByteArray,
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            server.notifyCharacteristicChanged(device, char, true, payload)
+        } else {
+            char.value = payload
+            server.notifyCharacteristicChanged(device, char, true)
+        }
     }
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
@@ -240,8 +254,13 @@ class MeshGattService(private val context: Context) {
 
             gatt.setCharacteristicNotification(controlChar, true)
             val cccd = controlChar.getDescriptor(CCCD_UUID) ?: return
-            cccd.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-            gatt.writeDescriptor(cccd)
+            @Suppress("DEPRECATION")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
+            } else {
+                cccd.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                gatt.writeDescriptor(cccd)
+            }
         }
 
         override fun onDescriptorWrite(
@@ -261,34 +280,56 @@ class MeshGattService(private val context: Context) {
                 put("dev_pubkey_hex", bytesToHex(pendingDevicePubBytes))
             }.toString().toByteArray(Charsets.UTF_8)
 
-            joinChar.value = payload
-            joinChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            gatt.writeCharacteristic(joinChar)
+            @Suppress("DEPRECATION")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(joinChar, payload, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            } else {
+                joinChar.value = payload
+                joinChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                gatt.writeCharacteristic(joinChar)
+            }
             Log.d(TAG, "Client: JoinRequest written")
         }
 
+        // API 33+: system passes value directly, no longer populates characteristic.value
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+        ) {
+            if (characteristic.uuid != CONTROL_CHAR_UUID) return
+            parseControlMessage(value)
+        }
+
+        // API < 33: value is in characteristic.value
+        @Suppress("DEPRECATION")
+        @Deprecated("Use onCharacteristicChanged(BluetoothGatt, BluetoothGattCharacteristic, ByteArray)")
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
         ) {
             if (characteristic.uuid != CONTROL_CHAR_UUID) return
-            val json = runCatching {
-                JSONObject(String(characteristic.value, Charsets.UTF_8))
-            }.getOrNull() ?: return
+            parseControlMessage(characteristic.value ?: return)
+        }
+    }
 
-            when (json.optString("type")) {
-                MSG_LOBBY_ACK  -> _events.tryEmit(GattEvent.LobbyAcked(json.optString("host_name")))
-                MSG_LOBBY_KICKED -> _events.tryEmit(GattEvent.LobbyKicked)
-                MSG_MESH_CREDENTIALS -> {
-                    val enc = hexToBytes(json.getString("enc_blob_hex"))
-                    _events.tryEmit(GattEvent.CredentialsReceived(enc))
-                }
-                MSG_MESH_REKEYED -> {
-                    val enc = hexToBytes(json.getString("enc_blob_hex"))
-                    _events.tryEmit(GattEvent.RekeyReceived(enc))
-                }
-                MSG_MESH_TERMINATED -> _events.tryEmit(GattEvent.MeshTerminated)
+    private fun parseControlMessage(value: ByteArray) {
+        val json = runCatching {
+            JSONObject(String(value, Charsets.UTF_8))
+        }.getOrNull() ?: return
+
+        when (json.optString("type")) {
+            MSG_LOBBY_ACK        -> _events.tryEmit(GattEvent.LobbyAcked(json.optString("host_name")))
+            MSG_LOBBY_KICKED     -> _events.tryEmit(GattEvent.LobbyKicked)
+            MSG_MESH_CREDENTIALS -> {
+                val enc = hexToBytes(json.getString("enc_blob_hex"))
+                _events.tryEmit(GattEvent.CredentialsReceived(enc))
             }
+            MSG_MESH_REKEYED -> {
+                val enc = hexToBytes(json.getString("enc_blob_hex"))
+                _events.tryEmit(GattEvent.RekeyReceived(enc))
+            }
+            MSG_MESH_TERMINATED  -> _events.tryEmit(GattEvent.MeshTerminated)
         }
     }
 

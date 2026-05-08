@@ -27,9 +27,7 @@ class SettingsStore(private val context: Context) {
     fun current(): AppSettings = meshSessionOverride ?: mutableSettings.value
 
     fun overrideMeshSession(groupId: String, groupKeyHex: String) {
-        val base = mutableSettings.value
-        meshSessionOverride = base.copy(groupId = groupId, groupKeyHex = groupKeyHex)
-        mutableSettings.value = meshSessionOverride!!
+        meshSessionOverride = mutableSettings.value.copy(groupId = groupId, groupKeyHex = groupKeyHex)
     }
 
     fun clearMeshSessionOverride() {
