@@ -5,7 +5,6 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.os.Build
 import android.util.Log
 import com.fenixhub.mobile.model.MeshDevice
 import com.fenixhub.mobile.model.MeshDeviceStatus
@@ -357,47 +356,45 @@ class MeshManager(
         val newSsid = "DIRECT-FX-${newGroupId.take(6).uppercase()}"
         val hostKeyPair = MeshGattCrypto.generateEcKeyPair()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            wfdController.cleanup()
-            val config = android.net.wifi.p2p.WifiP2pConfig.Builder()
-                .setNetworkName(newSsid)
-                .setPassphrase(newP2pPass)
-                .build()
-            wfdController.createGroupWithConfig(config) { groupInfo ->
-                scope.launch {
-                    _state.value = _state.value.copy(
-                        meshId = newGroupId,
-                        groupKey = newGroupKey,
+        wfdController.cleanup()
+        val config = android.net.wifi.p2p.WifiP2pConfig.Builder()
+            .setNetworkName(newSsid)
+            .setPassphrase(newP2pPass)
+            .build()
+        wfdController.createGroupWithConfig(config) { groupInfo ->
+            scope.launch {
+                _state.value = _state.value.copy(
+                    meshId = newGroupId,
+                    groupKey = newGroupKey,
+                )
+                nextActive.forEach { member ->
+                    val pubKeyBytes = member.pubKeyBytes ?: return@forEach
+                    val encBlob = MeshGattCrypto.encryptCredentials(
+                        payload = MeshGattCrypto.MeshCredentialPayload(
+                            groupId = newGroupId,
+                            groupKeyHex = newGroupKeyHex,
+                            ssid = newSsid,
+                            p2pPass = newP2pPass,
+                            hostIp = groupInfo.groupOwnerAddress,
+                            port = 8765,
+                        ),
+                        devicePubKeyBytes = pubKeyBytes,
+                        hostPrivKey = hostKeyPair.privateKey,
+                        hostPubKeyBytes = hostKeyPair.publicKeyBytes,
                     )
-                    nextActive.forEach { member ->
-                        val pubKeyBytes = member.pubKeyBytes ?: return@forEach
-                        val encBlob = MeshGattCrypto.encryptCredentials(
-                            payload = MeshGattCrypto.MeshCredentialPayload(
-                                groupId = newGroupId,
-                                groupKeyHex = newGroupKeyHex,
-                                ssid = newSsid,
-                                p2pPass = newP2pPass,
-                                hostIp = groupInfo.groupOwnerAddress,
-                                port = 8765,
-                            ),
-                            devicePubKeyBytes = pubKeyBytes,
-                            hostPrivKey = hostKeyPair.privateKey,
-                            hostPubKeyBytes = hostKeyPair.publicKeyBytes,
-                        )
-                        member.gattDevice?.let { bt ->
-                            gattService?.indicateTo(bt, mapOf(
-                                "type" to MeshGattService.MSG_MESH_REKEYED,
-                                "enc_blob_hex" to encBlob.joinToString("") { "%02x".format(it) },
-                            ))
-                        }
+                    member.gattDevice?.let { bt ->
+                        gattService?.indicateTo(bt, mapOf(
+                            "type" to MeshGattService.MSG_MESH_REKEYED,
+                            "enc_blob_hex" to encBlob.joinToString("") { "%02x".format(it) },
+                        ))
                     }
-                    _events.emit(MeshEvent.GroupFormed(
-                        meshId = newGroupId,
-                        groupKeyHex = newGroupKeyHex,
-                        hostIp = groupInfo.groupOwnerAddress,
-                        port = 8765,
-                    ))
                 }
+                _events.emit(MeshEvent.GroupFormed(
+                    meshId = newGroupId,
+                    groupKeyHex = newGroupKeyHex,
+                    hostIp = groupInfo.groupOwnerAddress,
+                    port = 8765,
+                ))
             }
         }
     }
@@ -451,31 +448,26 @@ class MeshManager(
         val p2pPass = generatePassphrase()
         val meshSsid = "DIRECT-FX-${current.meshId ?: groupId.take(6).uppercase()}"
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val config = android.net.wifi.p2p.WifiP2pConfig.Builder()
-                .setNetworkName(meshSsid)
-                .setPassphrase(p2pPass)
-                .build()
-            wfdController.createGroupWithConfig(config) { groupInfo ->
-                scope.launch {
-                    val hostIp = groupInfo.groupOwnerAddress
-                    burstCredentials(
-                        accepted = accepted,
-                        groupId = groupId,
-                        groupKeyHex = groupKeyHex,
-                        ssid = meshSsid,
-                        p2pPass = p2pPass,
-                        hostIp = hostIp,
-                        port = 8765,
-                        hostKeyPair = hostKeyPair,
-                    )
-                    _state.value = _state.value.copy(status = MeshStatus.ACTIVE)
-                    _events.emit(MeshEvent.GroupFormed(groupId, groupKeyHex, hostIp, 8765))
-                }
+        val config = android.net.wifi.p2p.WifiP2pConfig.Builder()
+            .setNetworkName(meshSsid)
+            .setPassphrase(p2pPass)
+            .build()
+        wfdController.createGroupWithConfig(config) { groupInfo ->
+            scope.launch {
+                val hostIp = groupInfo.groupOwnerAddress
+                burstCredentials(
+                    accepted = accepted,
+                    groupId = groupId,
+                    groupKeyHex = groupKeyHex,
+                    ssid = meshSsid,
+                    p2pPass = p2pPass,
+                    hostIp = hostIp,
+                    port = 8765,
+                    hostKeyPair = hostKeyPair,
+                )
+                _state.value = _state.value.copy(status = MeshStatus.ACTIVE)
+                _events.emit(MeshEvent.GroupFormed(groupId, groupKeyHex, hostIp, 8765))
             }
-        } else {
-            _events.emit(MeshEvent.Error("mesh_requires_android_10"))
-            _state.value = MeshState()
         }
     }
 
@@ -529,7 +521,6 @@ class MeshManager(
     }
 
     private fun connectToMeshWifi(creds: MeshGattCrypto.MeshCredentialPayload) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         val wifiManager = context.applicationContext
             .getSystemService(android.net.wifi.WifiManager::class.java) ?: return
         val cm = context.getSystemService(ConnectivityManager::class.java) ?: return
