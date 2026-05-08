@@ -127,6 +127,8 @@ fun HubScreen(
                 onPickImage = onPickImage,
                 onPublish = onPublishSelected,
                 onCopySelected = onCopySelected,
+                onOpenMesh = { showMeshModal = true },
+                meshIsActive = meshState.isActive,
             )
             SectionTitle("Tu contenido")
             Row(
@@ -223,6 +225,8 @@ private fun ComposerCard(
     onPickImage: () -> Unit,
     onPublish: () -> Unit,
     onCopySelected: () -> Unit,
+    onOpenMesh: () -> Unit,
+    meshIsActive: Boolean,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = HubPanel),
@@ -266,10 +270,10 @@ private fun ComposerCard(
                 Text("Overlay")
             }
             ElevatedButton(
-                onClick = { showMeshModal = true },
+                onClick = onOpenMesh,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (meshState.isActive) "Mesh ●" else "Mesh")
+                Text(if (meshIsActive) "Mesh ●" else "Mesh")
             }
         }
     }
