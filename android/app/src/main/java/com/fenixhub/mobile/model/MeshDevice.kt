@@ -11,6 +11,7 @@ data class MeshDevice(
     val meshId: String? = null,
     val gattDevice: BluetoothDevice? = null,
     val pubKeyBytes: ByteArray? = null,
+    val p2pIp: String? = null,
 )
 
 enum class MeshDeviceStatus {

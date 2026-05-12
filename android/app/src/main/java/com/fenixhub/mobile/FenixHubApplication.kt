@@ -42,6 +42,8 @@ class AppContainer(application: Application) {
             bleController = bleDirectController,
             wfdController = wifiDirectTransferController,
             gattService = meshGattService,
+            httpClient = httpClient,
+            settingsStore = settingsStore,
         )
     }
     val ephemeralSession: EphemeralDirectSession by lazy {

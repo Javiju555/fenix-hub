@@ -260,6 +260,10 @@ class AndroidHubBridge(
                 )
                 "null"
             }
+            "mesh_create" -> {
+                container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.CreateMesh)
+                "null"
+            }
             "mesh_cancel_discovery" -> {
                 container.meshManager.dispatch(com.fenixhub.mobile.service.MeshManager.MeshCommand.CancelDiscovery)
                 "null"
@@ -613,7 +617,8 @@ class AndroidHubBridge(
     private fun publishContent(args: JSONObject) {
         val contentId = args.optString("content_id").trim()
         require(contentId.isNotBlank()) { "Contenido invalido" }
-        val targetDevice = args.optString("target_device").trim().ifBlank { null }
+        val targetDevice = if (args.isNull("target_device")) null
+            else args.optString("target_device").trim().ifBlank { null }
         val sendMode = targetDevice?.let(SendMode::Direct) ?: SendMode.Broadcast
         FenixHubService.start(activity)
         container.contentRepository.publish(contentId, sendMode)
@@ -759,7 +764,8 @@ class AndroidHubBridge(
                         .put("mesh_id", device.meshId ?: JSONObject.NULL)
                         .put("rssi", device.rssi)
                         .put("status", device.status.name.lowercase())
-                        .put("joined_at", device.joinedAt ?: JSONObject.NULL))
+                        .put("joined_at", device.joinedAt ?: JSONObject.NULL)
+                        .put("p2p_ip", device.p2pIp ?: JSONObject.NULL))
                 }
             })
             .put("local_content_pool", JSONArray().apply {

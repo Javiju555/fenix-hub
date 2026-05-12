@@ -9,6 +9,8 @@ src-tauri/icons/
 # Lives in android/app/src/main/java/personal/ — never committed.
 android/app/src/main/java/personal/
 
+playground/
+
 android/local.properties
 android/signing.properties
 android/.gradle/
@@ -40,4 +42,4 @@ logs/
 .git_untracked_sorted.txt
 
 # Local informal post draft
-fenixhub
+/fenixhub

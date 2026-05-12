@@ -66,8 +66,6 @@ class FenixHubService : Service() {
     private val wifiDirectTransferController by lazy { container.wifiDirectTransferController }
     private val hotspotManager by lazy { container.hotspotManager }
     private val meshManager by lazy { container.meshManager }
-    private var meshHttpServer: FenixHttpServer? = null
-
     private val overlayController by lazy {
         OverlayController(
             context = this,
@@ -108,20 +106,44 @@ class FenixHubService : Service() {
         val wm = getSystemService(WindowManager::class.java)
         edgeTriggerView = EdgeTriggerView(this, wm) { showOverlayIfPermitted() }
 
+        httpServer.onMeshHello = { deviceName, remoteIp ->
+            meshManager.onDeviceHello(deviceName, remoteIp)
+        }
+        httpServer.onMeshPing = { remoteIp ->
+            meshManager.onDevicePing(remoteIp)
+        }
+
         serviceScope.launch {
             meshManager.events.collect { event ->
                 when (event) {
                     is MeshEvent.GroupFormed -> {
                         val current = meshManager.state.value
+                        Log.i(TAG, "GroupFormed: meshId=${event.meshId} role=${current.role} contentPool=${current.localContentPool.size}")
                         settingsStore.overrideMeshSession(
                             groupId = event.meshId,
                             groupKeyHex = event.groupKeyHex,
                         )
+                        Log.i(TAG, "overrideMeshSession done: current groupId=${settingsStore.current().groupId} configured=${settingsStore.current().configured}")
+                        // Bind HTTP client to the P2P interface so downloads reach peers.
+                        // HOST: socket bound to GO IP (192.168.49.1) → kernel routes via p2p iface.
+                        // DEVICE: use the Network object from WifiNetworkSpecifier's onAvailable().
+                        if (current.role == MeshRole.HOST) {
+                            httpClient.setMeshHostIp(event.hostIp)
+                        } else {
+                            httpClient.setMeshNetwork(meshManager.p2pNetwork)
+                        }
                         onMeshActive(current.localContentPool, isHost = current.role == MeshRole.HOST)
                     }
                     is MeshEvent.MeshDestroyed -> {
                         settingsStore.clearMeshSessionOverride()
-                        stopMeshHttpServer()
+                        httpClient.clearMeshSocketFactory()
+                        // Re-announce published content with restored LAN credentials so
+                        // LAN peers can rediscover us without needing a force-stop.
+                        serviceScope.launch {
+                            val port = httpServer.activePort ?: return@launch
+                            val items = repository.localContent.value.filter { it.isPublished }
+                            nsdController.syncPublishedContent(items, port)
+                        }
                     }
                     is MeshEvent.Error -> {
                         showToast(event.message)
@@ -292,45 +314,18 @@ class FenixHubService : Service() {
      */
     val meshState get() = meshManager.state
 
-    /**
-     * Inicia el HTTP server del mesh en la interfaz p2p.
-     * Se llama después de crear el grupo WiFi Direct.
-     */
-    fun startMeshHttpServer(contentIds: List<String>): Int {
-        val server = FenixHttpServer(settingsStore, repository)
-        meshHttpServer = server
-        contentIds.forEach { contentId ->
-            repository.publish(contentId, SendMode.Broadcast)
-        }
-        val port = server.startIfNeededEphemeral()
-        Log.i(TAG, "Mesh HTTP server started on port $port")
-        return port
-    }
-
-    /**
-     * Detiene el HTTP server del mesh.
-     */
-    fun stopMeshHttpServer() {
-        meshHttpServer?.stop()
-        meshHttpServer = null
-        repository.unpublishAll()
-        Log.d(TAG, "Mesh HTTP server stopped, content unpublished")
-    }
-
-    /**
-     * Callback cuando el mesh se activa. Inicia el servidor HTTP con el content pool.
-     */
     private fun onMeshActive(contentPool: List<String>, isHost: Boolean) {
         if (!isHost) return
         serviceScope.launch {
             try {
-                val port = startMeshHttpServer(contentPool)
+                contentPool.forEach { repository.publish(it, SendMode.Broadcast) }
+                val port = httpServer.activePort ?: httpServer.startIfNeeded()
                 val localItems = repository.localContent.value.filter { contentPool.contains(it.contentId) }
                 nsdController.syncPublishedContent(localItems, port)
                 showToast("Mesh activo. Publicando ${contentPool.size} contenido(s).")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start mesh HTTP server", e)
-                showToast("Error al iniciar mesh: ${e.message}")
+                Log.e(TAG, "Failed to announce mesh content", e)
+                showToast("Error al anunciar contenido mesh: ${e.message}")
             }
         }
     }

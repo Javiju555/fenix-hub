@@ -1994,7 +1994,7 @@ function closeInviteBackdrop(_backdrop: HTMLElement) {
 
 interface MeshState {
   role: 'none' | 'host' | 'device';
-  status: 'idle' | 'discovering' | 'pending' | 'forming' | 'active' | 'transferring' | 'destroying';
+  status: 'idle' | 'discovering' | 'pending' | 'forming' | 'active' | 'active_ghost' | 'transferring' | 'destroying';
   mesh_id: string | null;
   passphrase_set: boolean;
   pending_devices: MeshDevice[];
@@ -2013,9 +2013,11 @@ interface MeshDevice {
   rssi: number;
   status: string;
   joined_at: number | null;
+  p2p_ip?: string | null;
 }
 
 let meshSheetOpen = false;
+let meshLastRenderKey = '';
 let meshState: MeshState = {
   role: 'none',
   status: 'idle',
@@ -2038,6 +2040,9 @@ async function openMeshSheet() {
   await refreshMeshState();
   renderMeshSheet();
   await invoke('mesh_modal_open');
+  // Re-fetch after modal_open so active_ghost → active transition is reflected immediately
+  await refreshMeshState();
+  updateMeshSheetState();
 
   meshRefreshInterval = window.setInterval(async () => {
     await refreshMeshState();
@@ -2055,6 +2060,7 @@ async function refreshMeshState() {
 
 function closeMeshSheet() {
   meshSheetOpen = false;
+  meshLastRenderKey = '';
   void invoke('mesh_modal_close');
   if (meshRefreshInterval) {
     clearInterval(meshRefreshInterval);
@@ -2070,12 +2076,12 @@ function renderMeshSheet() {
     <div class="a-mesh-header">
       <div class="a-mesh-icon">${iconMesh(28)}</div>
       <div class="a-mesh-title">Mesh WiFi Direct</div>
-      <button class="a-mesh-close" id="mesh-close">${iconX(16)}</button>
+      <button class="a-mesh-close" id="mesh-close">${iconX(20)}</button>
     </div>
     <div class="a-mesh-hint" id="mesh-hint">Elige cómo participar</div>
     <div class="a-mesh-tabs" id="mesh-tabs">
-      <button class="a-mesh-tab ${meshState.role === 'none' ? 'active' : ''}" data-mesh-role="host">${iconHost(20)} Host</button>
-      <button class="a-mesh-tab ${meshState.role === 'none' ? '' : 'active'}" data-mesh-role="device">${iconDevice(20)} Device</button>
+      <button class="a-mesh-tab ${meshState.role === 'host' ? 'active' : ''}" data-mesh-role="host">${iconHost(20)} Host</button>
+      <button class="a-mesh-tab ${meshState.role === 'device' ? 'active' : ''}" data-mesh-role="device">${iconDevice(20)} Device</button>
     </div>
     <div class="a-mesh-devices" id="mesh-devices-list">
       <div class="a-mesh-empty" id="mesh-empty">Pulsa Host o Device para empezar a buscar.</div>
@@ -2098,14 +2104,17 @@ function renderMeshSheet() {
 }
 
 async function selectMeshRole(role: 'host' | 'device') {
+  // Cancel any ongoing discovery before switching roles
+  if (meshState.role !== 'none' && meshState.role !== role &&
+      (meshState.status === 'discovering' || meshState.status === 'pending' || meshState.status === 'idle')) {
+    await invoke('mesh_cancel_discovery');
+    await refreshMeshState();
+  }
+
   document.querySelectorAll('.a-mesh-tab').forEach(t => t.classList.remove('active'));
   document.querySelector(`[data-mesh-role="${role}"]`)?.classList.add('active');
 
   if (role === 'host') {
-    if (localContent.length === 0) {
-      showToast('Añade contenido al hub antes de crear mesh');
-      return;
-    }
     const contentPool = localContent.map(i => i.id);
     await invoke('mesh_start_host', { content_pool: contentPool });
     showToast('Creando mesh como host...');
@@ -2119,6 +2128,19 @@ async function selectMeshRole(role: 'host' | 'device') {
 }
 
 function updateMeshSheetState() {
+  // Skip full rebuild if nothing meaningful changed (prevents CSS transition flash on polling)
+  const renderKey = `${meshState.role}:${meshState.status}:${meshState.pending_devices.map(d => `${d.id}/${d.status}`).join(',')}:${meshState.active_devices.map(d => `${d.id}/${d.p2p_ip ?? ''}`).join(',')}`;
+  const fullRebuild = renderKey !== meshLastRenderKey;
+  meshLastRenderKey = renderKey;
+
+  // Sync tab highlight with actual Android role
+  document.querySelectorAll('.a-mesh-tab').forEach(t => t.classList.remove('active'));
+  if (meshState.role !== 'none') {
+    document.querySelector(`[data-mesh-role="${meshState.role}"]`)?.classList.add('active');
+  }
+
+  if (!fullRebuild) return;
+
   const hint = document.getElementById('mesh-hint');
   const deviceList = document.getElementById('mesh-devices-list');
   const actions = document.getElementById('mesh-actions');
@@ -2146,19 +2168,23 @@ function updateMeshSheetState() {
     if (meshState.pending_devices.length > 0) {
       deviceList.innerHTML = meshState.pending_devices.map(d => {
         if (meshState.role === 'host') {
+          const isAccepted = d.status === 'connected';
           return `
-        <div class="a-mesh-device">
+        <div class="a-mesh-device${isAccepted ? ' a-mesh-device-active' : ''}">
           <div class="a-mesh-device-info">
             <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
             <span class="a-mesh-device-signal">${signalBars(d.rssi)}</span>
           </div>
           <div class="a-mesh-device-actions">
-            <button class="a-mesh-btn-accept" data-device-id="${d.id}">${iconCheck(16)}</button>
-            <button class="a-mesh-btn-reject" data-device-id="${d.id}">${iconX(16)}</button>
+            ${isAccepted
+              ? `<span class="a-mesh-device-badge">Aceptado</span>`
+              : `<button class="a-mesh-btn-accept" data-device-id="${d.id}">Aceptar</button>
+                 <button class="a-mesh-btn-reject" data-device-id="${d.id}">Rechazar</button>`
+            }
           </div>
         </div>`;
         } else {
-          const hostMeshId = d.mesh_id || '';
+          const hostMeshId = d.id || '';
           return `
         <div class="a-mesh-device a-mesh-device-pending">
           <div class="a-mesh-device-info">
@@ -2166,8 +2192,8 @@ function updateMeshSheetState() {
             <span class="a-mesh-device-signal">${signalBars(d.rssi)}</span>
           </div>
           <div class="a-mesh-device-actions">
-            <button class="a-mesh-btn-accept" data-host-mesh-id="${escapeAttribute(hostMeshId)}" data-host-name="${escapeAttribute(d.name)}" ${hostMeshId ? '' : 'disabled'}>
-              Solicitar acceso
+            <button class="a-mesh-btn-join" data-host-mesh-id="${escapeAttribute(hostMeshId)}" data-host-name="${escapeAttribute(d.name)}" ${hostMeshId ? '' : 'disabled'}>
+              Unirse
             </button>
           </div>
         </div>`;
@@ -2190,7 +2216,7 @@ function updateMeshSheetState() {
           });
         });
       } else {
-        deviceList.querySelectorAll('.a-mesh-btn-accept').forEach(btn => {
+        deviceList.querySelectorAll('.a-mesh-btn-join').forEach(btn => {
           (btn as HTMLElement).addEventListener('click', () => {
             const meshId = (btn as HTMLElement).dataset.hostMeshId || '';
             const hostName = (btn as HTMLElement).dataset.hostName || 'Host';
@@ -2212,7 +2238,7 @@ function updateMeshSheetState() {
       if (allAccepted) {
         actions.innerHTML = `<button class="a-btn a-btn-primary" id="mesh-close-btn">Iniciar mesh</button>`;
         document.getElementById('mesh-close-btn')?.addEventListener('click', () => {
-          void invoke('mesh_close_modal').then(closeMeshSheet);
+          void invoke('mesh_create').then(() => refreshMeshState().then(updateMeshSheetState));
         });
       } else {
         actions.innerHTML = `<div class="a-mesh-hint" style="text-align:center;color:var(--yellow);">Acepta o rechaza los dispositivos primero</div>`;
@@ -2230,7 +2256,7 @@ function updateMeshSheetState() {
 
   if (meshState.status === 'pending') {
     hint.textContent = meshState.role === 'device'
-      ? 'Solicitud enviada. Esperando aprobación del host y passphrase BLE...'
+      ? 'Solicitud enviada. Esperando aprobación del host...'
       : 'Pendiente';
     deviceList.innerHTML = meshState.pending_devices.length > 0
       ? meshState.pending_devices.map(d => `
@@ -2259,28 +2285,37 @@ function updateMeshSheetState() {
           <span class="a-mesh-device-badge">Conectando...</span>
         </div>`).join('')
       : '<div class="a-mesh-empty">Estableciendo conexión...</div>';
-    actions.innerHTML = '';
+    actions.innerHTML = `<button class="a-btn a-btn-secondary" id="mesh-cancel-forming-btn">Cancelar</button>`;
+    document.getElementById('mesh-cancel-forming-btn')?.addEventListener('click', () => {
+      void invoke('mesh_leave').then(closeMeshSheet);
+    });
     return;
   }
 
-  if (meshState.status === 'active' || meshState.status === 'transferring') {
+  if (meshState.status === 'active' || meshState.status === 'active_ghost' || meshState.status === 'transferring') {
     hint.textContent = meshState.role === 'host'
       ? `Mesh activo · ${meshState.active_devices.length} dispositivo(s)`
       : `Conectado al mesh de ${meshState.mesh_id || 'host'}`;
 
     if (meshState.role === 'host') {
       const inviteHtml = meshState.pending_devices.length > 0
-        ? meshState.pending_devices.map(d => `
-          <div class="a-mesh-device">
+        ? meshState.pending_devices.map(d => {
+          const isAccepted = d.status === 'connected';
+          return `
+          <div class="a-mesh-device${isAccepted ? ' a-mesh-device-active' : ''}">
             <div class="a-mesh-device-info">
               <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
               <span class="a-mesh-device-signal">${signalBars(d.rssi)}</span>
             </div>
             <div class="a-mesh-device-actions">
-              <button class="a-mesh-btn-accept" data-device-id="${d.id}">${iconCheck(16)}</button>
-              <button class="a-mesh-btn-reject" data-device-id="${d.id}">${iconX(16)}</button>
+              ${isAccepted
+                ? `<span class="a-mesh-device-badge">Aceptado</span>`
+                : `<button class="a-mesh-btn-accept" data-device-id="${d.id}">Aceptar</button>
+                   <button class="a-mesh-btn-reject" data-device-id="${d.id}">Rechazar</button>`
+              }
             </div>
-          </div>`).join('')
+          </div>`;
+        }).join('')
         : '<div class="a-mesh-empty">Sin nuevos dispositivos detectados</div>';
 
       const connectedHtml = meshState.active_devices.length > 0
@@ -2288,9 +2323,10 @@ function updateMeshSheetState() {
           <div class="a-mesh-device a-mesh-device-active">
             <div class="a-mesh-device-info">
               <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
+              ${!d.p2p_ip ? `<span class="a-mesh-device-badge a-mesh-device-badge--connecting" style="font-size:10px">Conectando...</span>` : ''}
             </div>
             <div class="a-mesh-device-actions">
-              <button class="a-mesh-btn-reject" data-expel-device-id="${d.id}">Expulsar</button>
+              <button class="a-mesh-btn-expel" data-expel-device-id="${d.id}">Expulsar</button>
             </div>
           </div>`).join('')
         : '<div class="a-mesh-empty">Aún no hay dispositivos conectados</div>';
@@ -2310,19 +2346,18 @@ function updateMeshSheetState() {
         });
       });
       deviceList.querySelectorAll('.a-mesh-btn-reject').forEach(btn => {
-        const expelId = (btn as HTMLElement).dataset.expelDeviceId;
-        if (expelId) {
-          (btn as HTMLElement).addEventListener('click', () => {
-            void invoke('mesh_expel_device', { device_id: expelId });
-            void refreshMeshState().then(updateMeshSheetState);
-          });
-        } else {
-          (btn as HTMLElement).addEventListener('click', () => {
-            const id = (btn as HTMLElement).dataset.deviceId!;
-            void invoke('mesh_reject_device', { device_id: id });
-            void refreshMeshState().then(updateMeshSheetState);
-          });
-        }
+        (btn as HTMLElement).addEventListener('click', () => {
+          const id = (btn as HTMLElement).dataset.deviceId!;
+          void invoke('mesh_reject_device', { device_id: id });
+          void refreshMeshState().then(updateMeshSheetState);
+        });
+      });
+      deviceList.querySelectorAll('.a-mesh-btn-expel').forEach(btn => {
+        const expelId = (btn as HTMLElement).dataset.expelDeviceId!;
+        (btn as HTMLElement).addEventListener('click', () => {
+          void invoke('mesh_expel_device', { device_id: expelId });
+          void refreshMeshState().then(updateMeshSheetState);
+        });
       });
     } else {
       deviceList.innerHTML = meshState.active_devices.length > 0
@@ -2331,7 +2366,9 @@ function updateMeshSheetState() {
             <div class="a-mesh-device-info">
               <span class="a-mesh-device-name">${escapeHtml(d.name)}</span>
             </div>
-            <span class="a-mesh-device-badge">Conectado</span>
+            <span class="a-mesh-device-badge${d.p2p_ip ? '' : ' a-mesh-device-badge--connecting'}">
+              ${d.p2p_ip ? 'Conectado' : 'Conectando...'}
+            </span>
           </div>`).join('')
         : '<div class="a-mesh-empty">Mesh establecido</div>';
     }
@@ -2346,10 +2383,8 @@ function updateMeshSheetState() {
 
     const leaveBtn = document.getElementById('mesh-leave-btn');
     leaveBtn?.addEventListener('click', async () => {
-      if (confirm('¿Seguro que quieres salir del mesh?')) {
-        await invoke('mesh_leave');
-        closeMeshSheet();
-      }
+      await invoke('mesh_leave');
+      closeMeshSheet();
     });
 
     const finalizeBtn = document.getElementById('mesh-finalize-btn');

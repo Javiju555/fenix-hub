@@ -1224,6 +1224,7 @@ textarea {
   align-items: center;
   gap: 10px;
   padding: 4px 0;
+  margin-bottom: 4px;
 }
 
 .a-mesh-icon {
@@ -1240,17 +1241,17 @@ textarea {
 }
 
 .a-mesh-close {
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--panel-soft);
   border: 1px solid var(--border);
   border-radius: 999px;
-  color: var(--text-dim);
+  color: var(--text-mid);
   cursor: pointer;
-  transition: all 0.15s;
+  flex-shrink: 0;
 }
 
 .a-mesh-close:hover {
@@ -1262,13 +1263,13 @@ textarea {
   color: var(--text-mid);
   font-size: 13px;
   text-align: center;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .a-mesh-tabs {
   display: flex;
   gap: 8px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 .a-mesh-tab {
@@ -1277,15 +1278,15 @@ textarea {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 10px;
+  padding: 9px;
   background: var(--panel-soft);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 12px;
   color: var(--text-mid);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background 0.15s, color 0.15s;
 }
 
 .a-mesh-tab:hover {
@@ -1302,38 +1303,43 @@ textarea {
 .a-mesh-devices {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-height: 60px;
-  margin-bottom: 16px;
+  gap: 6px;
+  min-height: 48px;
+  margin-bottom: 12px;
 }
 
 .a-mesh-empty {
   text-align: center;
   color: var(--text-dim);
   font-size: 13px;
-  padding: 16px 8px;
+  padding: 12px 8px;
 }
 
 .a-mesh-device {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 12px;
+  gap: 10px;
+  padding: 10px 12px;
   background: var(--panel-soft);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 12px;
 }
 
 .a-mesh-device-info {
+  flex: 1;
+  min-width: 0;
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .a-mesh-device-name {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
   color: white;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .a-mesh-device-signal {
@@ -1345,38 +1351,56 @@ textarea {
 .a-mesh-device-actions {
   display: flex;
   gap: 6px;
+  flex-shrink: 0;
 }
 
+/* Small pill buttons for inline device actions */
 .a-mesh-btn-accept,
-.a-mesh-btn-reject {
-  width: 30px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
+.a-mesh-btn-reject,
+.a-mesh-btn-join,
+.a-mesh-btn-expel {
+  padding: 5px 11px;
+  border-radius: 8px;
   border: none;
   cursor: pointer;
-  transition: all 0.15s;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  line-height: 1;
 }
 
 .a-mesh-btn-accept {
   background: rgba(94, 244, 150, 0.15);
   color: var(--green);
+  border: 1px solid rgba(94, 244, 150, 0.25);
 }
 
-.a-mesh-btn-accept:hover {
-  background: rgba(94, 244, 150, 0.25);
-}
+.a-mesh-btn-accept:hover { background: rgba(94, 244, 150, 0.25); }
 
 .a-mesh-btn-reject {
-  background: rgba(244, 94, 94, 0.15);
+  background: rgba(244, 94, 94, 0.12);
   color: var(--red);
+  border: 1px solid rgba(244, 94, 94, 0.25);
 }
 
-.a-mesh-btn-reject:hover {
-  background: rgba(244, 94, 94, 0.25);
+.a-mesh-btn-reject:hover { background: rgba(244, 94, 94, 0.22); }
+
+.a-mesh-btn-join {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid rgba(94, 140, 244, 0.25);
 }
+
+.a-mesh-btn-join:hover { background: rgba(94, 140, 244, 0.2); }
+.a-mesh-btn-join:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.a-mesh-btn-expel {
+  background: rgba(244, 94, 94, 0.12);
+  color: var(--red);
+  border: 1px solid rgba(244, 94, 94, 0.25);
+}
+
+.a-mesh-btn-expel:hover { background: rgba(244, 94, 94, 0.22); }
 
 .a-mesh-device-badge {
   font-size: 11px;
@@ -1385,6 +1409,7 @@ textarea {
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
+  flex-shrink: 0;
 }
 
 .a-mesh-device-badge.pending {
@@ -1392,9 +1417,14 @@ textarea {
   color: var(--yellow);
 }
 
+.a-mesh-device-badge--connecting {
+  background: rgba(180, 180, 180, 0.12);
+  color: var(--text-mid);
+}
+
 .a-mesh-device-active {
   border-color: rgba(94, 244, 150, 0.2);
-  background: rgba(94, 244, 150, 0.05);
+  background: rgba(94, 244, 150, 0.04);
 }
 
 .a-mesh-device-pending {
@@ -1403,23 +1433,28 @@ textarea {
 
 .a-mesh-actions {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 8px;
 }
 
+/* Full-width row only when there's a single action button */
+.a-mesh-actions.a-mesh-actions-solo {
+  flex-direction: column;
+}
+
 .a-btn {
-  width: 100%;
-  padding: 12px;
-  border-radius: 14px;
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: 10px;
   border: none;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
+  min-width: 0;
 }
 
 .a-btn-primary {
@@ -1427,10 +1462,7 @@ textarea {
   color: white;
 }
 
-.a-btn-primary:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
-}
+.a-btn-primary:hover { opacity: 0.9; }
 
 .a-btn-secondary {
   background: var(--panel-soft);
@@ -1444,11 +1476,9 @@ textarea {
 }
 
 .a-btn-danger {
-  background: rgba(244, 94, 94, 0.15);
+  background: rgba(244, 94, 94, 0.12);
   color: var(--red);
-  border: 1px solid rgba(244, 94, 94, 0.3);
+  border: 1px solid rgba(244, 94, 94, 0.25);
 }
 
-.a-btn-danger:hover {
-  background: rgba(244, 94, 94, 0.25);
-}
+.a-btn-danger:hover { background: rgba(244, 94, 94, 0.22); }
