@@ -42,6 +42,9 @@ class FenixHttpServer(
     var activePort: Int? = null
         private set
 
+    @Volatile var onMeshHello: ((deviceName: String, remoteIp: String) -> Unit)? = null
+    @Volatile var onMeshPing: ((remoteIp: String) -> Unit)? = null
+
     private var engine: ApplicationEngine? = null
     private var ephemeralEngine: ApplicationEngine? = null
     private var ephemeralPort: Int? = null
@@ -98,6 +101,22 @@ class FenixHttpServer(
                         return@post
                     }
                     call.serveAuthChallenge()
+                }
+
+                post("/mesh/hello") {
+                    val remoteIp = runCatching { call.request.local.remoteHost }.getOrElse { "" }
+                    val body = runCatching { JSONObject(call.receiveText()) }.getOrNull()
+                    val deviceName = body?.optString("device_name").orEmpty()
+                    if (remoteIp.isNotBlank() && deviceName.isNotBlank()) {
+                        onMeshHello?.invoke(deviceName, remoteIp)
+                    }
+                    call.respond(HttpStatusCode.NoContent)
+                }
+
+                get("/mesh/ping") {
+                    val remoteIp = runCatching { call.request.local.remoteHost }.getOrElse { "" }
+                    if (remoteIp.isNotBlank()) onMeshPing?.invoke(remoteIp)
+                    call.respond(HttpStatusCode.NoContent)
                 }
             }
         }

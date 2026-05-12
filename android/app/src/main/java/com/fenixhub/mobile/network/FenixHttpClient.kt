@@ -7,10 +7,16 @@ import com.fenixhub.mobile.util.CryptoUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import android.util.Log
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSource
+import org.json.JSONObject
 import java.io.File
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.security.GeneralSecurityException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
@@ -18,13 +24,94 @@ import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import javax.net.SocketFactory
 
 class FenixHttpClient(cacheDir: File) {
     private val downloadDir = File(cacheDir, "fenixhub/downloads").apply { mkdirs() }
 
+    // Android's network policy engine tags OkHttp sockets to the default network (home WiFi),
+    // which can't reach P2P peers at 192.168.49.x even though a P2P interface is active.
+    // HOST: bind socket to GO IP (192.168.49.1) → kernel routes via P2P interface.
+    // DEVICE: use Network.socketFactory from WifiNetworkSpecifier's onAvailable() network.
+    @Volatile private var meshSocketFactory: SocketFactory? = null
+
+    fun setMeshHostIp(ip: String?) {
+        meshSocketFactory = ip?.takeIf { it.isNotBlank() }?.let { localIp ->
+            val bindAddr = InetAddress.getByName(localIp)
+            object : SocketFactory() {
+                private fun bound(): Socket = Socket().apply { bind(InetSocketAddress(bindAddr, 0)) }
+                override fun createSocket(): Socket = bound()
+                override fun createSocket(h: String, p: Int): Socket = bound().apply { connect(InetSocketAddress(h, p)) }
+                override fun createSocket(h: String, p: Int, la: InetAddress, lp: Int): Socket = bound().apply { connect(InetSocketAddress(h, p)) }
+                override fun createSocket(a: InetAddress, p: Int): Socket = bound().apply { connect(InetSocketAddress(a, p)) }
+                override fun createSocket(a: InetAddress, p: Int, la: InetAddress, lp: Int): Socket = bound().apply { connect(InetSocketAddress(a, p)) }
+            }
+        }
+        Log.d(TAG, "meshSocketFactory hostIp=$ip")
+    }
+
+    fun setMeshNetwork(network: android.net.Network?) {
+        meshSocketFactory = network?.socketFactory
+        Log.d(TAG, "meshSocketFactory network=$network")
+    }
+
+    fun clearMeshSocketFactory() {
+        meshSocketFactory = null
+        cachedHeartbeatClient = null
+        Log.d(TAG, "meshSocketFactory cleared")
+    }
+
+    @Volatile private var cachedHeartbeatClient: Pair<SocketFactory?, OkHttpClient>? = null
+
+    private fun heartbeatClientFor(factory: SocketFactory?): OkHttpClient {
+        val cached = cachedHeartbeatClient
+        if (cached != null && cached.first === factory) return cached.second
+        val c = OkHttpClient.Builder()
+            .apply { factory?.let { socketFactory(it) } }
+            .connectTimeout(2, TimeUnit.SECONDS)
+            .readTimeout(2, TimeUnit.SECONDS)
+            .writeTimeout(2, TimeUnit.SECONDS)
+            .build()
+        cachedHeartbeatClient = Pair(factory, c)
+        return c
+    }
+
+    suspend fun meshHello(hostIp: String, port: Int, deviceName: String, factory: SocketFactory?): Boolean {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val body = JSONObject().put("device_name", deviceName).toString()
+                    .toRequestBody("application/json".toMediaType())
+                val request = Request.Builder()
+                    .url("http://${urlHost(hostIp)}:$port/mesh/hello")
+                    .post(body)
+                    .build()
+                heartbeatClientFor(factory).newCall(request).execute().use { it.code < 500 }
+            }.getOrElse { false }
+        }
+    }
+
+    suspend fun meshPing(hostIp: String, port: Int, factory: SocketFactory?): Boolean {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder()
+                    .url("http://${urlHost(hostIp)}:$port/mesh/ping")
+                    .get()
+                    .build()
+                heartbeatClientFor(factory).newCall(request).execute().use { it.code < 500 }
+            }.getOrElse { false }
+        }
+    }
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         // Large files at LAN speeds can take 30–60s — don't timeout mid-transfer.
+        .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    private fun meshClient(factory: SocketFactory): OkHttpClient = OkHttpClient.Builder()
+        .socketFactory(factory)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
@@ -60,9 +147,10 @@ class FenixHttpClient(cacheDir: File) {
                     .build()
 
                 val startMs = System.currentTimeMillis()
-                Log.d(TAG, "Pulling ${peer.announcement.contentId} from ${peer.peerIp}:${peer.port}")
+                val activeClient = meshSocketFactory?.let { meshClient(it) } ?: client
+                Log.d(TAG, "Pulling ${peer.announcement.contentId} from ${peer.peerIp}:${peer.port} meshSocket=${meshSocketFactory != null}")
 
-                client.newCall(request).execute().use { response ->
+                activeClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) error("HTTP ${response.code}")
                     val body = response.body ?: error("Empty response body")
                     val encryptedHeader = response.header(ENCRYPTED_HEADER)

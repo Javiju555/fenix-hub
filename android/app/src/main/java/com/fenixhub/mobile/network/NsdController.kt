@@ -374,6 +374,7 @@ class NsdController(
                 val announcement = raw?.let { AnnouncementCodec.decode(it) }
                 if (announcement != null) {
                     val settings = settingsStore.current()
+                    Log.d(TAG, "Resolved ${resolvedServiceInfo.serviceName}: announcement.groupId=${announcement.groupId.take(8)} settings.groupId=${settings.groupId.take(8)} configured=${settings.configured}")
                     val visibleToCurrentDevice = settings.configured &&
                         announcement.groupId == settings.groupId &&
                         !settingsStore.isIgnoredPeerContent(announcement.contentId) &&
@@ -383,6 +384,7 @@ class NsdController(
                             announcement.sendMode.targetDevice != settings.deviceName)
 
                     val host = resolvedServiceInfo.host?.hostAddress?.substringBefore('%')
+                    Log.d(TAG, "Resolved ${resolvedServiceInfo.serviceName}: visible=$visibleToCurrentDevice host=$host port=${resolvedServiceInfo.port} sendMode=${announcement.sendMode} deviceName=${announcement.deviceName} myName=${settings.deviceName}")
                     mainHandler.post {
                         if (visibleToCurrentDevice && host != null) {
                             peerLastSeenAt[announcement.contentId] = SystemClock.elapsedRealtime()

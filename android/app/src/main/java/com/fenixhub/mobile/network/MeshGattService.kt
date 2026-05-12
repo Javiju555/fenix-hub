@@ -6,6 +6,7 @@ import android.bluetooth.le.*
 import android.content.Context
 import android.os.Build
 import android.os.ParcelUuid
+import android.util.Base64
 import android.util.Log
 import com.fenixhub.mobile.util.MeshGattCrypto
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -35,6 +36,7 @@ class MeshGattService(private val context: Context) {
 
         private const val TAG = "MeshGattService"
         private const val MTU_REQUEST = 512
+        private const val FENIX_COMPANY_ID = 0xFE4E
     }
 
     sealed class GattEvent {
@@ -51,6 +53,7 @@ class MeshGattService(private val context: Context) {
         data class CredentialsReceived(val encryptedBytes: ByteArray) : GattEvent()
         data class RekeyReceived(val encryptedBytes: ByteArray) : GattEvent()
         data object MeshTerminated : GattEvent()
+        data object HostDisconnected : GattEvent()
     }
 
     private val _events = MutableSharedFlow<GattEvent>(extraBufferCapacity = 32)
@@ -60,9 +63,12 @@ class MeshGattService(private val context: Context) {
     // Accessed from both BluetoothGattServerCallback (Binder thread) and coroutine scope
     private val connectedClients = ConcurrentHashMap<String, BluetoothDevice>()
     private val subscribedClients = CopyOnWriteArraySet<String>()
+    private val deviceMtu = ConcurrentHashMap<String, Int>()
 
     fun startGattServer(hostName: String) {
-        val manager = context.getSystemService(BluetoothManager::class.java) ?: return
+        Log.d(TAG, "startGattServer called: hostName=$hostName")
+        val manager = context.getSystemService(BluetoothManager::class.java)
+        if (manager == null) { Log.e(TAG, "BluetoothManager null"); return }
 
         val joinChar = BluetoothGattCharacteristic(
             JOIN_REQUEST_CHAR_UUID,
@@ -89,7 +95,10 @@ class MeshGattService(private val context: Context) {
             it.addCharacteristic(controlChar)
         }
 
-        gattServer = manager.openGattServer(context, gattServerCallback)
+        gattServer = runCatching { manager.openGattServer(context, gattServerCallback) }
+            .onFailure { Log.e(TAG, "openGattServer failed: ${it.javaClass.simpleName}: ${it.message}") }
+            .getOrNull()
+        if (gattServer == null) { Log.e(TAG, "openGattServer returned null"); return }
         gattServer?.addService(service)
         Log.i(TAG, "GATT server started: hostName=$hostName")
     }
@@ -99,6 +108,7 @@ class MeshGattService(private val context: Context) {
         gattServer = null
         connectedClients.clear()
         subscribedClients.clear()
+        deviceMtu.clear()
         Log.i(TAG, "GATT server stopped")
     }
 
@@ -117,10 +127,12 @@ class MeshGattService(private val context: Context) {
     }
 
     fun indicateTo(device: BluetoothDevice, message: Map<String, Any>) {
-        val server = gattServer ?: return
+        val server = gattServer ?: run { Log.e(TAG, "indicateTo: gattServer null"); return }
         val char = server.getService(MESH_SERVICE_UUID)
-            ?.getCharacteristic(CONTROL_CHAR_UUID) ?: return
+            ?.getCharacteristic(CONTROL_CHAR_UUID) ?: run { Log.e(TAG, "indicateTo: char null"); return }
         val payload = JSONObject(message).toString().toByteArray(Charsets.UTF_8)
+        val isSubscribed = subscribedClients.contains(device.address)
+        Log.d(TAG, "indicateTo ${device.address} type=${message["type"]} subscribed=$isSubscribed bytes=${payload.size}")
         notifyDevice(server, char, device, payload)
     }
 
@@ -131,8 +143,16 @@ class MeshGattService(private val context: Context) {
         device: BluetoothDevice,
         payload: ByteArray,
     ) {
+        val mtu = deviceMtu[device.address] ?: 23
+        val maxPayload = mtu - 3
+        if (payload.size > maxPayload) {
+            Log.e(TAG, "notifyDevice: payload ${payload.size}B exceeds ATT limit ${maxPayload}B (MTU=$mtu) for ${device.address} — indication will be dropped or truncated!")
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            server.notifyCharacteristicChanged(device, char, true, payload)
+            val rc = server.notifyCharacteristicChanged(device, char, true, payload)
+            if (rc != BluetoothGatt.GATT_SUCCESS) {
+                Log.e(TAG, "notifyCharacteristicChanged returned $rc for ${device.address}")
+            }
         } else {
             char.value = payload
             server.notifyCharacteristicChanged(device, char, true)
@@ -149,9 +169,15 @@ class MeshGattService(private val context: Context) {
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     connectedClients.remove(device.address)
                     subscribedClients.remove(device.address)
+                    deviceMtu.remove(device.address)
                     Log.d(TAG, "Server: device disconnected ${device.address}")
                 }
             }
+        }
+
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            deviceMtu[device.address] = mtu
+            Log.d(TAG, "Server: MTU changed for ${device.address} → $mtu (max payload=${mtu - 3}B)")
         }
 
         override fun onCharacteristicWriteRequest(
@@ -204,6 +230,9 @@ class MeshGattService(private val context: Context) {
     private var gatt: BluetoothGatt? = null
     private var devicePrivKey: PrivateKey? = null
     private var devicePubKeyBytes: ByteArray? = null
+    // Set before calling gatt.disconnect() so the async STATE_DISCONNECTED callback
+    // can tell whether the disconnect was intentional (cleanup) or unexpected (error).
+    @Volatile private var intentionalDisconnect = false
 
     fun connectToHost(
         device: BluetoothDevice,
@@ -213,6 +242,7 @@ class MeshGattService(private val context: Context) {
         devicePrivKey    = keypair.privateKey
         devicePubKeyBytes = keypair.publicKeyBytes
 
+        intentionalDisconnect = false
         gatt = device.connectGatt(context, false, gattClientCallback)
         Log.i(TAG, "Client: connecting to host ${device.address}")
 
@@ -221,6 +251,7 @@ class MeshGattService(private val context: Context) {
     }
 
     fun disconnectFromHost() {
+        intentionalDisconnect = true
         gatt?.disconnect()
         gatt?.close()
         gatt = null
@@ -238,7 +269,12 @@ class MeshGattService(private val context: Context) {
                 Log.d(TAG, "Client: connected to host, requesting MTU=$MTU_REQUEST")
                 gatt.requestMtu(MTU_REQUEST)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                Log.d(TAG, "Client: disconnected from host")
+                val wasIntentional = intentionalDisconnect
+                intentionalDisconnect = false
+                Log.d(TAG, "Client: disconnected from host (status=$status intentional=$wasIntentional)")
+                if (!wasIntentional) {
+                    _events.tryEmit(GattEvent.HostDisconnected)
+                }
             }
         }
 
@@ -316,17 +352,19 @@ class MeshGattService(private val context: Context) {
     private fun parseControlMessage(value: ByteArray) {
         val json = runCatching {
             JSONObject(String(value, Charsets.UTF_8))
-        }.getOrNull() ?: return
+        }.getOrNull() ?: run { Log.w(TAG, "parseControlMessage: invalid JSON, ${value.size} bytes"); return }
 
-        when (json.optString("type")) {
+        val type = json.optString("type")
+        Log.d(TAG, "parseControlMessage: type=$type")
+        when (type) {
             MSG_LOBBY_ACK        -> _events.tryEmit(GattEvent.LobbyAcked(json.optString("host_name")))
             MSG_LOBBY_KICKED     -> _events.tryEmit(GattEvent.LobbyKicked)
             MSG_MESH_CREDENTIALS -> {
-                val enc = hexToBytes(json.getString("enc_blob_hex"))
+                val enc = Base64.decode(json.getString("enc_blob_b64"), Base64.NO_WRAP)
                 _events.tryEmit(GattEvent.CredentialsReceived(enc))
             }
             MSG_MESH_REKEYED -> {
-                val enc = hexToBytes(json.getString("enc_blob_hex"))
+                val enc = Base64.decode(json.getString("enc_blob_b64"), Base64.NO_WRAP)
                 _events.tryEmit(GattEvent.RekeyReceived(enc))
             }
             MSG_MESH_TERMINATED  -> _events.tryEmit(GattEvent.MeshTerminated)
@@ -341,9 +379,10 @@ class MeshGattService(private val context: Context) {
     private var advertiser: BluetoothLeAdvertiser? = null
 
     fun startAdvertising(hostName: String) {
+        Log.d(TAG, "startAdvertising called: hostName=$hostName")
         val adapter = context.getSystemService(BluetoothManager::class.java)
-            ?.adapter ?: return
-        advertiser = adapter.bluetoothLeAdvertiser ?: return
+            ?.adapter ?: run { Log.e(TAG, "BT adapter null"); return }
+        advertiser = adapter.bluetoothLeAdvertiser ?: run { Log.e(TAG, "BLE advertiser null"); return }
 
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
@@ -353,10 +392,18 @@ class MeshGattService(private val context: Context) {
 
         val data = AdvertiseData.Builder()
             .addServiceUuid(ParcelUuid(MESH_SERVICE_UUID))
-            .setIncludeDeviceName(true)
+            .setIncludeDeviceName(false)
+            .setIncludeTxPowerLevel(false)
             .build()
 
-        advertiser?.startAdvertising(settings, data, advertiseCallback)
+        // Scan response carries the host name (up to 20 chars) as manufacturer data
+        // to stay well within the 31-byte legacy BLE limit.
+        val nameBytes = hostName.toByteArray(Charsets.UTF_8).take(27).toByteArray()
+        val scanResponse = android.bluetooth.le.AdvertiseData.Builder()
+            .addManufacturerData(FENIX_COMPANY_ID, nameBytes)
+            .build()
+
+        advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
         Log.i(TAG, "BLE advertising started: $hostName")
     }
 
@@ -389,13 +436,12 @@ class MeshGattService(private val context: Context) {
             ?.adapter ?: return
         scanner = adapter.bluetoothLeScanner ?: return
 
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(MESH_SERVICE_UUID))
-            .build()
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
-        scanner?.startScan(listOf(filter), settings, scanCallback)
+        // No hardware UUID filter — EMUI 10 may drop 128-bit service UUID filters.
+        // We filter in onScanResult instead.
+        scanner?.startScan(emptyList(), settings, scanCallback)
         Log.i(TAG, "BLE scanning started")
     }
 
@@ -407,8 +453,21 @@ class MeshGattService(private val context: Context) {
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val name = result.device.name ?: result.scanRecord?.deviceName ?: "Unknown"
+            val uuids = result.scanRecord?.serviceUuids
+            val isFenix = uuids?.any { it.uuid == MESH_SERVICE_UUID } == true
+            Log.d(TAG, "BLE scan result: ${result.device.address} fenix=$isFenix uuids=$uuids")
+            if (!isFenix) return
+            val nameBytes = result.scanRecord?.getManufacturerSpecificData(FENIX_COMPANY_ID)
+            val name = nameBytes?.let { String(it, Charsets.UTF_8) }
+                ?: result.scanRecord?.deviceName
+                ?: result.device.name
+                ?: "Unknown"
+            Log.i(TAG, "Fenix host found: ${result.device.address} name=$name")
             _scanEvents.tryEmit(ScanEvent.HostFound(result.device, name))
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e(TAG, "BLE scan failed: $errorCode")
         }
     }
 

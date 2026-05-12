@@ -144,30 +144,74 @@ class WifiDirectTransferController(private val context: Context) {
         _transferState.value = WifiDirectTransferState.CreatingGroup
         isGroupOwner = true
 
+        // Remove any existing group first — a leftover group causes BUSY (reason=2)
+        manager.removeGroup(ch, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                Log.d(TAG, "Existing P2P group removed, creating new one...")
+                doCreateGroup(manager, ch, config, onGroupCreated)
+            }
+            override fun onFailure(reason: Int) {
+                Log.d(TAG, "removeGroup before create: reason=$reason (no group or already gone), proceeding...")
+                doCreateGroup(manager, ch, config, onGroupCreated)
+            }
+        })
+    }
+
+    private fun doCreateGroup(
+        manager: WifiP2pManager,
+        ch: WifiP2pManager.Channel,
+        config: android.net.wifi.p2p.WifiP2pConfig,
+        onGroupCreated: (WifiDirectGroupInfo) -> Unit,
+    ) {
         manager.createGroup(ch, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                manager.requestGroupInfo(ch) { group ->
-                    val info = group.toGroupInfo()
-                    if (info != null) {
-                        _groupInfo.value = info
-                        p2pInterface = findP2pInterface()
-                        onGroupCreated(info)
-                    } else {
-                        android.os.Handler(Looper.getMainLooper()).postDelayed({
-                            manager.requestGroupInfo(ch) { retry ->
-                                val retryInfo = retry.toGroupInfo() ?: return@requestGroupInfo
-                                _groupInfo.value = retryInfo
-                                p2pInterface = findP2pInterface()
-                                onGroupCreated(retryInfo)
-                            }
-                        }, 1500)
-                    }
-                }
+                Log.d(TAG, "createGroupWithConfig onSuccess, polling connection info...")
+                pollConnectionInfo(manager, ch, onGroupCreated, retries = 8, delayMs = 1000)
             }
             override fun onFailure(reason: Int) {
                 _transferState.value = WifiDirectTransferState.Error("create_group_config_failed_$reason")
+                Log.w(TAG, "createGroupWithConfig failed: reason=$reason")
             }
         })
+    }
+
+    private fun pollConnectionInfo(
+        manager: WifiP2pManager,
+        ch: WifiP2pManager.Channel,
+        onGroupCreated: (WifiDirectGroupInfo) -> Unit,
+        retries: Int,
+        delayMs: Long,
+    ) {
+        manager.requestConnectionInfo(ch) { info ->
+            Log.d(TAG, "pollConnectionInfo: groupFormed=${info?.groupFormed} isGO=${info?.isGroupOwner} goAddr=${info?.groupOwnerAddress} retries=$retries")
+            if (info?.groupFormed == true) {
+                val goIp = if (info.isGroupOwner) {
+                    findP2pInterfaceAddress() ?: info.groupOwnerAddress?.hostAddress
+                } else {
+                    info.groupOwnerAddress?.hostAddress
+                }
+                if (!goIp.isNullOrBlank()) {
+                    val groupInfo = WifiDirectGroupInfo(
+                        groupOwnerAddress = goIp,
+                        isGroupOwner = info.isGroupOwner,
+                        clients = emptyList(),
+                    )
+                    _groupInfo.value = groupInfo
+                    p2pInterface = findP2pInterface()
+                    Log.i(TAG, "createGroupWithConfig ready: goIp=$goIp isGO=${info.isGroupOwner}")
+                    onGroupCreated(groupInfo)
+                    return@requestConnectionInfo
+                }
+            }
+            if (retries > 0) {
+                android.os.Handler(Looper.getMainLooper()).postDelayed({
+                    pollConnectionInfo(manager, ch, onGroupCreated, retries - 1, delayMs)
+                }, delayMs)
+            } else {
+                _transferState.value = WifiDirectTransferState.Error("create_group_config_no_info")
+                Log.w(TAG, "createGroupWithConfig: no connection info after all retries")
+            }
+        }
     }
 
     /**

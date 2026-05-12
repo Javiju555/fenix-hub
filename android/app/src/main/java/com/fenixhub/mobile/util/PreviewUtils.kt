@@ -2,6 +2,7 @@ package com.fenixhub.mobile.util
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import android.util.Base64
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -9,6 +10,12 @@ import kotlin.math.min
 import kotlin.math.max
 
 object PreviewUtils {
+    @Suppress("DEPRECATION")
+    private val WEBP_FORMAT = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        Bitmap.CompressFormat.WEBP_LOSSY
+    } else {
+        Bitmap.CompressFormat.WEBP
+    }
     fun textPreview(text: String): String = text.trim().take(80)
 
     fun imagePreviewDataUrl(bytes: ByteArray, mimeType: String? = null): String {
@@ -22,7 +29,7 @@ object PreviewUtils {
             sourceMimeType = mimeType,
             maxEdge = LOCAL_PREVIEW_MAX_EDGE,
             quality = LOCAL_PREVIEW_QUALITY,
-            format = Bitmap.CompressFormat.WEBP_LOSSY,
+            format = WEBP_FORMAT,
             outputMimeType = "image/webp",
         )
     }
@@ -42,7 +49,7 @@ object PreviewUtils {
             sourceMimeType = mimeType,
             maxEdge = LOCAL_PREVIEW_MAX_EDGE,
             quality = LOCAL_PREVIEW_QUALITY,
-            format = Bitmap.CompressFormat.WEBP_LOSSY,
+            format = WEBP_FORMAT,
             outputMimeType = "image/webp",
         )
     }
@@ -59,7 +66,7 @@ object PreviewUtils {
                 sourceMimeType = null,
                 maxEdge = candidate.maxEdge,
                 quality = candidate.quality,
-                format = Bitmap.CompressFormat.WEBP_LOSSY,
+                format = WEBP_FORMAT,
                 outputMimeType = "image/webp",
             )
             if (preview.length <= ANNOUNCEMENT_PREVIEW_MAX_CHARS) {
@@ -78,7 +85,7 @@ object PreviewUtils {
             sourceMimeType = null,
             maxEdge = fallback.maxEdge,
             quality = fallback.quality,
-            format = Bitmap.CompressFormat.WEBP_LOSSY,
+            format = WEBP_FORMAT,
             outputMimeType = "image/webp",
         )
     }
