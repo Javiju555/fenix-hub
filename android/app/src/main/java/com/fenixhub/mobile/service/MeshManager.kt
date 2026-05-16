@@ -903,6 +903,13 @@ class MeshManager(
                 if (!current.isActive || current.role != MeshRole.HOST) break
 
                 val nowMs = System.currentTimeMillis()
+                for (device in current.activeDevices) {
+                    val ip = device.p2pIp
+                    val lastSeen = ip?.let { deviceLastSeenMs[it] }
+                    val ageSec = lastSeen?.let { (nowMs - it) / 1000.0 }
+                    Log.d(TAG, "Heartbeat: ${device.name} p2pIp=$ip lastSeen=${ageSec?.let { "%.1fs ago".format(it) } ?: "never"}")
+                }
+
                 val toRemove = current.activeDevices.filter { device ->
                     val ip = device.p2pIp ?: return@filter false
                     val lastSeen = deviceLastSeenMs[ip] ?: return@filter false
@@ -924,13 +931,29 @@ class MeshManager(
         devicePingJob?.cancel()
         devicePingJob = scope.launch {
             val socketFactory = p2pNetwork?.socketFactory
-            runCatching { httpClient?.meshHello(hostIp, port, deviceName, socketFactory) }
+            Log.d(TAG, "Ping loop start: hostIp=$hostIp port=$port device=$deviceName p2pNetwork=$p2pNetwork socketFactory=${socketFactory != null}")
+            val helloOk = runCatching { httpClient?.meshHello(hostIp, port, deviceName, socketFactory) }.getOrElse { e ->
+                Log.w(TAG, "meshHello failed: ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+            Log.d(TAG, "meshHello result: $helloOk")
+            var consecutiveFails = 0
             while (isActive && _state.value.isActive) {
                 delay(2_000)
                 if (!_state.value.isActive) break
-                runCatching { httpClient?.meshPing(hostIp, port, socketFactory) }
+                val ok = runCatching { httpClient?.meshPing(hostIp, port, socketFactory) ?: false }.getOrElse { e ->
+                    Log.w(TAG, "meshPing exception: ${e.javaClass.simpleName}: ${e.message}")
+                    false
+                }
+                if (ok == true) {
+                    if (consecutiveFails > 0) Log.i(TAG, "meshPing recovered after $consecutiveFails failure(s)")
+                    consecutiveFails = 0
+                } else {
+                    consecutiveFails++
+                    Log.w(TAG, "meshPing failed ($consecutiveFails consecutive) → hostIp=$hostIp factory=${socketFactory != null}")
+                }
             }
-            Log.d(TAG, "Device ping loop ended")
+            Log.d(TAG, "Device ping loop ended (consecutiveFails=$consecutiveFails)")
         }
     }
 

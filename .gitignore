@@ -16,7 +16,7 @@ android/signing.properties
 android/.gradle/
 android/app/build/
 android/build/
-.claude/worktrees/
+.claude/
 .codex/
 .qwen/
 opencode.json
@@ -28,6 +28,8 @@ packaging/
 
 # Internal/session docs — not part of the public repo
 docs/PLAN.md
+docs/PENDING.md
+docs/superpowers/
 docs/instagram-announcement-es.md
 docs/cfstr-virtual-drop-impl-prompt.md
 docs/release-notes-*.md

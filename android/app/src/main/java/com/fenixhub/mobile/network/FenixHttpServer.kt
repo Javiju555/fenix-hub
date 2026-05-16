@@ -107,6 +107,7 @@ class FenixHttpServer(
                     val remoteIp = runCatching { call.request.local.remoteHost }.getOrElse { "" }
                     val body = runCatching { JSONObject(call.receiveText()) }.getOrNull()
                     val deviceName = body?.optString("device_name").orEmpty()
+                    Log.d(TAG, "/mesh/hello from=$remoteIp deviceName='$deviceName' valid=${remoteIp.isNotBlank() && deviceName.isNotBlank()}")
                     if (remoteIp.isNotBlank() && deviceName.isNotBlank()) {
                         onMeshHello?.invoke(deviceName, remoteIp)
                     }
@@ -115,6 +116,7 @@ class FenixHttpServer(
 
                 get("/mesh/ping") {
                     val remoteIp = runCatching { call.request.local.remoteHost }.getOrElse { "" }
+                    Log.d(TAG, "/mesh/ping from=$remoteIp")
                     if (remoteIp.isNotBlank()) onMeshPing?.invoke(remoteIp)
                     call.respond(HttpStatusCode.NoContent)
                 }
@@ -179,12 +181,15 @@ class FenixHttpServer(
             return
         }
 
+        val remoteIp = runCatching { request.local.remoteHost }.getOrElse { "?" }
+        Log.d(TAG, "GET /content/$contentId from=$remoteIp authGroupId=${settings.groupId.take(8)}")
         if (!isAuthorized(
                 settings = settings,
                 method = "GET",
                 canonicalPath = "/content/$contentId",
                 bodyBytes = ByteArray(0),
             )) {
+            Log.w(TAG, "GET /content/$contentId UNAUTHORIZED from=$remoteIp")
             respond(HttpStatusCode.Unauthorized)
             return
         }

@@ -147,8 +147,13 @@ class FenixHttpClient(cacheDir: File) {
                     .build()
 
                 val startMs = System.currentTimeMillis()
-                val activeClient = meshSocketFactory?.let { meshClient(it) } ?: client
-                Log.d(TAG, "Pulling ${peer.announcement.contentId} from ${peer.peerIp}:${peer.port} meshSocket=${meshSocketFactory != null}")
+                val factory = meshSocketFactory
+                val activeClient = factory?.let { meshClient(it) } ?: client
+                val factoryDesc = when {
+                    factory == null -> "none (LAN client)"
+                    else -> factory.javaClass.simpleName.let { if (it.isNullOrBlank()) "anonymous" else it }
+                }
+                Log.d(TAG, "Pulling ${peer.announcement.contentId} from ${peer.peerIp}:${peer.port} socketFactory=$factoryDesc groupId=${settings.groupId.take(8)}")
 
                 activeClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) error("HTTP ${response.code}")

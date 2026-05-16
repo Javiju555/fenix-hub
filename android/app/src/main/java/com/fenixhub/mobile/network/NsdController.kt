@@ -67,18 +67,22 @@ class NsdController(
     fun syncPublishedContent(items: List<LocalContent>, port: Int) {
         currentPort = port
         val settings = settingsStore.current()
+        Log.d(TAG, "syncPublishedContent: ${items.size} item(s) port=$port configured=${settings.configured} groupId=${settings.groupId.take(8)}")
         if (!settings.configured) return
 
         val desiredIds = items.map { it.contentId }.toSet()
         val obsoleteIds = registrations.keys.filterNot(desiredIds::contains)
         obsoleteIds.forEach(::unregisterInternal)
+        if (obsoleteIds.isNotEmpty()) Log.d(TAG, "syncPublishedContent: removed ${obsoleteIds.size} obsolete registrations")
 
         items.forEach { item ->
             val payload = payloadForAnnouncement(item, settings, port)
             val existing = registrations[item.contentId]
             if (existing?.payload == payload) {
+                Log.d(TAG, "syncPublishedContent: ${item.contentId.take(8)} unchanged, skipping re-register")
                 return@forEach
             }
+            Log.d(TAG, "syncPublishedContent: registering ${item.contentId.take(8)} payloadSize=${payload.toByteArray().size}")
             unregisterInternal(item.contentId)
             register(item.contentId, payload, port)
         }
@@ -374,17 +378,26 @@ class NsdController(
                 val announcement = raw?.let { AnnouncementCodec.decode(it) }
                 if (announcement != null) {
                     val settings = settingsStore.current()
-                    Log.d(TAG, "Resolved ${resolvedServiceInfo.serviceName}: announcement.groupId=${announcement.groupId.take(8)} settings.groupId=${settings.groupId.take(8)} configured=${settings.configured}")
-                    val visibleToCurrentDevice = settings.configured &&
-                        announcement.groupId == settings.groupId &&
-                        !settingsStore.isIgnoredPeerContent(announcement.contentId) &&
-                        !(announcement.deviceName == settings.deviceName &&
-                            repository.getLocalContent(announcement.contentId) != null) &&
-                        !(announcement.sendMode is SendMode.Direct &&
-                            announcement.sendMode.targetDevice != settings.deviceName)
-
                     val host = resolvedServiceInfo.host?.hostAddress?.substringBefore('%')
-                    Log.d(TAG, "Resolved ${resolvedServiceInfo.serviceName}: visible=$visibleToCurrentDevice host=$host port=${resolvedServiceInfo.port} sendMode=${announcement.sendMode} deviceName=${announcement.deviceName} myName=${settings.deviceName}")
+
+                    val condConfigured = settings.configured
+                    val condGroupId = announcement.groupId == settings.groupId
+                    val condNotIgnored = !settingsStore.isIgnoredPeerContent(announcement.contentId)
+                    val condNotOwnContent = !(announcement.deviceName == settings.deviceName &&
+                        repository.getLocalContent(announcement.contentId) != null)
+                    val condDirectTarget = !(announcement.sendMode is SendMode.Direct &&
+                        announcement.sendMode.targetDevice != settings.deviceName)
+                    val visibleToCurrentDevice = condConfigured && condGroupId && condNotIgnored &&
+                        condNotOwnContent && condDirectTarget
+
+                    Log.d(TAG, "Resolved ${resolvedServiceInfo.serviceName}: " +
+                        "visible=$visibleToCurrentDevice host=$host port=${resolvedServiceInfo.port} " +
+                        "peerGroupId=${announcement.groupId.take(8)} myGroupId=${settings.groupId.take(8)} " +
+                        "peerDevice=${announcement.deviceName} myDevice=${settings.deviceName} " +
+                        "sendMode=${announcement.sendMode} contentId=${announcement.contentId.take(8)} " +
+                        "[configured=$condConfigured groupMatch=$condGroupId notIgnored=$condNotIgnored " +
+                        "notOwn=$condNotOwnContent directOk=$condDirectTarget]")
+
                     mainHandler.post {
                         if (visibleToCurrentDevice && host != null) {
                             peerLastSeenAt[announcement.contentId] = SystemClock.elapsedRealtime()
@@ -393,6 +406,7 @@ class NsdController(
                                 port = resolvedServiceInfo.port,
                                 announcement = announcement,
                             ))
+                            Log.i(TAG, "Peer upserted: ${announcement.deviceName} at $host:${resolvedServiceInfo.port} contentId=${announcement.contentId.take(8)}")
                         } else {
                             // Resolve succeeded but this item is no longer visible for this device.
                             // Remove stale UI entries immediately instead of waiting for expiry.
@@ -400,6 +414,8 @@ class NsdController(
                             repository.removePeer(announcement.contentId)
                         }
                     }
+                } else {
+                    Log.w(TAG, "Resolved ${resolvedServiceInfo.serviceName} but announcement decode failed (raw=${raw != null})")
                 }
                 mainHandler.post { drainResolveQueue() }
             }

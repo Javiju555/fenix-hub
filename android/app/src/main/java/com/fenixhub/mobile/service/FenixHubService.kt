@@ -118,19 +118,20 @@ class FenixHubService : Service() {
                 when (event) {
                     is MeshEvent.GroupFormed -> {
                         val current = meshManager.state.value
-                        Log.i(TAG, "GroupFormed: meshId=${event.meshId} role=${current.role} contentPool=${current.localContentPool.size}")
+                        Log.i(TAG, "GroupFormed: meshId=${event.meshId} role=${current.role} hostIp=${event.hostIp} port=${event.port} contentPool=${current.localContentPool.size}")
                         settingsStore.overrideMeshSession(
                             groupId = event.meshId,
                             groupKeyHex = event.groupKeyHex,
                         )
-                        Log.i(TAG, "overrideMeshSession done: current groupId=${settingsStore.current().groupId} configured=${settingsStore.current().configured}")
-                        // Bind HTTP client to the P2P interface so downloads reach peers.
-                        // HOST: socket bound to GO IP (192.168.49.1) → kernel routes via p2p iface.
-                        // DEVICE: use the Network object from WifiNetworkSpecifier's onAvailable().
+                        val afterOverride = settingsStore.current()
+                        Log.i(TAG, "overrideMeshSession done: groupId=${afterOverride.groupId.take(8)} configured=${afterOverride.configured}")
                         if (current.role == MeshRole.HOST) {
+                            Log.i(TAG, "GroupFormed HOST: binding meshSocketFactory to hostIp=${event.hostIp}")
                             httpClient.setMeshHostIp(event.hostIp)
                         } else {
-                            httpClient.setMeshNetwork(meshManager.p2pNetwork)
+                            val p2pNet = meshManager.p2pNetwork
+                            Log.i(TAG, "GroupFormed DEVICE: binding meshSocketFactory to p2pNetwork=$p2pNet")
+                            httpClient.setMeshNetwork(p2pNet)
                         }
                         onMeshActive(current.localContentPool, isHost = current.role == MeshRole.HOST)
                     }
@@ -197,7 +198,8 @@ class FenixHubService : Service() {
                 val received = receivedHandler.handle(peer, pulled)
                 repository.addLocalContent(received.item)
                 showToast(received.message)
-            }.onFailure {
+            }.onFailure { err ->
+                Log.e(TAG, "pullContent failed: ${peer.peerIp}:${peer.port} contentId=${peer.announcement.contentId.take(8)} — ${err.javaClass.simpleName}: ${err.message}")
                 showToast("No se pudo recibir el contenido")
             }
         }
@@ -315,12 +317,21 @@ class FenixHubService : Service() {
     val meshState get() = meshManager.state
 
     private fun onMeshActive(contentPool: List<String>, isHost: Boolean) {
-        if (!isHost) return
+        Log.i(TAG, "onMeshActive: isHost=$isHost contentPool=${contentPool.size}")
+        if (!isHost) {
+            Log.i(TAG, "onMeshActive: DEVICE role — NSD discovery running, waiting for HOST announcements")
+            return
+        }
         serviceScope.launch {
             try {
-                contentPool.forEach { repository.publish(it, SendMode.Broadcast) }
+                Log.d(TAG, "onMeshActive HOST: publishing ${contentPool.size} item(s) to NSD")
+                contentPool.forEach { id ->
+                    repository.publish(id, SendMode.Broadcast)
+                    Log.d(TAG, "onMeshActive HOST: published contentId=${id.take(8)}")
+                }
                 val port = httpServer.activePort ?: httpServer.startIfNeeded()
                 val localItems = repository.localContent.value.filter { contentPool.contains(it.contentId) }
+                Log.d(TAG, "onMeshActive HOST: syncing ${localItems.size} item(s) on port=$port")
                 nsdController.syncPublishedContent(localItems, port)
                 showToast("Mesh activo. Publicando ${contentPool.size} contenido(s).")
             } catch (e: Exception) {
@@ -414,12 +425,14 @@ class FenixHubService : Service() {
                 }
 
                 val currentIp = currentLanIpv4()
+                Log.d(TAG, "publishGuard: currentIp=$currentIp knownIp=$publishNetworkIp published=${published.size}")
                 if (publishNetworkIp == null) {
                     publishNetworkIp = currentIp
                     continue
                 }
 
                 if (currentIp != null && publishNetworkIp != currentIp) {
+                    Log.w(TAG, "publishGuard: IP changed $publishNetworkIp → $currentIp — unpublishing all")
                     repository.unpublishAll()
                     httpServer.stop()
                     showToast("Cambio de red detectado. Publicacion detenida por seguridad.")
@@ -443,7 +456,10 @@ class FenixHubService : Service() {
                     val address = addresses.nextElement()
                     if (address is Inet4Address) {
                         val host = address.hostAddress
-                        if (!host.isNullOrBlank()) {
+                        // Skip WiFi Direct address range (192.168.49.x) — on some OEMs
+                        // (Huawei EMUI) the P2P interface is named wlan1/p2p-wlan0-* and
+                        // doesn't match the "p2p" prefix filter above, so we guard by IP.
+                        if (!host.isNullOrBlank() && !host.startsWith("192.168.49.")) {
                             return@runCatching host
                         }
                     }
