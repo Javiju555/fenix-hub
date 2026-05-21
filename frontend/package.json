@@ -1,7 +1,7 @@
 {
   "name": "fenix-hub-frontend",
   "private": true,
-  "version": "0.3.4",
+  "version": "0.3.6",
   "type": "module",
   "scripts": {
     "dev": "vite --port 1421",
@@ -10,6 +10,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.10.1",
+    "esbuild": "^0.25.12",
     "typescript": "^6.0.2",
     "vite": "^8.0.8"
   },

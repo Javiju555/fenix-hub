@@ -3,6 +3,8 @@ node_modules/
 dist/
 .env
 *.lock
+!Cargo.lock
+!frontend/bun.lock
 !bun.lockb
 
 # OS artifacts
@@ -15,7 +17,11 @@ desktop.ini
 
 # Tauri local dev config (contains machine-specific paths)
 src-tauri/tauri.dev.conf.json
-src-tauri/icons/
+src-tauri/icons/*
+!src-tauri/icons/
+!src-tauri/icons/*.png
+!src-tauri/icons/*.ico
+!src-tauri/icons/*.icns
 # Personal Android auth integration (NFC/face via fenix-authd).
 # Lives in android/app/src/main/java/personal/ — never committed.
 android/app/src/main/java/personal/
