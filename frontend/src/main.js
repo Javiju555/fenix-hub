@@ -284,6 +284,8 @@ async function init() {
     setupEventListeners();
 }
 function directModeSupported(transport = transportCapabilities) {
+    if (!IS_ANDROID)
+        return false;
     if (!transport)
         return false;
     const bleReady = !!(transport.ble?.supported

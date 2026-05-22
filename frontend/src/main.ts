@@ -327,6 +327,7 @@ async function init() {
 }
 
 function directModeSupported(transport: TransportCapabilities | null = transportCapabilities): boolean {
+  if (!IS_ANDROID) return false;
   if (!transport) return false;
   const bleReady = !!(
     transport.ble?.supported

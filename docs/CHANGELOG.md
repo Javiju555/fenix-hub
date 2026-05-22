@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.7 — desktop direct-mode cleanup + Linux icon fix (2026-05-22)
+
+### Desktop (Linux + Windows)
+- Removed the unsupported "Directo" action from the desktop hub UI.
+- Refreshed Linux app packaging icons so the bundled app uses the real FenixHub logo instead of the placeholder blue square.
+
+### Release
+- Version bumped to `0.3.7` across desktop frontend, Tauri, and Android metadata.
+
 ## 0.3.4 — passphrase visibility + Android overlay drop (2026-04-26)
 
 ### Desktop + Android
