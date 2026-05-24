@@ -157,6 +157,22 @@ bun tauri dev
 bun tauri build
 ```
 
+### Construir el AppImage en Arch Linux
+
+En Arch, el `AppImage` de Tauri puede fallar aunque el binario y el `.deb` compilen bien. La causa típica es una incompatibilidad entre el `linuxdeploy` embebido y librerías modernas del sistema.
+
+Para ese caso, este repositorio incluye una ruta de build que deja el `AppImage` final en la carpeta de bundles:
+
+```bash
+bun run build:appimage
+```
+
+Artefacto resultante:
+
+```text
+target/release/bundle/appimage/FenixHub_<version>_amd64.AppImage
+```
+
 ### Tests
 
 ```bash
