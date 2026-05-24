@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
+    "build:appimage": "./scripts/build-appimage.sh",
     "dev:vite": "bun run --cwd frontend dev",
     "build:vite": "bun run --cwd frontend build"
   },

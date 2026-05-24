@@ -39,7 +39,8 @@ android/build/
 opencode.json
 
 # Build/packaging internals — not public
-scripts/
+scripts/*
+!scripts/build-appimage.sh
 installer_stage/
 packaging/
 
