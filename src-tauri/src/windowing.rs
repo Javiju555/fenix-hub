@@ -1,9 +1,7 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::{anyhow, Result};
-use tauri::{
-    AppHandle, Emitter, Manager, WebviewWindow, WindowEvent,
-};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WindowEvent};
 
 use fenix_hub_daemon::mdns::unannounce_content;
 
@@ -15,6 +13,10 @@ const HUB_EXPANDED_HEIGHT: f64 = 185.0;
 const HUB_PILL_WIDTH: f64 = 280.0;
 const HUB_PILL_HEIGHT: f64 = 34.0;
 const HUB_SIZE_EPSILON: f64 = 2.0;
+const HUB_PRESET_EXPANDED: u8 = 1;
+const HUB_PRESET_PILL: u8 = 2;
+
+static REQUESTED_HUB_PRESET: AtomicU8 = AtomicU8::new(HUB_PRESET_EXPANDED);
 
 pub fn attach_hub_window_handlers(window: &WebviewWindow, app: &AppHandle) {
     app.state::<HubState>()
@@ -26,36 +28,32 @@ pub fn attach_hub_window_handlers(window: &WebviewWindow, app: &AppHandle) {
     let window_ref = window.clone();
     let app_handle = app.clone();
 
-    window.on_window_event(move |event| {
-        match event {
-            WindowEvent::CloseRequested { api, .. } => {
-                api.prevent_close();
+    window.on_window_event(move |event| match event {
+        WindowEvent::CloseRequested { api, .. } => {
+            api.prevent_close();
 
-                let state = app_handle.state::<HubState>();
-                if state.ui_closing.swap(true, Ordering::AcqRel) {
-                    return;
+            let state = app_handle.state::<HubState>();
+            if state.ui_closing.swap(true, Ordering::AcqRel) {
+                return;
+            }
+
+            let window = window_ref.clone();
+            let app = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<HubState>();
+                if let Err(error) = close_hub_ui_state(&state).await {
+                    tracing::warn!("Failed to close hub UI cleanly: {}", error);
                 }
-
-                let window = window_ref.clone();
-                let app = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    let state = app.state::<HubState>();
-                    if let Err(error) = close_hub_ui_state(&state).await {
-                        tracing::warn!("Failed to close hub UI cleanly: {}", error);
-                    }
-                    if let Err(error) = window.destroy() {
-                        tracing::warn!("Failed to destroy hub window: {}", error);
-                    }
-                });
-            }
-            WindowEvent::Resized(_) => {
-                enforce_hub_window_constraints(&window_ref);
-            }
-            WindowEvent::ScaleFactorChanged { .. } => {
-                enforce_hub_window_constraints(&window_ref);
-            }
-            _ => {}
+                if let Err(error) = window.destroy() {
+                    tracing::warn!("Failed to destroy hub window: {}", error);
+                }
+            });
         }
+        WindowEvent::Resized(_) => {}
+        WindowEvent::ScaleFactorChanged { .. } => {
+            enforce_hub_window_constraints(&window_ref);
+        }
+        _ => {}
     });
 }
 
@@ -112,17 +110,28 @@ fn set_utility_type_hint(window: &WebviewWindow) {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn refresh_linux_window_surface(window: &WebviewWindow) {
+    use gtk::prelude::WidgetExt;
+    if let Ok(gtk_win) = window.gtk_window() {
+        gtk_win.queue_resize();
+        gtk_win.queue_draw();
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn refresh_linux_window_surface(_window: &WebviewWindow) {}
+
 fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
     let _ = window.unminimize();
     // Enforce size flags and snap to valid preset.
     enforce_hub_window_constraints(window);
     // Position at top-center only on first reveal/show — not on every resize event.
-    let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
-    let logical_w = window.outer_size().map(|s| s.width as f64 / scale).unwrap_or(HUB_EXPANDED_WIDTH);
-    let (target_w, _) = nearest_hub_preset(logical_w, HUB_EXPANDED_HEIGHT);
+    let (target_w, _) = requested_hub_size();
     position_hub_window_top(window, target_w);
     window.show()?;
     window.set_focus()?;
+    refresh_linux_window_surface(window);
 
     // On Linux, re-apply position after the WM finishes its async placement pass.
     // Some compositors (Mutter, KWin) move the window during map — we nudge it back.
@@ -132,9 +141,29 @@ fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             enforce_hub_window_constraints(&w);
-            let scale = w.scale_factor().unwrap_or(1.0).max(1.0);
-            let logical_w = w.outer_size().map(|s| s.width as f64 / scale).unwrap_or(HUB_EXPANDED_WIDTH);
-            let (target_w, _) = nearest_hub_preset(logical_w, HUB_EXPANDED_HEIGHT);
+            let (target_w, _) = requested_hub_size();
+            position_hub_window_top(&w, target_w);
+            refresh_linux_window_surface(&w);
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) fn resize_hub_window(window: &WebviewWindow, width: f64, height: f64) -> Result<()> {
+    let preset = nearest_hub_preset_id(width, height);
+    REQUESTED_HUB_PRESET.store(preset, Ordering::Release);
+    let (target_w, target_h) = hub_size_for_preset(preset);
+    apply_hub_size(window, target_w, target_h)?;
+    position_hub_window_top(window, target_w);
+
+    #[cfg(target_os = "linux")]
+    {
+        let w = window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(160)).await;
+            let (target_w, target_h) = requested_hub_size();
+            let _ = apply_hub_size(&w, target_w, target_h);
             position_hub_window_top(&w, target_w);
         });
     }
@@ -142,17 +171,35 @@ fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
     Ok(())
 }
 
-fn nearest_hub_preset(logical_width: f64, logical_height: f64) -> (f64, f64) {
+fn nearest_hub_preset_id(logical_width: f64, logical_height: f64) -> u8 {
     let pill_distance =
         (logical_width - HUB_PILL_WIDTH).abs() + (logical_height - HUB_PILL_HEIGHT).abs();
-    let expanded_distance = (logical_width - HUB_EXPANDED_WIDTH).abs()
-        + (logical_height - HUB_EXPANDED_HEIGHT).abs();
+    let expanded_distance =
+        (logical_width - HUB_EXPANDED_WIDTH).abs() + (logical_height - HUB_EXPANDED_HEIGHT).abs();
 
     if pill_distance < expanded_distance {
+        HUB_PRESET_PILL
+    } else {
+        HUB_PRESET_EXPANDED
+    }
+}
+
+fn hub_size_for_preset(preset: u8) -> (f64, f64) {
+    if preset == HUB_PRESET_PILL {
         (HUB_PILL_WIDTH, HUB_PILL_HEIGHT)
     } else {
         (HUB_EXPANDED_WIDTH, HUB_EXPANDED_HEIGHT)
     }
+}
+
+fn requested_hub_size() -> (f64, f64) {
+    hub_size_for_preset(REQUESTED_HUB_PRESET.load(Ordering::Acquire))
+}
+
+fn apply_hub_size(window: &WebviewWindow, target_w: f64, target_h: f64) -> Result<()> {
+    window.set_size(tauri::LogicalSize::new(target_w, target_h))?;
+    refresh_linux_window_surface(window);
+    Ok(())
 }
 
 /// Enforce window flags and snap the size to the nearest valid preset.
@@ -172,14 +219,7 @@ fn enforce_hub_window_constraints(window: &WebviewWindow) {
     let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
     let outer = window.outer_size().ok();
 
-    let (target_w, target_h) = match outer {
-        Some(size) if size.width > 0 && size.height > 0 => {
-            let logical_w = size.width as f64 / scale;
-            let logical_h = size.height as f64 / scale;
-            nearest_hub_preset(logical_w, logical_h)
-        }
-        _ => (HUB_EXPANDED_WIDTH, HUB_EXPANDED_HEIGHT),
-    };
+    let (target_w, target_h) = requested_hub_size();
 
     let needs_resize = match outer {
         Some(size) if size.width > 0 && size.height > 0 => {
@@ -192,7 +232,7 @@ fn enforce_hub_window_constraints(window: &WebviewWindow) {
     };
 
     if needs_resize {
-        let _ = window.set_size(tauri::LogicalSize::new(target_w, target_h));
+        let _ = apply_hub_size(window, target_w, target_h);
     }
 }
 
@@ -215,13 +255,22 @@ pub(crate) fn position_hub_window_top(window: &WebviewWindow, logical_width: f64
     let y = (8.0 * scale) as i32;
     tracing::debug!(
         "position_hub_window_top: screen_w={} win_w={} scale={} → x={} y={}",
-        screen_w, win_w, scale, x, y
+        screen_w,
+        win_w,
+        scale,
+        x,
+        y
     );
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
 async fn close_hub_ui_state(state: &HubState) -> Result<()> {
-    let announcements = state.active_announcements.write().await.drain().collect::<Vec<_>>();
+    let announcements = state
+        .active_announcements
+        .write()
+        .await
+        .drain()
+        .collect::<Vec<_>>();
     for (_, rec) in announcements {
         unannounce_content(&state.mdns, &rec.instance_name).ok();
     }

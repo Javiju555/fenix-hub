@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
 /// Tauri IPC commands — callable from the frontend via invoke().
-#[cfg(not(target_os = "windows"))]
-use std::path::Path;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use std::time::{Duration, Instant, SystemTime};
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use base64::Engine;
@@ -93,8 +91,7 @@ pub async fn setup_identity(
             .await
             .clone()
             .ok_or("No existing identity to update")?;
-        GroupIdentity::from_key_hex(&existing.key_hex(), trimmed_name)
-            .map_err(|e| e.to_string())?
+        GroupIdentity::from_key_hex(&existing.key_hex(), trimmed_name).map_err(|e| e.to_string())?
     };
     let identity = Arc::new(identity);
 
@@ -299,7 +296,8 @@ pub fn get_transport_capabilities() -> TransportCapabilities {
     let lan_ip = crate::network::local_ipv4();
     let ble = ble_transport_details();
     let wifi_direct = wifi_direct_transport_details();
-    let airdrop_ready = ble.supported && ble.enabled && wifi_direct.supported && wifi_direct.enabled;
+    let airdrop_ready =
+        ble.supported && ble.enabled && wifi_direct.supported && wifi_direct.enabled;
 
     TransportCapabilities {
         lan: lan_ip.is_some(),
@@ -334,8 +332,7 @@ fn parse_device_type(raw: Option<&str>, fallback: &DeviceType) -> DeviceType {
 async fn stop_active_shares(state: &HubState) {
     stop_server_guard(state).await;
 
-    let announcements: Vec<_> =
-        state.active_announcements.write().await.drain().collect();
+    let announcements: Vec<_> = state.active_announcements.write().await.drain().collect();
     for (_, rec) in announcements {
         if let Err(error) = unannounce_content(&state.mdns, &rec.instance_name) {
             tracing::warn!("Failed to unannounce during identity update: {}", error);
@@ -417,7 +414,9 @@ async fn stop_server_guard(state: &HubState) {
 
 async fn shutdown_server_runtime(
     mdns: mdns_sd::ServiceDaemon,
-    active_announcements: Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::state::AnnouncementRecord>>>,
+    active_announcements: Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, crate::state::AnnouncementRecord>>,
+    >,
     server_shutdown: Arc<tokio::sync::RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
     server_port: Arc<tokio::sync::RwLock<Option<u16>>>,
 ) {
@@ -504,7 +503,11 @@ fn wifi_direct_transport_details() -> TransportRadioDetails {
         supported,
         enabled,
         permissions_ready: true,
-        adapters: if enabled { active_adapters } else { all_adapters },
+        adapters: if enabled {
+            active_adapters
+        } else {
+            all_adapters
+        },
         last_error: error_all.or(error_active),
     }
 }
@@ -545,9 +548,12 @@ fn wifi_direct_transport_details() -> TransportRadioDetails {
 #[cfg(target_os = "windows")]
 fn windows_script_lines(script: &str) -> (Vec<String>, Option<String>) {
     let mut command = std::process::Command::new("powershell");
-    command
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    command.creation_flags(CREATE_NO_WINDOW).args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        script,
+    ]);
 
     let output = match command.output() {
         Ok(output) => output,
@@ -637,7 +643,8 @@ fn command_exists(command: &str) -> bool {
         .arg(command)
         .output()
         .map(|output| output.status.success())
-        .unwrap_or(false)}
+        .unwrap_or(false)
+}
 
 // ── Local content management ──────────────────────────────────────────────────
 
@@ -687,6 +694,13 @@ pub async fn add_text_content(
     text: String,
     state: State<'_, HubState>,
 ) -> Result<ContentItemDto, String> {
+    add_text_content_inner(text, &state).await
+}
+
+async fn add_text_content_inner(
+    text: String,
+    state: &State<'_, HubState>,
+) -> Result<ContentItemDto, String> {
     // Deduplicate: return existing item if identical text is already in the hub
     {
         let content = state.local_content.read().await;
@@ -709,7 +723,7 @@ pub async fn add_text_content(
         .write()
         .await
         .insert(item.id.clone(), item);
-    evict_fifo(&state).await;
+    evict_fifo(state).await;
     Ok(dto)
 }
 
@@ -782,7 +796,13 @@ pub async fn unpublish_content(id: String, state: State<'_, HubState>) -> Result
 
 #[tauri::command]
 pub async fn unpublish_all(state: State<'_, HubState>) -> Result<(), String> {
-    let ids: Vec<String> = state.active_announcements.read().await.keys().cloned().collect();
+    let ids: Vec<String> = state
+        .active_announcements
+        .read()
+        .await
+        .keys()
+        .cloned()
+        .collect();
     for id in ids {
         let rec = state.active_announcements.write().await.remove(&id);
         if let Some(rec) = rec {
@@ -880,15 +900,14 @@ pub async fn publish_content(
     let instance_name =
         announce_content(&state.mdns, &announcement, local_ip).map_err(|e| e.to_string())?;
 
-    state
-        .active_announcements
-        .write()
-        .await
-        .insert(args.content_id.clone(), crate::state::AnnouncementRecord {
+    state.active_announcements.write().await.insert(
+        args.content_id.clone(),
+        crate::state::AnnouncementRecord {
             instance_name,
             announcement,
             local_ip: std::net::IpAddr::V4(local_ip),
-        });
+        },
+    );
     tracing::info!("Published {} on port {} via mDNS", args.content_id, port);
     Ok(())
 }
@@ -980,15 +999,14 @@ pub async fn publish_all(
             }
         };
 
-        state
-            .active_announcements
-            .write()
-            .await
-            .insert(content_id.clone(), crate::state::AnnouncementRecord {
+        state.active_announcements.write().await.insert(
+            content_id.clone(),
+            crate::state::AnnouncementRecord {
                 instance_name,
                 announcement,
                 local_ip: std::net::IpAddr::V4(local_ip),
-            });
+            },
+        );
         tracing::info!("Published {} on port {} via mDNS", content_id, port);
     }
     Ok(())
@@ -1074,23 +1092,22 @@ pub async fn start_native_file_drag(
     let item = content.get(&id).ok_or("Content not found")?;
     let path = match &item.data {
         ContentData::FilePath(p) => p.to_string_lossy().to_string(),
-        ContentData::Bytes(bytes) => {
-            crate::temp_store::write_item_bytes(
-                &item.id,
-                item.file_name.as_deref().unwrap_or("fenixhub-item.bin"),
-                bytes,
-            )
-            .map_err(|e| e.to_string())?
-            .to_string_lossy()
-            .to_string()
-        }
+        ContentData::Bytes(bytes) => crate::temp_store::write_item_bytes(
+            &item.id,
+            item.file_name.as_deref().unwrap_or("fenixhub-item.bin"),
+            bytes,
+        )
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .to_string(),
         _ => return Err("Item has no file data".to_string()),
     };
     drop(content);
     #[cfg(target_os = "windows")]
     app.run_on_main_thread(move || {
         crate::drop_target::start_native_file_drag(path);
-    }).map_err(|e| e.to_string())?;
+    })
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1190,7 +1207,11 @@ pub async fn copy_peer_content(
 
     let cached_path = if content_type == fenix_hub_core::content::ContentType::Image {
         let p = peer_received_path(&content_id, &announcement);
-        if p.exists() { p.to_str().map(ToOwned::to_owned) } else { None }
+        if p.exists() {
+            p.to_str().map(ToOwned::to_owned)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -1209,11 +1230,14 @@ pub async fn copy_peer_content(
         fenix_hub_core::content::ContentType::Image
         | fenix_hub_core::content::ContentType::File
         | fenix_hub_core::content::ContentType::Folder => {
-            let path = pulled.file_path.clone()
-                .or_else(|| {
-                    let p = peer_received_path(&content_id, &announcement);
-                    if p.exists() { Some(p) } else { None }
-                });
+            let path = pulled.file_path.clone().or_else(|| {
+                let p = peer_received_path(&content_id, &announcement);
+                if p.exists() {
+                    Some(p)
+                } else {
+                    None
+                }
+            });
 
             if let Some(path) = path {
                 let clip_type = announcement.content_type.clone();
@@ -1259,16 +1283,13 @@ pub async fn save_peer_content_as(
     };
 
     // Suggest a file name from announcement metadata (no download needed).
-    let suggested_name = announcement
-        .file_name
-        .clone()
-        .unwrap_or_else(|| {
-            default_file_name(
-                announcement.content_type.clone(),
-                announcement.mime_type.as_deref(),
-                &announcement.content_id,
-            )
-        });
+    let suggested_name = announcement.file_name.clone().unwrap_or_else(|| {
+        default_file_name(
+            announcement.content_type.clone(),
+            announcement.mime_type.as_deref(),
+            &announcement.content_id,
+        )
+    });
 
     // Show save dialog first — if cancelled, skip the download entirely.
     let Some(target_path) = rfd::FileDialog::new()
@@ -1337,10 +1358,13 @@ pub async fn save_local_content_as(
 ) -> Result<SaveContentResult, String> {
     let content = state.local_content.read().await;
     let item = content.get(&id).ok_or("Content not found")?;
-    let suggested_name = item
-        .file_name
-        .clone()
-        .unwrap_or_else(|| default_file_name(item.content_type.clone(), item.mime_type.as_deref(), &item.id));
+    let suggested_name = item.file_name.clone().unwrap_or_else(|| {
+        default_file_name(
+            item.content_type.clone(),
+            item.mime_type.as_deref(),
+            &item.id,
+        )
+    });
 
     let Some(target_path) = rfd::FileDialog::new()
         .set_file_name(&suggested_name)
@@ -1372,24 +1396,25 @@ fn peer_received_path(content_id: &str, announcement: &Announcement) -> std::pat
     // Derive extension from the file name or MIME type.
     // Text content always gets .txt regardless of MIME to avoid mime_guess
     // returning unusual extensions like .asm for text/plain.
-    let ext: Option<String> = if announcement.content_type == fenix_hub_core::content::ContentType::Text {
-        Some("txt".to_string())
-    } else {
-        announcement
-            .file_name
-            .as_deref()
-            .and_then(|n| std::path::Path::new(n).extension())
-            .and_then(|e| e.to_str())
-            .map(|s| s.to_string())
-            .or_else(|| {
-                announcement
-                    .mime_type
-                    .as_deref()
-                    .and_then(|m| mime_guess::get_mime_extensions_str(m))
-                    .and_then(|exts| exts.first())
-                    .map(|s| s.to_string())
-            })
-    };
+    let ext: Option<String> =
+        if announcement.content_type == fenix_hub_core::content::ContentType::Text {
+            Some("txt".to_string())
+        } else {
+            announcement
+                .file_name
+                .as_deref()
+                .and_then(|n| std::path::Path::new(n).extension())
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    announcement
+                        .mime_type
+                        .as_deref()
+                        .and_then(|m| mime_guess::get_mime_extensions_str(m))
+                        .and_then(|exts| exts.first())
+                        .map(|s| s.to_string())
+                })
+        };
 
     match ext {
         Some(e) => dir.join(format!("{content_id}.{e}")),
@@ -1437,7 +1462,11 @@ fn prune_received_cache_fifo(max_files: usize) {
     let remove_count = files.len().saturating_sub(max_files);
     for (_, path) in files.into_iter().take(remove_count) {
         if let Err(error) = std::fs::remove_file(&path) {
-            tracing::warn!("Failed to remove old received cache file {:?}: {}", path, error);
+            tracing::warn!(
+                "Failed to remove old received cache file {:?}: {}",
+                path,
+                error
+            );
         }
     }
 }
@@ -1448,7 +1477,14 @@ fn prune_received_cache_fifo(max_files: usize) {
 async fn ensure_peer_cached(
     content_id: &str,
     state: &State<'_, HubState>,
-) -> Result<(Announcement, std::net::IpAddr, fenix_hub_core::client::PulledContent), String> {
+) -> Result<
+    (
+        Announcement,
+        std::net::IpAddr,
+        fenix_hub_core::client::PulledContent,
+    ),
+    String,
+> {
     let peers = state.peer_content.read().await;
     let (announcement, peer_ip) = peers.get(content_id).ok_or("Peer content not found")?;
     let announcement = announcement.clone();
@@ -1460,7 +1496,11 @@ async fn ensure_peer_cached(
     if temp_path.exists() {
         tracing::debug!("Cache hit for {content_id}: {:?}", temp_path);
         // For File/Folder type: avoid loading large files into RAM — point at the cached path.
-        let pulled = if matches!(announcement.content_type, fenix_hub_core::content::ContentType::File | fenix_hub_core::content::ContentType::Folder) {
+        let pulled = if matches!(
+            announcement.content_type,
+            fenix_hub_core::content::ContentType::File
+                | fenix_hub_core::content::ContentType::Folder
+        ) {
             fenix_hub_core::client::PulledContent {
                 bytes: vec![],
                 file_path: Some(temp_path.clone()),
@@ -1488,7 +1528,10 @@ async fn ensure_peer_cached(
         .ok_or("Identity not configured")?;
 
     // For File/Folder content type: stream directly to disk — don't buffer in RAM.
-    let pulled = if matches!(announcement.content_type, fenix_hub_core::content::ContentType::File | fenix_hub_core::content::ContentType::Folder) {
+    let pulled = if matches!(
+        announcement.content_type,
+        fenix_hub_core::content::ContentType::File | fenix_hub_core::content::ContentType::Folder
+    ) {
         fenix_hub_core::client::pull_content_to_file(
             peer_ip,
             announcement.port,
@@ -1507,9 +1550,10 @@ async fn ensure_peer_cached(
         }
     } else {
         // Text and Image: load in memory (needed for clipboard / preview generation).
-        let p = fenix_hub_core::client::pull_content(peer_ip, announcement.port, content_id, &identity)
-            .await
-            .map_err(|e| e.to_string())?;
+        let p =
+            fenix_hub_core::client::pull_content(peer_ip, announcement.port, content_id, &identity)
+                .await
+                .map_err(|e| e.to_string())?;
         if let Err(e) = std::fs::write(&temp_path, &p.bytes) {
             tracing::warn!("Failed to cache {content_id} to {:?}: {e}", temp_path);
         } else {
@@ -1574,7 +1618,6 @@ fn build_peer_item(
         }
     }
 }
-
 
 fn preview_for_announcement(item: &ContentItem) -> String {
     if item.content_type != fenix_hub_core::content::ContentType::Image {
@@ -1693,14 +1736,14 @@ fn clipboard_hdrop(path: &std::path::Path) -> anyhow::Result<()> {
     utf16.push(0); // list null terminator
 
     let mut buf = vec![0u8; 20 + utf16.len() * 2];
-    buf[0..4].copy_from_slice(&20u32.to_le_bytes());   // pFiles
-    buf[16..20].copy_from_slice(&1u32.to_le_bytes());  // fWide = TRUE
+    buf[0..4].copy_from_slice(&20u32.to_le_bytes()); // pFiles
+    buf[16..20].copy_from_slice(&1u32.to_le_bytes()); // fWide = TRUE
     for (i, &w) in utf16.iter().enumerate() {
         let off = 20 + i * 2;
         buf[off..off + 2].copy_from_slice(&w.to_le_bytes());
     }
 
-    use clipboard_win::{Clipboard, raw};
+    use clipboard_win::{raw, Clipboard};
     let _clip = Clipboard::new_attempts(10).map_err(|e| anyhow::anyhow!("{e}"))?;
     raw::empty().map_err(|e| anyhow::anyhow!("{e}"))?;
     // CF_HDROP = 15
@@ -1728,7 +1771,10 @@ fn clipboard_set_file_uri(path: &std::path::Path) -> anyhow::Result<()> {
         if let Ok(ref mut child) = child {
             if let Some(stdin) = child.stdin.take() {
                 use std::io::Write;
-                let _ = { let mut s = stdin; s.write_all(uri.as_bytes()) };
+                let _ = {
+                    let mut s = stdin;
+                    s.write_all(uri.as_bytes())
+                };
             }
             if child.wait().map(|s| s.success()).unwrap_or(false) {
                 return Ok(());
@@ -1749,7 +1795,10 @@ fn clipboard_set_file_uri(path: &std::path::Path) -> anyhow::Result<()> {
         if let Ok(ref mut child) = child {
             if let Some(stdin) = child.stdin.take() {
                 use std::io::Write;
-                let _ = { let mut s = stdin; s.write_all(uri.as_bytes()) };
+                let _ = {
+                    let mut s = stdin;
+                    s.write_all(uri.as_bytes())
+                };
             }
             if child.wait().map(|s| s.success()).unwrap_or(false) {
                 return Ok(());
@@ -1882,6 +1931,318 @@ async fn evict_fifo(state: &State<'_, HubState>) {
     }
 }
 
+#[tauri::command]
+pub async fn paste_clipboard_content(
+    state: State<'_, HubState>,
+) -> Result<Vec<ContentItemDto>, String> {
+    let clipboard_text = tokio::task::spawn_blocking(read_clipboard_text)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+    if let Some(text) = clipboard_text.as_deref() {
+        let mut pasted_items = Vec::new();
+        for path in clipboard_paths_from_text(text) {
+            if path.exists() {
+                pasted_items.push(add_file_by_path_inner(path, &state).await?);
+            }
+        }
+        if !pasted_items.is_empty() {
+            return Ok(pasted_items);
+        }
+    }
+
+    if let Some(item) = paste_clipboard_image(&state).await? {
+        return Ok(vec![item]);
+    }
+
+    if let Some(text) = clipboard_text {
+        return Ok(vec![add_text_content_inner(text, &state).await?]);
+    }
+
+    Ok(Vec::new())
+}
+
+struct ClipboardImageBytes {
+    bytes: Vec<u8>,
+    mime_type: &'static str,
+}
+
+async fn paste_clipboard_image(
+    state: &State<'_, HubState>,
+) -> Result<Option<ContentItemDto>, String> {
+    let image = tokio::task::spawn_blocking(read_clipboard_image)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+    let Some(image) = image else {
+        return Ok(None);
+    };
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let ext = extension_from_mime(image.mime_type).unwrap_or("png");
+    let file_name = format!("clipboard-{}.{}", &id[..8], ext);
+    let preview = image_preview_data_url(&image.bytes, 96, 72);
+    let item = create_temp_binary_item(
+        image.bytes,
+        fenix_hub_core::content::ContentType::Image,
+        Some(file_name),
+        Some(image.mime_type.to_string()),
+        preview,
+    )
+    .map_err(|e| e.to_string())?;
+    temp_store::write_item_meta(&item, "bytes").ok();
+    let dto = ContentItemDto::from(&item);
+    state
+        .local_content
+        .write()
+        .await
+        .insert(item.id.clone(), item);
+    evict_fifo(state).await;
+    Ok(Some(dto))
+}
+
+fn read_clipboard_image() -> anyhow::Result<Option<ClipboardImageBytes>> {
+    #[cfg(target_os = "linux")]
+    if let Some(image) = read_clipboard_image_from_linux_tools() {
+        return Ok(Some(image));
+    }
+
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(_) => return Ok(None),
+    };
+    let image = match clipboard.get_image() {
+        Ok(image) => image,
+        Err(_) => return Ok(None),
+    };
+
+    let width = image.width as u32;
+    let height = image.height as u32;
+    let rgba = image.bytes.into_owned();
+    let rgba = image::RgbaImage::from_raw(width, height, rgba)
+        .ok_or_else(|| anyhow::anyhow!("Invalid clipboard image dimensions"))?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(rgba).write_to(&mut png, image::ImageFormat::Png)?;
+    Ok(Some(ClipboardImageBytes {
+        bytes: png.into_inner(),
+        mime_type: "image/png",
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn read_clipboard_image_from_linux_tools() -> Option<ClipboardImageBytes> {
+    const IMAGE_TARGETS: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+    for target in IMAGE_TARGETS {
+        for (command, args) in [
+            ("wl-paste", vec!["--type", *target]),
+            (
+                "xclip",
+                vec!["-selection", "clipboard", "-o", "-t", *target],
+            ),
+        ] {
+            let Some(bytes) = command_output_bytes(command, &args) else {
+                continue;
+            };
+            let Some(mime_type) = image_mime_from_magic(&bytes) else {
+                continue;
+            };
+            return Some(ClipboardImageBytes { bytes, mime_type });
+        }
+    }
+
+    None
+}
+
+fn read_clipboard_text() -> anyhow::Result<Option<String>> {
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        if let Ok(text) = clipboard.get_text() {
+            if let Some(text) = clipboard_text_if_valid(text) {
+                return Ok(Some(text));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for (command, args) in [
+            ("wl-paste", &["-n", "--type", "text/uri-list"][..]),
+            (
+                "wl-paste",
+                &["-n", "--type", "text/plain;charset=utf-8"][..],
+            ),
+            ("wl-paste", &["-n", "--type", "text/plain"][..]),
+            (
+                "xclip",
+                &["-selection", "clipboard", "-o", "-t", "text/uri-list"][..],
+            ),
+            (
+                "xclip",
+                &[
+                    "-selection",
+                    "clipboard",
+                    "-o",
+                    "-t",
+                    "text/plain;charset=utf-8",
+                ][..],
+            ),
+            (
+                "xclip",
+                &["-selection", "clipboard", "-o", "-t", "text/plain"][..],
+            ),
+            (
+                "xclip",
+                &["-selection", "clipboard", "-o", "-t", "UTF8_STRING"][..],
+            ),
+            (
+                "xclip",
+                &["-selection", "clipboard", "-o", "-t", "STRING"][..],
+            ),
+        ] {
+            if !command_exists(command) {
+                continue;
+            }
+            if let Some(text) = command_output_text(command, args) {
+                return Ok(Some(text));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn command_output_bytes(command: &str, args: &[&str]) -> Option<Vec<u8>> {
+    if !command_exists(command) {
+        return None;
+    }
+    let output = std::process::Command::new(command)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    Some(output.stdout)
+}
+
+#[cfg(target_os = "linux")]
+fn command_output_text(command: &str, args: &[&str]) -> Option<String> {
+    let bytes = command_output_bytes(command, args)?;
+    let text = String::from_utf8(bytes).ok()?;
+    clipboard_text_if_valid(text)
+}
+
+fn clipboard_text_if_valid(text: String) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || looks_like_binary_clipboard_text(text) {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+fn looks_like_binary_clipboard_text(text: &str) -> bool {
+    if looks_like_lossy_image_text(text) {
+        return true;
+    }
+
+    let mut total = 0usize;
+    let mut control = 0usize;
+    for ch in text.chars().take(512) {
+        total += 1;
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            control += 1;
+        }
+    }
+
+    control >= 2 || (total > 0 && control * 20 > total)
+}
+
+fn looks_like_lossy_image_text(text: &str) -> bool {
+    let sample: String = text.chars().take(128).collect();
+    let sample = sample.trim_start_matches('\u{feff}');
+    let sample = sample.trim_start_matches('\u{fffd}');
+
+    sample.starts_with("PNG\r\n\u{1a}\n")
+        || (sample.starts_with("PNG") && sample.contains("IHDR"))
+        || sample.starts_with("GIF87a")
+        || sample.starts_with("GIF89a")
+        || sample.starts_with("RIFF") && sample.get(8..12) == Some("WEBP")
+        || sample.contains("JFIF")
+        || sample.contains("Exif")
+}
+
+fn image_mime_from_magic(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+fn clipboard_paths_from_text(text: &str) -> Vec<std::path::PathBuf> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            if let Some(uri) = line.strip_prefix("file://") {
+                return path_from_file_uri(uri);
+            }
+            let path = std::path::PathBuf::from(line);
+            if path.is_absolute() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn path_from_file_uri(uri: &str) -> Option<std::path::PathBuf> {
+    let path_part = if let Some(path) = uri.strip_prefix('/') {
+        format!("/{}", path)
+    } else {
+        let (host, path) = uri.split_once('/')?;
+        if !host.is_empty() && host != "localhost" {
+            return None;
+        }
+        format!("/{}", path)
+    };
+    Some(std::path::PathBuf::from(percent_decode(&path_part)))
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(value) = u8::from_str_radix(hex, 16) {
+                    out.push(value);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 /// Add a file by filesystem path — avoids base64 round-trip for drag & drop from Explorer.
 /// Rust reads the bytes directly; the WebView never sees the raw data.
 #[tauri::command]
@@ -1889,14 +2250,22 @@ pub async fn add_file_by_path(
     path: String,
     state: State<'_, HubState>,
 ) -> Result<ContentItemDto, String> {
-    let path = std::path::PathBuf::from(&path);
+    add_file_by_path_inner(std::path::PathBuf::from(path), &state).await
+}
+
+async fn add_file_by_path_inner(
+    path: std::path::PathBuf,
+    state: &State<'_, HubState>,
+) -> Result<ContentItemDto, String> {
     // Deduplicate: same source path already in hub → return existing
     {
         let content = state.local_content.read().await;
         for existing in content.values() {
             if existing.file_name.as_deref() == path.file_name().and_then(|n| n.to_str()) {
                 if let ContentData::FilePath(ref p) = existing.data {
-                    if p == &path { return Ok(ContentItemDto::from(existing)); }
+                    if p == &path {
+                        return Ok(ContentItemDto::from(existing));
+                    }
                 }
             }
         }
@@ -1906,11 +2275,11 @@ pub async fn add_file_by_path(
         .and_then(|n| n.to_str())
         .unwrap_or("fenixhub-item")
         .to_string();
-    let mime_type = mime_guess::from_path(&path)
-        .first()
-        .map(|m| m.to_string());
+    let mime_type = mime_guess::from_path(&path).first().map(|m| m.to_string());
 
-    let is_image = mime_type.as_deref().map_or(false, |m| m.starts_with("image/"));
+    let is_image = mime_type
+        .as_deref()
+        .map_or(false, |m| m.starts_with("image/"));
     let is_text = is_text_mime(mime_type.as_deref(), &file_name);
 
     let content_type = if is_image {
@@ -1929,14 +2298,22 @@ pub async fn add_file_by_path(
         // "script.py · first line of content…" — keep total under 80 chars
         let content_preview = item.preview.chars().take(60).collect::<String>();
         item.preview = format!("{} · {}", file_name, content_preview);
-        temp_store::write_text_content(&item.id, match &item.data {
-            ContentData::Text(t) => t,
-            _ => "",
-        }).ok();
+        temp_store::write_text_content(
+            &item.id,
+            match &item.data {
+                ContentData::Text(t) => t,
+                _ => "",
+            },
+        )
+        .ok();
         temp_store::write_item_meta(&item, "text").ok();
         let dto = ContentItemDto::from(&item);
-        state.local_content.write().await.insert(item.id.clone(), item);
-        evict_fifo(&state).await;
+        state
+            .local_content
+            .write()
+            .await
+            .insert(item.id.clone(), item);
+        evict_fifo(state).await;
         return Ok(dto);
     }
 
@@ -1955,14 +2332,19 @@ pub async fn add_file_by_path(
 
         let file_count = count_dir_files(&path);
         let size = zip_bytes.len() as u64;
-        let preview = format!("{} ({} archivos, {})", folder_name, file_count, human_size(size));
+        let preview = format!(
+            "{} ({} archivos, {})",
+            folder_name,
+            file_count,
+            human_size(size)
+        );
         let id = uuid::Uuid::new_v4().to_string();
         let created_at = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let zip_path = temp_store::write_item_bytes(&id, &zip_name, &zip_bytes)
-            .map_err(|e| e.to_string())?;
+        let zip_path =
+            temp_store::write_item_bytes(&id, &zip_name, &zip_bytes).map_err(|e| e.to_string())?;
         let item = ContentItem {
             id: id.clone(),
             content_type: fenix_hub_core::content::ContentType::Folder,
@@ -1975,8 +2357,12 @@ pub async fn add_file_by_path(
         };
         temp_store::write_item_meta(&item, "bytes").ok();
         let dto = ContentItemDto::from(&item);
-        state.local_content.write().await.insert(item.id.clone(), item);
-        evict_fifo(&state).await;
+        state
+            .local_content
+            .write()
+            .await
+            .insert(item.id.clone(), item);
+        evict_fifo(state).await;
         return Ok(dto);
     }
 
@@ -1985,8 +2371,12 @@ pub async fn add_file_by_path(
         .map_err(|e| e.to_string())?;
     temp_store::write_item_meta(&item, "bytes").ok();
     let dto = ContentItemDto::from(&item);
-    state.local_content.write().await.insert(item.id.clone(), item);
-    evict_fifo(&state).await;
+    state
+        .local_content
+        .write()
+        .await
+        .insert(item.id.clone(), item);
+    evict_fifo(state).await;
     Ok(dto)
 }
 
@@ -2016,7 +2406,12 @@ pub async fn share_folder(state: State<'_, HubState>) -> Result<Option<ContentIt
 
     let file_count = count_dir_files(&folder_path);
     let size = zip_bytes.len() as u64;
-    let preview = format!("{} ({} archivos, {})", folder_name, file_count, human_size(size));
+    let preview = format!(
+        "{} ({} archivos, {})",
+        folder_name,
+        file_count,
+        human_size(size)
+    );
 
     let id = uuid::Uuid::new_v4().to_string();
     let created_at = SystemTime::now()
@@ -2024,8 +2419,8 @@ pub async fn share_folder(state: State<'_, HubState>) -> Result<Option<ContentIt
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let zip_path = temp_store::write_item_bytes(&id, &zip_name, &zip_bytes)
-        .map_err(|e| e.to_string())?;
+    let zip_path =
+        temp_store::write_item_bytes(&id, &zip_name, &zip_bytes).map_err(|e| e.to_string())?;
 
     let item = ContentItem {
         id: id.clone(),
@@ -2040,7 +2435,11 @@ pub async fn share_folder(state: State<'_, HubState>) -> Result<Option<ContentIt
 
     temp_store::write_item_meta(&item, "bytes").ok();
     let dto = ContentItemDto::from(&item);
-    state.local_content.write().await.insert(item.id.clone(), item);
+    state
+        .local_content
+        .write()
+        .await
+        .insert(item.id.clone(), item);
     evict_fifo(&state).await;
     Ok(Some(dto))
 }
@@ -2083,17 +2482,22 @@ fn zip_directory(source: &std::path::Path, _base_name: &str) -> anyhow::Result<V
     use std::io::Write;
     let buf = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(buf);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
-    for entry in walkdir::WalkDir::new(source).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(source)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path();
         let relative = match path.strip_prefix(source.parent().unwrap_or(source)) {
             Ok(r) => r,
             Err(_) => continue,
         };
         let name = relative.to_string_lossy().replace('\\', "/");
-        if name.is_empty() { continue; }
+        if name.is_empty() {
+            continue;
+        }
         if path.is_dir() {
             zip.add_directory(format!("{}/", name), options)?;
         } else {
@@ -2132,9 +2536,15 @@ fn count_dir_files(path: &std::path::Path) -> usize {
 }
 
 fn human_size(bytes: u64) -> String {
-    if bytes < 1024 { return format!("{} B", bytes); }
-    if bytes < 1024 * 1024 { return format!("{:.1} KB", bytes as f64 / 1024.0); }
-    if bytes < 1024 * 1024 * 1024 { return format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)); }
+    if bytes < 1024 {
+        return format!("{} B", bytes);
+    }
+    if bytes < 1024 * 1024 {
+        return format!("{:.1} KB", bytes as f64 / 1024.0);
+    }
+    if bytes < 1024 * 1024 * 1024 {
+        return format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0));
+    }
     format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
@@ -2144,8 +2554,15 @@ fn is_text_mime(mime: Option<&str>, file_name: &str) -> bool {
             return true;
         }
         // application/json, application/xml, application/javascript, etc.
-        if matches!(m, "application/json" | "application/xml" | "application/javascript"
-            | "application/typescript" | "application/toml" | "application/yaml") {
+        if matches!(
+            m,
+            "application/json"
+                | "application/xml"
+                | "application/javascript"
+                | "application/typescript"
+                | "application/toml"
+                | "application/yaml"
+        ) {
             return true;
         }
     }
@@ -2155,12 +2572,47 @@ fn is_text_mime(mime: Option<&str>, file_name: &str) -> bool {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    matches!(ext.as_str(),
-        "md" | "txt" | "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "json" | "toml"
-        | "yaml" | "yml" | "xml" | "html" | "css" | "sh" | "bash" | "zsh" | "fish"
-        | "go" | "java" | "c" | "h" | "cpp" | "hpp" | "cs" | "rb" | "php" | "swift"
-        | "kt" | "kts" | "lua" | "vim" | "conf" | "ini" | "env" | "gitignore" | "log"
-        | "csv" | "sql"
+    matches!(
+        ext.as_str(),
+        "md" | "txt"
+            | "rs"
+            | "py"
+            | "js"
+            | "ts"
+            | "jsx"
+            | "tsx"
+            | "json"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "xml"
+            | "html"
+            | "css"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "go"
+            | "java"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "cs"
+            | "rb"
+            | "php"
+            | "swift"
+            | "kt"
+            | "kts"
+            | "lua"
+            | "vim"
+            | "conf"
+            | "ini"
+            | "env"
+            | "gitignore"
+            | "log"
+            | "csv"
+            | "sql"
     )
 }
 
@@ -2168,11 +2620,7 @@ fn is_text_mime(mime: Option<&str>, file_name: &str) -> bool {
 #[tauri::command]
 pub fn resize_hub(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("hub") {
-        win.set_size(tauri::LogicalSize::new(width, height))
-            .map_err(|e| e.to_string())?;
-        // Recenter after every resize: collapsing changes width 820→280 and expanding
-        // 280→820, so the x position must be recalculated to stay top-center.
-        windowing::position_hub_window_top(&win, width);
+        windowing::resize_hub_window(&win, width, height).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -2290,7 +2738,10 @@ fn compact_announcement_for_mdns(mut announcement: Announcement) -> Announcement
         .clone()
         .filter(|name| name.chars().count() > MAX_ANNOUNCEMENT_FILE_NAME_CHARS)
     {
-        announcement.file_name = Some(truncate_utf8_bytes(&file_name, MAX_ANNOUNCEMENT_FILE_NAME_CHARS));
+        announcement.file_name = Some(truncate_utf8_bytes(
+            &file_name,
+            MAX_ANNOUNCEMENT_FILE_NAME_CHARS,
+        ));
     }
     if announcement_size(&announcement) <= MAX_ANNOUNCEMENT_BYTES {
         return announcement;
@@ -2333,11 +2784,13 @@ fn announcement_size(announcement: &Announcement) -> usize {
 fn announcement_preview_fallback(announcement: &Announcement) -> String {
     match announcement.content_type {
         fenix_hub_core::content::ContentType::Text => {
-            truncate_utf8_bytes(&announcement.preview, MAX_ANNOUNCEMENT_FILE_NAME_CHARS)        }
+            truncate_utf8_bytes(&announcement.preview, MAX_ANNOUNCEMENT_FILE_NAME_CHARS)
+        }
         fenix_hub_core::content::ContentType::Image => announcement
             .file_name
             .as_deref()
-            .map(|name| format!("Imagen: {}", truncate_utf8_bytes(name, 48)))            .unwrap_or_else(|| "Imagen lista para descargar".to_string()),
+            .map(|name| format!("Imagen: {}", truncate_utf8_bytes(name, 48)))
+            .unwrap_or_else(|| "Imagen lista para descargar".to_string()),
         fenix_hub_core::content::ContentType::File => announcement
             .file_name
             .as_deref()
@@ -2485,8 +2938,7 @@ fn linux_firewall_status(port: u16) -> FirewallStatus {
         let text = String::from_utf8_lossy(&out.stdout);
         // >3 lines = real rules present beyond the default header
         if text.lines().count() > 3 {
-            let rule_present = text.contains(&format!("dpt:{port}"))
-                || text.contains(&port_str);
+            let rule_present = text.contains(&format!("dpt:{port}")) || text.contains(&port_str);
             return FirewallStatus {
                 active: true,
                 rule_present,
@@ -2535,9 +2987,12 @@ Select-Object -First 1 | ForEach-Object {{ 'present' }}"
 #[cfg(target_os = "windows")]
 fn windows_script_output(script: &str) -> Result<std::process::Output, String> {
     let mut command = std::process::Command::new("powershell");
-    command
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    command.creation_flags(CREATE_NO_WINDOW).args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        script,
+    ]);
     command.output().map_err(|e| e.to_string())
 }
 
@@ -2581,10 +3036,14 @@ pub fn request_firewall_allow(port: u16) -> Result<bool, String> {
     let status = std::process::Command::new("pkexec")
         .args([
             iptables_bin,
-            "-I", "INPUT",
-            "-p", "tcp",
-            "--dport", &port.to_string(),
-            "-j", "ACCEPT",
+            "-I",
+            "INPUT",
+            "-p",
+            "tcp",
+            "--dport",
+            &port.to_string(),
+            "-j",
+            "ACCEPT",
         ])
         .status()
         .map_err(|e| e.to_string())?;
@@ -2663,7 +3122,8 @@ fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
     while !value.is_char_boundary(end) {
         end -= 1;
     }
-    value[..end].to_string()}
+    value[..end].to_string()
+}
 
 #[cfg(test)]
 mod tests {
@@ -2691,5 +3151,33 @@ mod tests {
         let compacted = compact_announcement_for_mdns(announcement);
         assert!(announcement_size(&compacted) <= MAX_ANNOUNCEMENT_BYTES);
         assert!(!compacted.preview.starts_with("data:image"));
+    }
+
+    #[test]
+    fn accepts_plain_clipboard_text() {
+        assert_eq!(
+            clipboard_text_if_valid("hola mundo\n".to_string()).as_deref(),
+            Some("hola mundo")
+        );
+    }
+
+    #[test]
+    fn rejects_png_bytes_read_as_text() {
+        let lossy_png = "\u{fffd}PNG\r\n\u{1a}\n\0\0\0\rIHDR\0\0\0\u{fffd}".to_string();
+        assert!(clipboard_text_if_valid(lossy_png).is_none());
+    }
+
+    #[test]
+    fn detects_image_mime_from_magic_bytes() {
+        assert_eq!(
+            image_mime_from_magic(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]),
+            Some("image/png")
+        );
+        assert_eq!(
+            image_mime_from_magic(&[0xff, 0xd8, 0xff, 0xe0]),
+            Some("image/jpeg")
+        );
+        assert_eq!(image_mime_from_magic(b"GIF89a...."), Some("image/gif"));
+        assert_eq!(image_mime_from_magic(b"RIFFxxxxWEBP"), Some("image/webp"));
     }
 }

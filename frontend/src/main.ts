@@ -95,6 +95,13 @@ async function mockInvoke<T>(cmd: string, args?: unknown): Promise<T> {
       mockLocal = [item, ...mockLocal];
       return item as T;
     }
+    case 'paste_clipboard_content': {
+      const text = await navigator.clipboard.readText().catch(() => '');
+      if (!text.trim()) return [] as T;
+      const item: ContentItem = { id: String(mockId++), content_type: 'text', preview: text.slice(0, 80), size_bytes: text.length, created_at: Date.now()/1000, file_name: null, mime_type: 'text/plain; charset=utf-8' };
+      mockLocal = [item, ...mockLocal];
+      return [item] as T;
+    }
     case 'remove_content':
       mockLocal = mockLocal.filter(i => i.id !== (a?.id as string));
       mockPublished.delete(a?.id as string); return undefined as T;
@@ -281,6 +288,9 @@ let collapsed = false;
 let selectedDeviceType = 'desktop';
 let transportCapabilities: TransportCapabilities | null = null;
 const dragPayloadCache = new Map<string, DragPayload>();
+let relayoutFrame = 0;
+let windowRelayoutHandlersInstalled = false;
+let windowModeTransitioning = false;
 
 const DEVICE_TYPES: { id: string; label: string; icon: () => string }[] = [
   { id: 'desktop', label: 'Desktop',  icon: () => svg(18,'0 0 20 18','<rect x="1" y="1" width="18" height="13" rx="2" stroke-width="1.5"/><line x1="6" y1="17" x2="14" y2="17" stroke-width="1.5"/><line x1="10" y1="14" x2="10" y2="17" stroke-width="1.5"/>') },
@@ -292,6 +302,47 @@ const DEVICE_TYPES: { id: string; label: string; icon: () => string }[] = [
 
 const W = 820, H = 185;
 const W_PILL = 280, H_PILL = 34;
+
+function getTargetWindowSize() {
+  return collapsed
+    ? { width: W_PILL, height: H_PILL }
+    : { width: W, height: H };
+}
+
+async function ensureWindowMatchesState(): Promise<void> {
+  if (!IS_TAURI || window.location.hash === '#settings') return;
+  const { width, height } = getTargetWindowSize();
+  const widthDelta = Math.abs(window.innerWidth - width);
+  const heightDelta = Math.abs(window.innerHeight - height);
+  if (widthDelta <= 2 && heightDelta <= 2) return;
+  await setWindowSize(width, height);
+}
+
+function refreshHubLayout() {
+  if (window.location.hash === '#settings') return;
+  const root = document.getElementById('hub-root');
+  if (!root) return;
+  if (!windowModeTransitioning) {
+    root.classList.toggle('collapsed', collapsed);
+  }
+  void root.getBoundingClientRect();
+  updateHeader();
+  renderTab(activeTab);
+}
+
+function scheduleHubRelayout() {
+  if (window.location.hash === '#settings') return;
+  if (relayoutFrame) cancelAnimationFrame(relayoutFrame);
+  relayoutFrame = requestAnimationFrame(() => {
+    relayoutFrame = 0;
+    void ensureWindowMatchesState()
+      .catch(() => {})
+      .finally(() => {
+        refreshHubLayout();
+        requestAnimationFrame(() => refreshHubLayout());
+      });
+  });
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -661,8 +712,27 @@ async function loadContent() {
 
 function setupEventListeners() {
   listen('hub-activate', () => {
-    if (collapsed) expand();
+    if (collapsed) {
+      void expand();
+      return;
+    }
+    scheduleHubRelayout();
   });
+  if (!windowRelayoutHandlersInstalled) {
+    windowRelayoutHandlersInstalled = true;
+    window.addEventListener('focus', () => scheduleHubRelayout());
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        scheduleHubRelayout();
+      }
+    });
+    if (IS_TAURI) {
+      void getCurrentWindow().onFocusChanged(({ payload }) => {
+        if (payload) scheduleHubRelayout();
+      });
+      void getCurrentWindow().onScaleChanged(() => scheduleHubRelayout());
+    }
+  }
   listen<PeerContentPayload>('peer-content-available', ({ payload }) => {
     const ann = payload.announcement;
     // On duplicate mDNS resolves the new announcement may have a truncated preview
@@ -714,6 +784,7 @@ function setupEventListeners() {
   listen<FirewallStatus>('firewall-blocked', ({ payload }) => {
     showFirewallModal(payload);
   });
+  scheduleHubRelayout();
 }
 
 // ── Setup screen ──────────────────────────────────────────────────────────────
@@ -827,6 +898,7 @@ function renderHub() {
         </div>
 
         <div class="hub-actions">
+          <button class="btn-icon" id="btn-paste" title="Pegar portapapeles">${iconClipboard(13)}</button>
           <button class="btn-icon" id="btn-share-folder" title="Compartir carpeta">${iconFolder(13)}</button>
           <button class="btn-icon" id="btn-share-all" title="Compartir todo con todos">${iconBroadcast(13)}</button>
           <button class="btn-icon" id="btn-settings"  title="Ajustes">${iconGear(13)}</button>
@@ -851,6 +923,10 @@ function renderHub() {
   document.getElementById('hub-tabs')!.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest('.tab') as HTMLElement;
     if (btn?.dataset.tab) switchTab(btn.dataset.tab as 'local' | 'red');
+  });
+
+  document.getElementById('btn-paste')!.addEventListener('click', () => {
+    void pasteClipboardToHub(true);
   });
 
   // Share folder
@@ -914,6 +990,16 @@ function renderHub() {
 
   // Drag-to-hub (HTML5 — browser files and text)
   const hub = document.getElementById('hub-root')!;
+
+  hub.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showHubContextMenu(e.clientX, e.clientY);
+  });
+  document.addEventListener('click', hideHubContextMenu);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hideHubContextMenu();
+  });
+
   hub.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer!.dropEffect = 'copy'; hub.classList.add('drag-over'); });
   hub.addEventListener('dragleave', (e) => {
     if (!(e.relatedTarget as HTMLElement)?.closest('#hub-root')) hub.classList.remove('drag-over');
@@ -1018,6 +1104,14 @@ function renderHub() {
     return invoke<ContentItem>('add_file_by_path', { path });
   }
 
+  function prependLocalItems(items: ContentItem[]) {
+    if (items.length === 0) return;
+    const ids = new Set(items.map(i => i.id));
+    localContent = [...items, ...localContent.filter(i => !ids.has(i.id))];
+    updateHeader();
+    if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
+  }
+
   async function commitDroppedItems(tasks: Array<Promise<ContentItem>>) {
     if (tasks.length === 0) return;
     const settled = await Promise.allSettled(tasks);
@@ -1025,9 +1119,7 @@ function renderHub() {
       .filter((r): r is PromiseFulfilledResult<ContentItem> => r.status === 'fulfilled')
       .map(r => r.value);
     if (items.length > 0) {
-      localContent = [...items, ...localContent];
-      updateHeader();
-      if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
+      prependLocalItems(items);
     }
     const firstError = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected');
     if (firstError) {
@@ -1036,8 +1128,67 @@ function renderHub() {
     }
   }
 
+  let hubContextMenu: HTMLElement | null = null;
+
+  function showHubContextMenu(x: number, y: number) {
+    hideHubContextMenu();
+    const menu = document.createElement('div');
+    menu.className = 'hub-context-menu';
+    menu.innerHTML = `<button type="button" data-action="paste">${iconClipboard(12)} Pegar portapapeles</button>`;
+    menu.querySelector<HTMLButtonElement>('[data-action="paste"]')!.addEventListener('click', (event) => {
+      event.stopPropagation();
+      hideHubContextMenu();
+      void pasteClipboardToHub(true);
+    });
+    document.body.appendChild(menu);
+    const rect = menu.getBoundingClientRect();
+    menu.style.left = `${Math.min(x, window.innerWidth - rect.width - 6)}px`;
+    menu.style.top = `${Math.min(y, window.innerHeight - rect.height - 6)}px`;
+    hubContextMenu = menu;
+  }
+
+  function hideHubContextMenu() {
+    hubContextMenu?.remove();
+    hubContextMenu = null;
+  }
+
+  async function pasteClipboardToHub(showEmptyToast = false) {
+    try {
+      const items = await invoke<ContentItem[]>('paste_clipboard_content');
+      if (items.length > 0) {
+        prependLocalItems(items);
+        return;
+      }
+      if (showEmptyToast) {
+        showToast('Portapapeles vacío o no compatible');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(msg || 'No se pudo pegar');
+    }
+  }
+
+  function isEditableTarget(target: EventTarget | null) {
+    if (!(target instanceof HTMLElement)) return false;
+    const tag = target.tagName.toLowerCase();
+    return target.isContentEditable || tag === 'input' || tag === 'textarea';
+  }
+
+  let nativePasteToken = 0;
+  document.addEventListener('keydown', (e) => {
+    if (!IS_TAURI || !(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'v') return;
+    if (isEditableTarget(e.target)) return;
+    const token = Date.now();
+    nativePasteToken = token;
+    window.setTimeout(() => {
+      if (nativePasteToken !== token) return;
+      void pasteClipboardToHub(false);
+    }, 90);
+  });
+
   // Ctrl+V → add to hub
   document.addEventListener('paste', async (e) => {
+    nativePasteToken = 0;
     const cd = e.clipboardData;
     if (!cd) return;
 
@@ -1054,9 +1205,7 @@ function renderHub() {
       if (!blob) return;
       const file = new File([blob], `clipboard-${Date.now()}.png`, { type: blob.type || 'image/png' });
       const ci = await addBrowserFileToHub(file);
-      localContent = [ci, ...localContent];
-      updateHeader();
-      if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
+      prependLocalItems([ci]);
       return;
     }
 
@@ -1064,9 +1213,7 @@ function renderHub() {
     const text = cd.getData('text/plain').trim();
     if (text) {
       const ci = await invoke<ContentItem>('add_text_content', { text });
-      localContent = [ci, ...localContent];
-      updateHeader();
-      if (activeTab !== 'local') switchTab('local'); else renderLocalContent();
+      prependLocalItems([ci]);
     }
   });
 
@@ -1080,18 +1227,28 @@ async function collapse() {
   document.getElementById('hub-root')!.classList.add('collapsed');
   document.getElementById('btn-collapse')!.innerHTML = iconChevronDown(13);
   document.getElementById('btn-collapse')!.title = 'Mostrar FenixHub';
-  // Resize window FIRST, then let CSS transition finish
-  await setWindowSize(W_PILL, H_PILL);
+  windowModeTransitioning = true;
+  try {
+    await setWindowSize(W_PILL, H_PILL);
+  } finally {
+    windowModeTransitioning = false;
+  }
+  scheduleHubRelayout();
 }
 
 async function expand() {
   collapsed = false;
-  // Grow the window before revealing content so layout doesn't flash
-  await setWindowSize(W, H);
+  windowModeTransitioning = true;
+  try {
+    await setWindowSize(W, H);
+  } finally {
+    windowModeTransitioning = false;
+  }
   document.getElementById('hub-root')!.classList.remove('collapsed');
   document.getElementById('btn-collapse')!.innerHTML = iconMinus(13);
   document.getElementById('btn-collapse')!.title = 'Minimizar a notch';
   switchTab(activeTab);
+  scheduleHubRelayout();
 }
 
 function renderTab(tab: 'local' | 'red') {
@@ -1197,14 +1354,15 @@ function renderLocalContent() {
           )
         ].join('');
 
-    const isImg = item.content_type === 'image' && item.preview.startsWith('data:image');
+    const thumbSrc = imageThumbSrc(item.preview);
+    const isImg = item.content_type === 'image' && !!thumbSrc;
     const topContent = isImg
-      ? `<img class="card-thumb" src="${item.preview}" draggable="false" />
+      ? `<img class="card-thumb" src="${escapeAttr(thumbSrc)}" draggable="false" />
          <div class="card-image-caption">${escapeHtml(item.file_name || 'imagen recibida')}</div>`
       : `<div class="card-top">
            <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
            <div class="card-body">
-             <div class="card-preview">${escapeHtml(item.file_name || item.preview)}</div>
+             <div class="card-preview">${escapeHtml(cardPreviewLabel(item))}</div>
            </div>
          </div>`;
 
@@ -1664,13 +1822,13 @@ function renderPeerContent() {
 
   container.innerHTML = `<div class="card-grid">${peerContent.map(item => {
     // _localSrc: full-res asset:// URL set after local cache; preview: mDNS base64 thumbnail
-    const thumbSrc = item._localSrc || (item.preview.startsWith('data:image') ? item.preview : null);
+    const thumbSrc = item._localSrc || imageThumbSrc(item.preview);
     const topContent = thumbSrc
-      ? `<img class="card-thumb" src="${thumbSrc}" />`
+      ? `<img class="card-thumb" src="${escapeAttr(thumbSrc)}" />`
       : `<div class="card-top">
            <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
            <div class="card-body">
-             <div class="card-preview">${escapeHtml(item.file_name || item.preview)}</div>
+             <div class="card-preview">${escapeHtml(cardPreviewLabel(item))}</div>
            </div>
          </div>`;
     return `
@@ -1788,6 +1946,9 @@ function iconX(s: number) {
 function iconCopy(s: number) {
   return svg(s,'0 0 16 16','<rect x="5" y="3" width="8" height="10" rx="1.6" stroke-width="1.6"/><path d="M3.5,11.5 H3 a1.5,1.5 0 0 1 -1.5,-1.5 V4.5 A1.5,1.5 0 0 1 3,3 h5" stroke-width="1.6"/>');
 }
+function iconClipboard(s: number) {
+  return svg(s,'0 0 16 16','<path d="M6 2.5h4l.8 1.5H13a1.5 1.5 0 0 1 1.5 1.5V13A1.5 1.5 0 0 1 13 14.5H3A1.5 1.5 0 0 1 1.5 13V5.5A1.5 1.5 0 0 1 3 4h2.2L6 2.5Z" stroke-width="1.5"/><path d="M5.5 4.5h5" stroke-width="1.5"/><path d="M5 8h6M5 11h4" stroke-width="1.5"/>');
+}
 function iconSave(s: number) {
   return svg(s,'0 0 16 16','<path d="M3,2.5 H11.5 L13.5,4.5 V13.5 H2.5 V3 A0.5,0.5 0 0 1 3,2.5 Z" stroke-width="1.6"/><rect x="5" y="9" width="6" height="3.5" rx="0.8" stroke-width="1.4"/><path d="M5,2.8 V6.3 H10.5 V2.8" stroke-width="1.4"/>');
 }
@@ -1840,6 +2001,58 @@ async function warmupDragPayload(id: string): Promise<void> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function escapeHtml(s: string) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escapeAttr(s: string) { return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+function cardPreviewLabel(item: { content_type: string; preview: string; file_name?: string | null }) {
+  if (item.file_name) return item.file_name;
+  if (item.content_type === 'image' && item.preview.startsWith('data:image')) {
+    return 'Imagen lista para descargar';
+  }
+  return item.preview;
+}
+function imageThumbSrc(src?: string | null) {
+  if (!src) return null;
+  if (!src.startsWith('data:image')) return src;
+  return isCompleteImageDataUrl(src) ? src : null;
+}
+function isCompleteImageDataUrl(src: string) {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)$/i.exec(src);
+  if (!match) return false;
+  const mime = match[1].toLowerCase();
+  const payload = match[2].replace(/\s+/g, '');
+  try {
+    const raw = atob(payload);
+    const bytes = Uint8Array.from(raw, ch => ch.charCodeAt(0));
+    if (bytes.length < 12) return false;
+    if (mime === 'image/jpeg' || mime === 'image/jpg') {
+      return bytes[0] === 0xff && bytes[1] === 0xd8
+        && bytes[bytes.length - 2] === 0xff && bytes[bytes.length - 1] === 0xd9;
+    }
+    if (mime === 'image/png') {
+      return startsWithBytes(bytes, [0x89, 0x50, 0x4e, 0x47])
+        && endsWithBytes(bytes, [0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+    }
+    if (mime === 'image/webp') {
+      return startsWithBytes(bytes, [0x52, 0x49, 0x46, 0x46])
+        && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50;
+    }
+    if (mime === 'image/gif') {
+      return (startsWithBytes(bytes, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61])
+        || startsWithBytes(bytes, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]))
+        && bytes[bytes.length - 1] === 0x3b;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+function startsWithBytes(bytes: Uint8Array, prefix: number[]) {
+  return prefix.every((value, index) => bytes[index] === value);
+}
+function endsWithBytes(bytes: Uint8Array, suffix: number[]) {
+  if (bytes.length < suffix.length) return false;
+  const offset = bytes.length - suffix.length;
+  return suffix.every((value, index) => bytes[offset + index] === value);
+}
 function humanSize(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1048576) return `${(b/1024).toFixed(1)} KB`;

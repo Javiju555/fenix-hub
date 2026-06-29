@@ -135,15 +135,13 @@ pub fn run() {
                     let reannounce_map = state.active_announcements.clone();
                     let reannounce_mdns = mdns.clone();
                     tauri::async_runtime::spawn(async move {
-                        let mut interval = tokio::time::interval(
-                            std::time::Duration::from_secs(15),
-                        );
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(15));
                         interval.tick().await; // skip the immediate first tick
                         loop {
                             interval.tick().await;
-                            let records: Vec<crate::state::AnnouncementRecord> = {
-                                reannounce_map.read().await.values().cloned().collect()
-                            };
+                            let records: Vec<crate::state::AnnouncementRecord> =
+                                { reannounce_map.read().await.values().cloned().collect() };
                             if records.is_empty() {
                                 continue;
                             }
@@ -204,6 +202,7 @@ pub fn run() {
             commands::get_local_content,
             commands::add_text_content,
             commands::add_binary_content,
+            commands::paste_clipboard_content,
             commands::remove_content,
             commands::publish_content,
             commands::publish_all,
