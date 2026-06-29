@@ -122,6 +122,35 @@ fn refresh_linux_window_surface(window: &WebviewWindow) {
 #[cfg(not(target_os = "linux"))]
 fn refresh_linux_window_surface(_window: &WebviewWindow) {}
 
+#[cfg(target_os = "linux")]
+fn apply_linux_gtk_size(window: &WebviewWindow, target_w: f64, target_h: f64) {
+    use gtk::prelude::{BinExt, GtkWindowExt, WidgetExt};
+
+    if let Ok(gtk_win) = window.gtk_window() {
+        let width = target_w.round() as i32;
+        let height = target_h.round() as i32;
+
+        // A non-resizable GTK/WebKit toplevel can keep the old natural height,
+        // leaving a transparent hit-test area below the visual pill. The window
+        // is undecorated, so allowing internal resize does not expose handles.
+        gtk_win.set_resizable(true);
+        gtk_win.set_default_size(width, height);
+        gtk_win.set_size_request(width, height);
+        gtk_win.resize(width, height);
+
+        if let Some(child) = gtk_win.child() {
+            child.set_size_request(width, height);
+            child.queue_resize();
+        }
+
+        gtk_win.queue_resize();
+        gtk_win.queue_draw();
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_linux_gtk_size(_window: &WebviewWindow, _target_w: f64, _target_h: f64) {}
+
 fn reveal_hub_window(window: &WebviewWindow) -> Result<()> {
     let _ = window.unminimize();
     // Enforce size flags and snap to valid preset.
@@ -197,7 +226,9 @@ fn requested_hub_size() -> (f64, f64) {
 }
 
 fn apply_hub_size(window: &WebviewWindow, target_w: f64, target_h: f64) -> Result<()> {
+    apply_linux_gtk_size(window, target_w, target_h);
     window.set_size(tauri::LogicalSize::new(target_w, target_h))?;
+    apply_linux_gtk_size(window, target_w, target_h);
     refresh_linux_window_surface(window);
     Ok(())
 }
@@ -212,7 +243,10 @@ fn enforce_hub_window_constraints(window: &WebviewWindow) {
         let _ = window.set_skip_taskbar(true);
     }
     let _ = window.set_always_on_top(true);
+    #[cfg(not(target_os = "linux"))]
     let _ = window.set_resizable(false);
+    #[cfg(target_os = "linux")]
+    let _ = window.set_resizable(true);
     let _ = window.set_maximizable(false);
     let _ = window.set_minimizable(false);
 
