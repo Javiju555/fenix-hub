@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
+    "tauri": "tauri",
     "build": "tauri build",
     "build:appimage": "./scripts/build-appimage.sh",
     "dev:vite": "bun run --cwd frontend dev",
