@@ -39,6 +39,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup2.4-dev build-essential curl wget file libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
+      - name: install root dependencies
+        run: bun install
+
       - name: install frontend dependencies
         run: bun install
         working-directory: frontend
