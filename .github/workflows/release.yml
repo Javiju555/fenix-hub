@@ -53,6 +53,7 @@ jobs:
           releaseBody: 'Release de Fenix Hub - v__VERSION__'
           releaseDraft: false
           prerelease: false
+          tauriScript: bun run build
           includeDebug: false
           includeRelease: true
           includeUpdaterJson: false
