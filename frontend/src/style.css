@@ -458,6 +458,14 @@ button:active { opacity: 0.65; }
 .type-icon.text  { background: var(--accent-dim); color: var(--accent); }
 .type-icon.image { background: rgba(173,94,244,0.13); color: var(--purple); }
 .type-icon.file  { background: rgba(244,173,94,0.13); color: var(--amber); }
+.type-icon.folder { background: rgba(94,140,244,0.12); color: var(--accent); }
+.type-icon.audio { background: rgba(78,203,113,0.13); color: var(--green); }
+.type-icon.video { background: rgba(244,94,173,0.14); color: #f45ead; }
+.type-icon.pdf { background: rgba(244,94,94,0.14); color: var(--danger); }
+.type-icon.archive { background: rgba(244,173,94,0.16); color: var(--amber); }
+.type-icon.code { background: rgba(94,244,213,0.12); color: #5ef4d5; }
+.type-icon.spreadsheet { background: rgba(78,203,113,0.13); color: var(--green); }
+.type-icon.document { background: rgba(94,140,244,0.12); color: var(--accent); }
 
 /* image thumbnail (default) */
 .card-thumb {

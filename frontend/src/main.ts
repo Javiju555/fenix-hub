@@ -1354,13 +1354,14 @@ function renderLocalContent() {
           )
         ].join('');
 
+    const visualKind = contentVisualKind(item);
     const thumbSrc = imageThumbSrc(item.preview);
     const isImg = item.content_type === 'image' && !!thumbSrc;
     const topContent = isImg
       ? `<img class="card-thumb" src="${escapeAttr(thumbSrc)}" draggable="false" />
          <div class="card-image-caption">${escapeHtml(item.file_name || 'imagen recibida')}</div>`
       : `<div class="card-top">
-           <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
+           <div class="type-icon ${visualKind}">${typeIcon(item)}</div>
            <div class="card-body">
              <div class="card-preview">${escapeHtml(cardPreviewLabel(item))}</div>
            </div>
@@ -1822,11 +1823,14 @@ function renderPeerContent() {
 
   container.innerHTML = `<div class="card-grid">${peerContent.map(item => {
     // _localSrc: full-res asset:// URL set after local cache; preview: mDNS base64 thumbnail
-    const thumbSrc = item._localSrc || imageThumbSrc(item.preview);
+    const thumbSrc = item.content_type === 'image'
+      ? imageThumbSrc(item._localSrc || item.preview)
+      : null;
+    const visualKind = contentVisualKind(item);
     const topContent = thumbSrc
       ? `<img class="card-thumb" src="${escapeAttr(thumbSrc)}" />`
       : `<div class="card-top">
-           <div class="type-icon ${item.content_type}">${typeIcon(item.content_type)}</div>
+           <div class="type-icon ${visualKind}">${typeIcon(item)}</div>
            <div class="card-body">
              <div class="card-preview">${escapeHtml(cardPreviewLabel(item))}</div>
            </div>
@@ -1979,11 +1983,31 @@ function iconInboxLarge() {
 function iconWifiLarge() {
   return svg(36,'0 0 24 24','<path d="M1.5,9 Q12,1 22.5,9" stroke-width="1.2"/><path d="M4.5,13 Q12,7.5 19.5,13" stroke-width="1.2"/><path d="M7.5,17 Q12,13.5 16.5,17" stroke-width="1.2"/><circle cx="12" cy="20.5" r="1.2" fill="currentColor" stroke="none"/>');
 }
-function typeIcon(type: string) {
-  if (type === 'text')   return svg(14,'0 0 16 16','<line x1="3" y1="5" x2="13" y2="5" stroke-width="1.8"/><line x1="3" y1="8" x2="13" y2="8" stroke-width="1.8"/><line x1="3" y1="11" x2="9" y2="11" stroke-width="1.8"/>');
-  if (type === 'image')  return svg(14,'0 0 16 16','<rect x="2" y="3" width="12" height="10" rx="1.5" stroke-width="1.8"/><circle cx="6" cy="6.5" r="1" stroke-width="1.8"/><polyline points="2,11 5.5,8 7.5,10 10,7.5 14,11" stroke-width="1.8"/>');
-  if (type === 'folder') return svg(14,'0 0 16 16','<path d="M1.5,4.5 h5 l1.5,2 h6 a1,1 0 0 1 1,1 v5 a1,1 0 0 1 -1,1 h-12 a1,1 0 0 1 -1,-1 v-7 a1,1 0 0 1 1,-1 z" stroke-width="1.8"/>');
-  return svg(14,'0 0 16 16','<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.8"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.8"/>');
+function typeIcon(item: { content_type: string; preview: string; file_name?: string | null; mime_type?: string | null }) {
+  switch (contentVisualKind(item)) {
+    case 'text':
+      return svg(14,'0 0 16 16','<line x1="3" y1="5" x2="13" y2="5" stroke-width="1.8"/><line x1="3" y1="8" x2="13" y2="8" stroke-width="1.8"/><line x1="3" y1="11" x2="9" y2="11" stroke-width="1.8"/>');
+    case 'image':
+      return svg(14,'0 0 16 16','<rect x="2" y="3" width="12" height="10" rx="1.5" stroke-width="1.8"/><circle cx="6" cy="6.5" r="1" stroke-width="1.8"/><polyline points="2,11 5.5,8 7.5,10 10,7.5 14,11" stroke-width="1.8"/>');
+    case 'folder':
+      return svg(14,'0 0 16 16','<path d="M1.5,4.5 h5 l1.5,2 h6 a1,1 0 0 1 1,1 v5 a1,1 0 0 1 -1,1 h-12 a1,1 0 0 1 -1,-1 v-7 a1,1 0 0 1 1,-1 z" stroke-width="1.8"/>');
+    case 'audio':
+      return svg(14,'0 0 16 16','<path d="M4,6 H2.8 a1,1 0 0 0 -1,1 v2 a1,1 0 0 0 1,1 H4 l4,3 V3 Z" stroke-width="1.6"/><path d="M10.5,5.5 Q12.2,8 10.5,10.5" stroke-width="1.6"/><path d="M12.5,3.5 Q15,8 12.5,12.5" stroke-width="1.4"/>');
+    case 'video':
+      return svg(14,'0 0 16 16','<rect x="2" y="3.5" width="9" height="9" rx="1.5" stroke-width="1.6"/><path d="M11,6.5 14,4.8 v6.4 L11,9.5 Z" stroke-width="1.6"/>');
+    case 'pdf':
+      return svg(14,'0 0 16 16','<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.5"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.5"/><text x="4.1" y="11.6" font-size="4.4" font-weight="700" fill="currentColor" stroke="none">PDF</text>');
+    case 'archive':
+      return svg(14,'0 0 16 16','<path d="M3,2.5 h7 l3,3 v8 H3 Z" stroke-width="1.5"/><path d="M9.8,2.7 v3 h3" stroke-width="1.5"/><path d="M6.4,3.2 v1.2M7.6,4.4 v1.2M6.4,5.6 v1.2M7.6,6.8 v1.2M6.4,8 h2.2 v2.6 H6.4 Z" stroke-width="1.1"/>');
+    case 'code':
+      return svg(14,'0 0 16 16','<path d="M6,4 2.5,8 6,12" stroke-width="1.8"/><path d="M10,4 13.5,8 10,12" stroke-width="1.8"/><path d="M8.8,3.2 7.2,12.8" stroke-width="1.6"/>');
+    case 'spreadsheet':
+      return svg(14,'0 0 16 16','<path d="M3,2.5 h10 v11 H3 Z" stroke-width="1.5"/><path d="M3,6 h10M3,9.5 h10M6.5,2.5 v11M10,2.5 v11" stroke-width="1.2"/>');
+    case 'document':
+      return svg(14,'0 0 16 16','<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.5"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.5"/><path d="M5,8 h6M5,10.5 h5" stroke-width="1.3"/>');
+    default:
+      return svg(14,'0 0 16 16','<path d="M10,2 H4 a1.5,1.5 0 0 0 -1.5,1.5 v9 a1.5,1.5 0 0 0 1.5,1.5 h8 a1.5,1.5 0 0 0 1.5,-1.5 V5.5 Z" stroke-width="1.8"/><polyline points="10,2 10,5.5 13.5,5.5" stroke-width="1.8"/>');
+  }
 }
 
 function iconFolder(s: number) { return svg(s,'0 0 16 16','<path d="M1.5,4.5 h5 l1.5,2 h6 a1,1 0 0 1 1,1 v5 a1,1 0 0 1 -1,1 h-12 a1,1 0 0 1 -1,-1 v-7 a1,1 0 0 1 1,-1 z" stroke-width="1.8"/>'); }
@@ -2002,6 +2026,39 @@ async function warmupDragPayload(id: string): Promise<void> {
 
 function escapeHtml(s: string) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function escapeAttr(s: string) { return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+type ContentVisualKind =
+  | 'text'
+  | 'image'
+  | 'folder'
+  | 'audio'
+  | 'video'
+  | 'pdf'
+  | 'archive'
+  | 'code'
+  | 'spreadsheet'
+  | 'document'
+  | 'file';
+
+function contentVisualKind(item: { content_type: string; preview: string; file_name?: string | null; mime_type?: string | null }): ContentVisualKind {
+  if (item.content_type === 'text') return 'text';
+  if (item.content_type === 'image') return 'image';
+  if (item.content_type === 'folder') return 'folder';
+
+  const mime = (item.mime_type || '').toLowerCase();
+  const name = (item.file_name || item.preview || '').toLowerCase();
+  const ext = name.split(/[?#]/, 1)[0].split('.').pop() || '';
+
+  if (mime.startsWith('audio/') || ['wav', 'wave', 'mp3', 'm4a', 'aac', 'flac', 'ogg', 'oga', 'opus', 'wma', 'aif', 'aiff', 'mid', 'midi'].includes(ext)) return 'audio';
+  if (mime.startsWith('video/') || ['mp4', 'mov', 'mkv', 'webm', 'avi', 'wmv', 'm4v', 'mpeg', 'mpg'].includes(ext)) return 'video';
+  if (mime === 'application/pdf' || ext === 'pdf') return 'pdf';
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz'].includes(ext)) return 'archive';
+  if (['js', 'ts', 'tsx', 'jsx', 'rs', 'py', 'go', 'java', 'kt', 'swift', 'c', 'cpp', 'h', 'hpp', 'cs', 'sh', 'zsh', 'json', 'toml', 'yaml', 'yml', 'md', 'html', 'css', 'sql'].includes(ext)) return 'code';
+  if (mime.includes('spreadsheet') || mime.includes('excel') || ['xls', 'xlsx', 'csv', 'ods'].includes(ext)) return 'spreadsheet';
+  if (mime.includes('word') || mime.includes('document') || ['doc', 'docx', 'odt', 'rtf'].includes(ext)) return 'document';
+
+  return 'file';
+}
+
 function cardPreviewLabel(item: { content_type: string; preview: string; file_name?: string | null }) {
   if (item.file_name) return item.file_name;
   if (item.content_type === 'image' && item.preview.startsWith('data:image')) {
@@ -2011,7 +2068,9 @@ function cardPreviewLabel(item: { content_type: string; preview: string; file_na
 }
 function imageThumbSrc(src?: string | null) {
   if (!src) return null;
-  if (!src.startsWith('data:image')) return src;
+  if (!src.startsWith('data:image')) {
+    return /^(asset|blob|file|https?):\/\//i.test(src) ? src : null;
+  }
   return isCompleteImageDataUrl(src) ? src : null;
 }
 function isCompleteImageDataUrl(src: string) {
