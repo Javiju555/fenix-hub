@@ -1,3 +1,4 @@
+use crate::content::ContentType;
 /// HTTP client for pulling content from peers.
 ///
 /// ## Security
@@ -15,11 +16,8 @@ use crate::crypto::{self, ChunkDecoder};
 use crate::identity::GroupIdentity;
 use crate::protocol::{
     canonical_auth_message, AUTH_BODY_SHA256_HEADER, AUTH_NONCE_HEADER, AUTH_TIMESTAMP_HEADER,
-    EMPTY_BODY_SHA256_HEX,
-    ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, FNX2_HEADER_SIZE,
-    HMAC_HEADER,
+    EMPTY_BODY_SHA256_HEX, ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, FNX2_HEADER_SIZE, HMAC_HEADER,
 };
-use crate::content::ContentType;
 use anyhow::Result;
 use rand::RngCore;
 use std::net::IpAddr;
@@ -76,7 +74,8 @@ fn candidate_fnx2_chunk_sizes(total_chunks: u32, original_size: u64) -> Vec<usiz
     let mut candidates = vec![FNX2_CHUNK_SIZE];
 
     for size in FNX2_LEGACY_CHUNK_SIZES.iter().copied() {
-        if !candidates.contains(&size) && chunk_count_for_size(original_size, size) == total_chunks {
+        if !candidates.contains(&size) && chunk_count_for_size(original_size, size) == total_chunks
+        {
             candidates.push(size);
         }
     }
@@ -84,12 +83,7 @@ fn candidate_fnx2_chunk_sizes(total_chunks: u32, original_size: u64) -> Vec<usiz
     if total_chunks > 1 && original_size > 0 {
         let avg = original_size.div_ceil(total_chunks as u64) as usize;
         let upper = avg.next_power_of_two();
-        for size in [
-            avg,
-            upper / 2,
-            upper,
-            upper.saturating_mul(2),
-        ] {
+        for size in [avg, upper / 2, upper, upper.saturating_mul(2)] {
             if size < FNX2_CHUNK_SIZE || size > 8 * 1024 * 1024 {
                 continue;
             }
@@ -371,7 +365,15 @@ pub async fn pull_content_to_file(
         return Ok(ContentType::File);
     }
 
-    if let Err(error) = pull_v2_body_to_file(response, content_id, peer_ip, identity.enc_key(), output_path).await {
+    if let Err(error) = pull_v2_body_to_file(
+        response,
+        content_id,
+        peer_ip,
+        identity.enc_key(),
+        output_path,
+    )
+    .await
+    {
         tracing::warn!(
             "FNX2 stream pull failed for {} from {}: {}. Retrying with buffered pull.",
             content_id,
@@ -535,10 +537,8 @@ async fn pull_v2_body_to_bytes(
     }
 
     let header_decoder = ChunkDecoder::new(enc_key, &raw[..FNX2_HEADER_SIZE])?;
-    let candidate_sizes = candidate_fnx2_chunk_sizes(
-        header_decoder.total_chunks,
-        header_decoder.original_size,
-    );
+    let candidate_sizes =
+        candidate_fnx2_chunk_sizes(header_decoder.total_chunks, header_decoder.original_size);
 
     let mut last_error: Option<anyhow::Error> = None;
     let mut attempted_sizes: Vec<usize> = Vec::new();

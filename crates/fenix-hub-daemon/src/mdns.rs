@@ -108,16 +108,12 @@ fn start_presence_discovery_mdns(
             match event {
                 ServiceEvent::ServiceResolved(info) => {
                     let props = info.get_properties();
-                    let Some(device_name) = props
-                        .get("device_name")
-                        .map(|v| v.val_str().to_string())
+                    let Some(device_name) =
+                        props.get("device_name").map(|v| v.val_str().to_string())
                     else {
                         continue;
                     };
-                    let peer_group = props
-                        .get("group_id")
-                        .map(|v| v.val_str())
-                        .unwrap_or("");
+                    let peer_group = props.get("group_id").map(|v| v.val_str()).unwrap_or("");
                     if peer_group != group_id {
                         continue;
                     }
@@ -158,7 +154,14 @@ fn start_presence_discovery_avahi(
 
     std::thread::spawn(move || {
         let mut child = match Command::new("stdbuf")
-            .args(["-oL", "avahi-browse", "-r", "-p", "--no-db-lookup", svc_type])
+            .args([
+                "-oL",
+                "avahi-browse",
+                "-r",
+                "-p",
+                "--no-db-lookup",
+                svc_type,
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()

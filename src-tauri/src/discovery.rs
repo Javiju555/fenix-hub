@@ -74,7 +74,10 @@ pub fn start(
                 } => {
                     // Skip self — filter by both IP and device name
                     if local_ips.contains(&peer_ip) || announcement.device_name == own_device_name {
-                        tracing::debug!("Skipping own announcement for {}", announcement.content_id);
+                        tracing::debug!(
+                            "Skipping own announcement for {}",
+                            announcement.content_id
+                        );
                         continue;
                     }
                     let id = announcement.content_id.clone();

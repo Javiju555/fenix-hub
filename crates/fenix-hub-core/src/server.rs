@@ -41,8 +41,7 @@ use crate::crypto::ChunkEncoder;
 use crate::identity::GroupIdentity;
 use crate::protocol::{
     canonical_auth_message, AUTH_BODY_SHA256_HEADER, AUTH_MAX_SKEW_MS, AUTH_NONCE_HEADER,
-    AUTH_TIMESTAMP_HEADER, EMPTY_BODY_SHA256_HEX,
-    ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, HMAC_HEADER,
+    AUTH_TIMESTAMP_HEADER, EMPTY_BODY_SHA256_HEX, ENCRYPTED_HEADER, FNX2_CHUNK_SIZE, HMAC_HEADER,
 };
 const MAX_REPLAY_CACHE_ENTRIES: usize = 8_192;
 
@@ -93,10 +92,11 @@ pub async fn start_content_server(
     identity: Arc<GroupIdentity>,
     content: ContentStore,
 ) -> Result<(u16, oneshot::Sender<()>)> {
-    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{DEFAULT_SERVER_PORT}")).await {
-        Ok(l) => l,
-        Err(_) => tokio::net::TcpListener::bind("0.0.0.0:0").await?,
-    };
+    let listener =
+        match tokio::net::TcpListener::bind(format!("0.0.0.0:{DEFAULT_SERVER_PORT}")).await {
+            Ok(l) => l,
+            Err(_) => tokio::net::TcpListener::bind("0.0.0.0:0").await?,
+        };
     let port = listener.local_addr()?.port();
 
     let state = ServerState {
@@ -196,16 +196,17 @@ async fn serve_content(
             // Large file: stream encrypt chunk by chunk — never holds full file in RAM.
             let path = path.clone();
             let enc_key = *state.identity.enc_key();
-            let item_size = tokio::fs::metadata(&path).await
+            let item_size = tokio::fs::metadata(&path)
+                .await
                 .map(|m| m.len())
                 .unwrap_or(0);
             let total_chunks = (item_size / FNX2_CHUNK_SIZE as u64)
-                + if item_size % FNX2_CHUNK_SIZE as u64 != 0 { 1 } else { 0 };
-            let mut encoder = ChunkEncoder::new(
-                &enc_key,
-                total_chunks as u32,
-                item_size,
-            );
+                + if item_size % FNX2_CHUNK_SIZE as u64 != 0 {
+                    1
+                } else {
+                    0
+                };
+            let mut encoder = ChunkEncoder::new(&enc_key, total_chunks as u32, item_size);
             let header = encoder.header();
 
             tracing::debug!(
@@ -216,42 +217,40 @@ async fn serve_content(
             );
 
             type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
-            let stream: futures_util::stream::BoxStream<
-                'static,
-                Result<bytes::Bytes, BoxError>,
-            > = Box::pin(async_stream::try_stream! {
-                yield bytes::Bytes::from(header);
+            let stream: futures_util::stream::BoxStream<'static, Result<bytes::Bytes, BoxError>> =
+                Box::pin(async_stream::try_stream! {
+                    yield bytes::Bytes::from(header);
 
-                let mut file = tokio::fs::File::open(&path).await
-                    .map_err(|e| -> BoxError { Box::new(e) })?;
-                let mut buf = vec![0u8; FNX2_CHUNK_SIZE];
-                loop {
-                    use tokio::io::AsyncReadExt;
-                    // Read exactly one logical FNX2 chunk unless EOF is reached.
-                    let mut read_total = 0usize;
-                    while read_total < FNX2_CHUNK_SIZE {
-                        let n = file.read(&mut buf[read_total..]).await
-                            .map_err(|e| -> BoxError { Box::new(e) })?;
-                        if n == 0 {
+                    let mut file = tokio::fs::File::open(&path).await
+                        .map_err(|e| -> BoxError { Box::new(e) })?;
+                    let mut buf = vec![0u8; FNX2_CHUNK_SIZE];
+                    loop {
+                        use tokio::io::AsyncReadExt;
+                        // Read exactly one logical FNX2 chunk unless EOF is reached.
+                        let mut read_total = 0usize;
+                        while read_total < FNX2_CHUNK_SIZE {
+                            let n = file.read(&mut buf[read_total..]).await
+                                .map_err(|e| -> BoxError { Box::new(e) })?;
+                            if n == 0 {
+                                break;
+                            }
+                            read_total += n;
+                        }
+
+                        if read_total == 0 {
                             break;
                         }
-                        read_total += n;
-                    }
 
-                    if read_total == 0 {
-                        break;
-                    }
+                        let encrypted = encoder.encrypt_chunk(&buf[..read_total])
+                            .map_err(|e| -> BoxError { e.to_string().into() })?;
+                        yield bytes::Bytes::from(encrypted);
 
-                    let encrypted = encoder.encrypt_chunk(&buf[..read_total])
-                        .map_err(|e| -> BoxError { e.to_string().into() })?;
-                    yield bytes::Bytes::from(encrypted);
-
-                    // EOF reached mid-chunk: this was the last chunk.
-                    if read_total < FNX2_CHUNK_SIZE {
-                        break;
+                        // EOF reached mid-chunk: this was the last chunk.
+                        if read_total < FNX2_CHUNK_SIZE {
+                            break;
+                        }
                     }
-                }
-            });
+                });
 
             Body::from_stream(stream)
         }
@@ -268,7 +267,11 @@ async fn serve_content(
             let payload = raw_payload;
             let transfer_size = payload.len() as u64;
             let total_chunks = (transfer_size / FNX2_CHUNK_SIZE as u64) as u32
-                + if transfer_size % FNX2_CHUNK_SIZE as u64 != 0 { 1 } else { 0 };
+                + if transfer_size % FNX2_CHUNK_SIZE as u64 != 0 {
+                    1
+                } else {
+                    0
+                };
 
             let enc_key = state.identity.enc_key();
             let mut encoder = ChunkEncoder::new(enc_key, total_chunks, original_size);
@@ -307,7 +310,7 @@ fn header_value<'a>(headers: &'a HeaderMap, key: &'static str) -> Result<&'a str
 
 fn is_valid_nonce_hex(nonce: &str) -> bool {
     (16..=128).contains(&nonce.len())
-    && nonce.len() % 2 == 0
+        && nonce.len() % 2 == 0
         && nonce.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 

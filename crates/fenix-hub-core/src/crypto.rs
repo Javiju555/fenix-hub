@@ -9,12 +9,12 @@
 /// Uses the `ring` crate for hardware-accelerated AES (AES-NI / ARM
 /// crypto extensions), providing ~30 MB/s throughput on supported hardware.
 use anyhow::Result;
-use ring::aead::{
-    Aad, BoundKey, LessSafeKey, Nonce, NonceSequence, OpeningKey, SealingKey,
-    UnboundKey, AES_256_GCM,
-};
 use rand::rngs::OsRng;
 use rand::RngCore;
+use ring::aead::{
+    Aad, BoundKey, LessSafeKey, Nonce, NonceSequence, OpeningKey, SealingKey, UnboundKey,
+    AES_256_GCM,
+};
 
 use crate::protocol::{FNX2_COMPRESSION_NONE, FNX2_HEADER_SIZE};
 

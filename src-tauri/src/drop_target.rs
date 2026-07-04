@@ -6,23 +6,27 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
-use windows::core::{implement, w, BOOL, HRESULT, IUnknownImpl, Result as WinResult};
+use windows::core::{implement, w, IUnknownImpl, Result as WinResult, BOOL, HRESULT};
 use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, POINTL};
-use windows::Win32::System::Com::{
-    DVASPECT_CONTENT, FORMATETC, IDataObject, IStream, TYMED_HGLOBAL, TYMED_ISTREAM,
-};
-use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT};
-use windows::Win32::System::Ole::{
-    DoDragDrop, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, IDropSource, IDropSource_Impl,
-    IDropTarget, IDropTarget_Impl, OleInitialize, OleUninitialize,
-    RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop, CF_HDROP,
-};
 use windows::Win32::System::Com::{
     IAdviseSink, IDataObject_Impl, IEnumFORMATETC, IEnumFORMATETC_Impl, IEnumSTATDATA, STGMEDIUM,
 };
+use windows::Win32::System::Com::{
+    IDataObject, IStream, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL, TYMED_ISTREAM,
+};
+use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
+};
+use windows::Win32::System::Ole::{
+    DoDragDrop, IDropSource, IDropSource_Impl, IDropTarget, IDropTarget_Impl, OleInitialize,
+    OleUninitialize, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop, CF_HDROP, DROPEFFECT,
+    DROPEFFECT_COPY, DROPEFFECT_NONE,
+};
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
-use windows::Win32::UI::Shell::{DragQueryFileW, DROPFILES, FILEDESCRIPTORW, FILEGROUPDESCRIPTORW, HDROP};
+use windows::Win32::UI::Shell::{
+    DragQueryFileW, DROPFILES, FILEDESCRIPTORW, FILEGROUPDESCRIPTORW, HDROP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
 
 // ── Drag-received payload sent to the frontend ──────────────────────────────
@@ -253,10 +257,12 @@ unsafe fn extract_virtual_files(data_obj: &IDataObject) -> Option<Vec<String>> {
     for index in 0..count as usize {
         // FILEDESCRIPTORW is packed — use raw pointers for field access
         let desc_ptr = unsafe { descriptors_start.add(index) };
-        let c_file_name: [u16; 260] = unsafe {
-            std::ptr::read_unaligned(std::ptr::addr_of!((*desc_ptr).cFileName))
-        };
-        let name_len = c_file_name.iter().position(|&c| c == 0).unwrap_or(c_file_name.len());
+        let c_file_name: [u16; 260] =
+            unsafe { std::ptr::read_unaligned(std::ptr::addr_of!((*desc_ptr).cFileName)) };
+        let name_len = c_file_name
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(c_file_name.len());
         let name = String::from_utf16_lossy(&c_file_name[..name_len]);
         if name.is_empty() {
             continue;
@@ -348,9 +354,7 @@ thread_local! {
 
 pub fn find_webview2_hwnd(parent: HWND) -> Option<HWND> {
     FOUND_HWND.with(|r| *r.borrow_mut() = None);
-    let _ = unsafe {
-        EnumChildWindows(Some(parent), Some(enum_child_proc), LPARAM(0))
-    };
+    let _ = unsafe { EnumChildWindows(Some(parent), Some(enum_child_proc), LPARAM(0)) };
     FOUND_HWND.with(|r: &RefCell<Option<HWND>>| *r.borrow())
 }
 
@@ -398,13 +402,16 @@ fn register_fenix_drop_target_attempt(window: &tauri::WebviewWindow, attempt: u8
                         register_fenix_drop_target_attempt(&w, attempt + 1);
                     });
                 } else {
-                    tracing::warn!("WebView2 child HWND not found after retries — drop interception disabled");
+                    tracing::warn!(
+                        "WebView2 child HWND not found after retries — drop interception disabled"
+                    );
                 }
                 return;
             }
         };
 
-        let drop_target: IDropTarget = FenixDropTarget::new(window_clone.app_handle().clone()).into();
+        let drop_target: IDropTarget =
+            FenixDropTarget::new(window_clone.app_handle().clone()).into();
 
         // Try registering without revoking first — this succeeds if no target is registered yet.
         match unsafe { RegisterDragDrop(child_hwnd, &drop_target) } {
@@ -417,7 +424,10 @@ fn register_fenix_drop_target_attempt(window: &tauri::WebviewWindow, attempt: u8
                 let _ = unsafe { RevokeDragDrop(child_hwnd) };
                 match unsafe { RegisterDragDrop(child_hwnd, &drop_target) } {
                     Ok(_) => {
-                        tracing::info!("FenixDropTarget replaced WebView2 target (attempt {})", attempt);
+                        tracing::info!(
+                            "FenixDropTarget replaced WebView2 target (attempt {})",
+                            attempt
+                        );
                     }
                     Err(e2) => {
                         tracing::warn!("RegisterDragDrop failed after revoke: {e2:?}");
@@ -449,13 +459,13 @@ fn register_fenix_drop_target_attempt(_window: &tauri::WebviewWindow, _attempt: 
 // and start a real OLE DoDragDrop from a background STA thread instead.
 
 // Success HRESULTs used by IDropSource (positive — not mapped by HRESULT::ok())
-const DRAGDROP_S_DROP:              HRESULT = HRESULT(0x00040100_u32 as i32);
-const DRAGDROP_S_CANCEL:            HRESULT = HRESULT(0x00040101_u32 as i32);
+const DRAGDROP_S_DROP: HRESULT = HRESULT(0x00040100_u32 as i32);
+const DRAGDROP_S_CANCEL: HRESULT = HRESULT(0x00040101_u32 as i32);
 const DRAGDROP_S_USEDEFAULTCURSORS: HRESULT = HRESULT(0x00040102_u32 as i32);
 // Error HRESULTs
 const OLE_E_ADVISENOTSUPPORTED: HRESULT = HRESULT(0x80040003_u32 as i32);
-const E_NOTIMPL_HR:             HRESULT = HRESULT(0x80004001_u32 as i32);
-const DV_E_FORMATETC:           HRESULT = HRESULT(0x80040064_u32 as i32);
+const E_NOTIMPL_HR: HRESULT = HRESULT(0x80004001_u32 as i32);
+const DV_E_FORMATETC: HRESULT = HRESULT(0x80040064_u32 as i32);
 
 #[cfg(target_os = "windows")]
 unsafe fn alloc_cf_hdrop(path: &str) -> WinResult<HGLOBAL> {
@@ -463,7 +473,7 @@ unsafe fn alloc_cf_hdrop(path: &str) -> WinResult<HGLOBAL> {
     wide.push(0); // null-terminate filename
     wide.push(0); // end-of-list extra null
 
-    let hdr  = std::mem::size_of::<DROPFILES>();
+    let hdr = std::mem::size_of::<DROPFILES>();
     let total = hdr + wide.len() * 2;
     let hg = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, total)?;
     let ptr = GlobalLock(hg);
@@ -472,7 +482,7 @@ unsafe fn alloc_cf_hdrop(path: &str) -> WinResult<HGLOBAL> {
     }
     let df = &mut *(ptr as *mut DROPFILES);
     df.pFiles = hdr as u32;
-    df.fWide  = BOOL(1);
+    df.fWide = BOOL(1);
     let dst = (ptr as *mut u8).add(hdr) as *mut u16;
     std::ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
     let _ = GlobalUnlock(hg);
@@ -508,19 +518,30 @@ impl IDataObject_Impl for FileDataObject_Impl {
         }
     }
     fn GetCanonicalFormatEtc(&self, _: *const FORMATETC, pformatetcout: *mut FORMATETC) -> HRESULT {
-        unsafe { (*pformatetcout).ptd = std::ptr::null_mut(); }
+        unsafe {
+            (*pformatetcout).ptd = std::ptr::null_mut();
+        }
         E_NOTIMPL_HR
     }
     fn SetData(&self, _: *const FORMATETC, _: *const STGMEDIUM, _: BOOL) -> WinResult<()> {
         Err(windows::core::Error::from(E_NOTIMPL_HR))
     }
     fn EnumFormatEtc(&self, dwdirection: u32) -> WinResult<IEnumFORMATETC> {
-        if dwdirection != 1 { // DATADIR_GET = 1
+        if dwdirection != 1 {
+            // DATADIR_GET = 1
             return Err(windows::core::Error::from(E_NOTIMPL_HR));
         }
-        Ok(HdropEnumerator { pos: std::sync::atomic::AtomicU32::new(0) }.into())
+        Ok(HdropEnumerator {
+            pos: std::sync::atomic::AtomicU32::new(0),
+        }
+        .into())
     }
-    fn DAdvise(&self, _: *const FORMATETC, _: u32, _: windows::core::Ref<'_, IAdviseSink>) -> WinResult<u32> {
+    fn DAdvise(
+        &self,
+        _: *const FORMATETC,
+        _: u32,
+        _: windows::core::Ref<'_, IAdviseSink>,
+    ) -> WinResult<u32> {
         Err(windows::core::Error::from(OLE_E_ADVISENOTSUPPORTED))
     }
     fn DUnadvise(&self, _: u32) -> WinResult<()> {
@@ -544,7 +565,10 @@ struct HdropEnumerator {
 #[cfg(target_os = "windows")]
 impl IEnumFORMATETC_Impl for HdropEnumerator_Impl {
     fn Next(&self, celt: u32, rgelt: *mut FORMATETC, pceltfetched: *mut u32) -> HRESULT {
-        let pos = self.get_impl().pos.load(std::sync::atomic::Ordering::Relaxed);
+        let pos = self
+            .get_impl()
+            .pos
+            .load(std::sync::atomic::Ordering::Relaxed);
         let fetched = if pos == 0 && celt > 0 {
             unsafe {
                 *rgelt = FORMATETC {
@@ -555,27 +579,50 @@ impl IEnumFORMATETC_Impl for HdropEnumerator_Impl {
                     tymed: TYMED_HGLOBAL.0 as u32,
                 };
             }
-            self.get_impl().pos.store(1, std::sync::atomic::Ordering::Relaxed);
+            self.get_impl()
+                .pos
+                .store(1, std::sync::atomic::Ordering::Relaxed);
             1u32
         } else {
             0u32
         };
         if !pceltfetched.is_null() {
-            unsafe { *pceltfetched = fetched; }
+            unsafe {
+                *pceltfetched = fetched;
+            }
         }
-        if fetched == celt { HRESULT(0) } else { HRESULT(1) }
+        if fetched == celt {
+            HRESULT(0)
+        } else {
+            HRESULT(1)
+        }
     }
     fn Skip(&self, celt: u32) -> WinResult<()> {
-        let prev = self.get_impl().pos.fetch_add(celt, std::sync::atomic::Ordering::Relaxed);
-        if prev + celt <= 1 { Ok(()) } else { Err(windows::core::Error::from(HRESULT(1))) }
+        let prev = self
+            .get_impl()
+            .pos
+            .fetch_add(celt, std::sync::atomic::Ordering::Relaxed);
+        if prev + celt <= 1 {
+            Ok(())
+        } else {
+            Err(windows::core::Error::from(HRESULT(1)))
+        }
     }
     fn Reset(&self) -> WinResult<()> {
-        self.get_impl().pos.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.get_impl()
+            .pos
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
     fn Clone(&self) -> WinResult<IEnumFORMATETC> {
-        let pos = self.get_impl().pos.load(std::sync::atomic::Ordering::Relaxed);
-        Ok(HdropEnumerator { pos: std::sync::atomic::AtomicU32::new(pos) }.into())
+        let pos = self
+            .get_impl()
+            .pos
+            .load(std::sync::atomic::Ordering::Relaxed);
+        Ok(HdropEnumerator {
+            pos: std::sync::atomic::AtomicU32::new(pos),
+        }
+        .into())
     }
 }
 
@@ -605,7 +652,7 @@ pub fn start_native_file_drag(path: String) {
     unsafe {
         let _ = OleInitialize(None);
         let data: IDataObject = FileDataObject { path }.into();
-        let src:  IDropSource = FileDropSource.into();
+        let src: IDropSource = FileDropSource.into();
         let mut effect = DROPEFFECT_NONE;
         let _ = DoDragDrop(&data, &src, DROPEFFECT_COPY, &mut effect);
         OleUninitialize();
