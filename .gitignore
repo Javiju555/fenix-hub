@@ -42,7 +42,13 @@ opencode.json
 scripts/*
 !scripts/build-appimage.sh
 installer_stage/
-packaging/
+packaging/*
+!packaging/stage/
+packaging/stage/*
+!packaging/stage/installer_config.json
+!packaging/stage/locales/
+packaging/stage/locales/*
+!packaging/stage/locales/eula_*.txt
 
 # Internal/session docs — not part of the public repo
 docs/PLAN.md

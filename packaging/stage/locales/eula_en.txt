@@ -1,0 +1,19 @@
+END USER LICENSE AGREEMENT
+
+FenixHub Preview
+
+This installer and the bundled FenixHub software are provided for preview and
+evaluation use.
+
+By installing FenixHub, you agree to the following terms:
+
+1. FenixHub is preview software and may contain bugs or incomplete functionality.
+2. You install and use FenixHub at your own risk.
+3. No warranties or guarantees are provided for this preview build.
+4. FenixHub stores configuration, identity, and temporary clipboard/cache data
+   under your user profile. These data files can be preserved or removed during
+   uninstall depending on the uninstall option you choose.
+5. You are responsible for the content you copy, share, receive, or store with
+   FenixHub.
+
+Copyright 2026 Javiju. All rights reserved.

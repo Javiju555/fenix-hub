@@ -1,0 +1,19 @@
+ACUERDO DE LICENCIA DE USUARIO FINAL
+
+FenixHub Preview
+
+Este instalador y el software FenixHub incluido se proporcionan para uso de
+vista previa y evaluacion.
+
+Al instalar FenixHub, aceptas los siguientes terminos:
+
+1. FenixHub es software preview y puede contener errores o funciones incompletas.
+2. Instalas y usas FenixHub bajo tu propia responsabilidad.
+3. No se ofrecen garantias para esta version preliminar.
+4. FenixHub guarda configuracion, identidad y datos temporales de
+   portapapeles/cache en tu perfil de usuario. Estos datos pueden conservarse o
+   eliminarse durante la desinstalacion segun la opcion que elijas.
+5. Eres responsable del contenido que copies, compartas, recibas o almacenes con
+   FenixHub.
+
+Copyright 2026 Javiju. Todos los derechos reservados.

@@ -1,0 +1,80 @@
+{
+  "app_id": "fenixhub",
+  "app_name": "FenixHub",
+  "display_name": "FenixHub",
+  "publisher": "Javiju",
+  "version": "0.3.8",
+  "mode": "offline",
+  "ui_language": "es",
+  "attract_texts": [
+    "FenixHub Installer",
+    "Portapapeles efimero entre tus dispositivos"
+  ],
+  "eula_file": "locales\\eula_{lang}.txt",
+  "install_path_default": "%LOCALAPPDATA%\\Programs\\FenixHub",
+  "default_install_scope": "user",
+  "main_executable": "fenix-hub.exe",
+  "launch_after_install": "fenix-hub.exe",
+  "program_group_name": "FenixHub",
+  "pages": [
+    { "id": "welcome" },
+    { "id": "eula" },
+    { "id": "options" },
+    { "id": "progress" },
+    { "id": "complete" }
+  ],
+  "components": [
+    {
+      "id": "fenixhub_core",
+      "name": "FenixHub",
+      "description": "Binarios principales de FenixHub.",
+      "required": true,
+      "size": 104857600,
+      "source": {
+        "type": "directory",
+        "path": "app"
+      }
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "FenixHub",
+      "target": "fenix-hub.exe",
+      "location": "start_menu",
+      "description": "Abrir FenixHub"
+    },
+    {
+      "name": "FenixHub",
+      "target": "fenix-hub.exe",
+      "location": "desktop",
+      "description": "Abrir FenixHub"
+    }
+  ],
+  "autostart": [],
+  "uninstall": {
+    "stop_processes": [
+      "fenix-hub.exe"
+    ],
+    "data_paths": [
+      "%APPDATA%\\fenix-hub",
+      "%LOCALAPPDATA%\\fenix-hub"
+    ],
+    "remove_data_on_uninstall": false
+  },
+  "theme": {
+    "brand_hsl": [222, 88, 63],
+    "brand_hsl_secondary": [146, 66, 53],
+    "brand_hsl_tertiary": [24, 88, 58],
+    "default_mode": "dark",
+    "ambient_effects": {
+      "enabled": true,
+      "animated": true,
+      "effect_count": 6,
+      "color_count": 3,
+      "colors": ["#5f8cff", "#43d17a", "#ff6b35"],
+      "animation_speed": 0.85,
+      "style": "orbs",
+      "intensity": "normal"
+    }
+  }
+}
