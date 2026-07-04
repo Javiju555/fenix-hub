@@ -20,6 +20,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: checkout Fenix Installer
+        if: matrix.platform == 'windows-latest'
+        uses: actions/checkout@v4
+        with:
+          repository: Javiju555/instalador
+          token: ${{ secrets.INSTALLER_REPO_TOKEN }}
+          path: instalador
+          persist-credentials: false
+
       - name: setup node & bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -47,6 +56,7 @@ jobs:
         working-directory: frontend
 
       - name: build and release Tauri app
+        if: matrix.platform == 'ubuntu-22.04'
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,3 +70,35 @@ jobs:
           includeDebug: false
           includeRelease: true
           includeUpdaterJson: false
+
+      - name: build custom Windows installer
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          INSTALLER_REPO_TOKEN: ${{ secrets.INSTALLER_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.INSTALLER_REPO_TOKEN }}
+        run: |
+          powershell -ExecutionPolicy Bypass -File ./instalador/scripts/build-project-installer.ps1 `
+            -StageDir packaging/stage `
+            -Publisher "Javiju"
+
+      - name: upload custom Windows installer
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+
+          gh release view $tag
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "Fenix Hub $tag" --notes "Release de Fenix Hub - $tag"
+            if ($LASTEXITCODE -ne 0) {
+              gh release view $tag
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not create or find GitHub release $tag"
+              }
+            }
+          }
+
+          gh release upload $tag target/release/bundle/*-Setup.exe --clobber
