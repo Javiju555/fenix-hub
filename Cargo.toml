@@ -4,6 +4,9 @@ members = [
     "crates/fenix-hub-daemon",
     "src-tauri",
 ]
+exclude = [
+    "instalador",
+]
 # Linux-only crates (gtk4, sysfs) are excluded from default build
 # to avoid breaking Windows/macOS development. Build explicitly with -p.
 default-members = [
