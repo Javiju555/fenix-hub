@@ -88,6 +88,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
 
           gh release view $tag
           if ($LASTEXITCODE -ne 0) {
@@ -100,4 +101,12 @@ jobs:
             }
           }
 
-          gh release upload $tag target/release/bundle/*-Setup.exe --clobber
+          # Delete the tauri-action uploaded setup.exe (different casing) before
+          # uploading the custom installer's version.
+          $oldAsset = "FenixHub_${version}_x64-setup.exe"
+          gh release delete-asset $tag $oldAsset --yes 2>$null
+
+          $installer = Get-ChildItem target/release/bundle/*-Setup.exe | Select-Object -First 1
+          if ($installer) {
+            gh release upload $tag $installer.FullName --clobber
+          }
