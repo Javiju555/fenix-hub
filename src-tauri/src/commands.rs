@@ -1086,10 +1086,11 @@ pub async fn prepare_local_drag(
 pub async fn start_native_file_drag(
     id: String,
     state: State<'_, HubState>,
-    app: tauri::AppHandle,
+    #[allow(unused_variables)] app: tauri::AppHandle,
 ) -> Result<(), String> {
     let content = state.local_content.read().await;
     let item = content.get(&id).ok_or("Content not found")?;
+    #[allow(unused_variables)]
     let path = match &item.data {
         ContentData::FilePath(p) => p.to_string_lossy().to_string(),
         ContentData::Bytes(bytes) => crate::temp_store::write_item_bytes(
@@ -1124,8 +1125,15 @@ pub async fn get_peers(state: State<'_, HubState>) -> Result<Vec<Announcement>, 
 pub async fn pull_peer_content(
     content_id: String,
     state: State<'_, HubState>,
+    app: AppHandle,
 ) -> Result<ContentItemDto, String> {
-    let (announcement, peer_ip, pulled) = ensure_peer_cached(&content_id, &state).await?;
+    let (announcement, peer_ip, pulled) = match ensure_peer_cached(&content_id, &state).await {
+        Ok(v) => v,
+        Err(e) => {
+            remove_stale_peer(&content_id, &state, &app).await;
+            return Err(e);
+        }
+    };
     let item = build_peer_item(&announcement, pulled)?;
 
     // Persist pulled item to disk history
@@ -1164,10 +1172,28 @@ pub struct CopyPeerResult {
     pub cached_path: Option<String>,
 }
 
+/// Remove a peer from the store and notify the frontend that it's gone.
+/// Called when an HTTP pull fails because the peer is no longer reachable.
+async fn remove_stale_peer(content_id: &str, state: &State<'_, HubState>, app: &AppHandle) {
+    let removed = state.peer_content.write().await.remove(content_id);
+    let device_name = removed.map(|(ann, _)| ann.device_name).unwrap_or_default();
+    tracing::info!("Removing stale peer content: {content_id} (device: {device_name})");
+    if let Some(win) = app.get_webview_window("hub") {
+        let _ = win.emit(
+            "peer-content-gone",
+            crate::discovery::PeerGonePayload {
+                content_id: content_id.to_string(),
+                device_name,
+            },
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn copy_peer_content(
     content_id: String,
     state: State<'_, HubState>,
+    app: AppHandle,
 ) -> Result<CopyPeerResult, String> {
     let (announcement, peer_ip) = {
         let peers = state.peer_content.read().await;
@@ -1202,7 +1228,15 @@ pub async fn copy_peer_content(
         return Ok(CopyPeerResult { cached_path });
     }
 
-    let (announcement, peer_ip, pulled) = ensure_peer_cached(&content_id, &state).await?;
+    let pull_result = ensure_peer_cached(&content_id, &state).await;
+    let (announcement, peer_ip, pulled) = match pull_result {
+        Ok(v) => v,
+        Err(e) => {
+            // Peer unreachable — remove stale entry and notify frontend.
+            remove_stale_peer(&content_id, &state, &app).await;
+            return Err(e);
+        }
+    };
     let content_type = announcement.content_type.clone();
 
     let cached_path = if content_type == fenix_hub_core::content::ContentType::Image {
@@ -1274,6 +1308,7 @@ pub struct SaveContentResult {
 pub async fn save_peer_content_as(
     content_id: String,
     state: State<'_, HubState>,
+    app: AppHandle,
 ) -> Result<SaveContentResult, String> {
     // Read announcement metadata without downloading yet.
     let (announcement, peer_ip) = {
@@ -1306,7 +1341,10 @@ pub async fn save_peer_content_as(
     // without writing to the cache (avoid duplicating large files on disk).
     let temp_path = peer_received_path(&content_id, &announcement);
     if temp_path.exists() {
-        std::fs::copy(&temp_path, &target_path).map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::copy(&temp_path, &target_path) {
+            remove_stale_peer(&content_id, &state, &app).await;
+            return Err(e.to_string());
+        }
     } else {
         let identity = state
             .identity
@@ -1315,16 +1353,18 @@ pub async fn save_peer_content_as(
             .clone()
             .ok_or("Identity not configured")?;
 
-        if announcement.content_type == fenix_hub_core::content::ContentType::Text {
-            let pulled = fenix_hub_core::client::pull_content(
+        let pull_result = if announcement.content_type == fenix_hub_core::content::ContentType::Text {
+            fenix_hub_core::client::pull_content(
                 peer_ip,
                 announcement.port,
                 &content_id,
                 &identity,
             )
             .await
-            .map_err(|e| e.to_string())?;
-            std::fs::write(&target_path, &pulled.bytes).map_err(|e| e.to_string())?;
+            .map(|pulled| {
+                let _ = std::fs::write(&target_path, &pulled.bytes);
+                pulled
+            })
         } else {
             fenix_hub_core::client::pull_content_to_file(
                 peer_ip,
@@ -1334,7 +1374,18 @@ pub async fn save_peer_content_as(
                 &target_path,
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map(|_ctype| fenix_hub_core::client::PulledContent {
+                bytes: vec![],
+                file_path: Some(target_path.clone()),
+                file_name: announcement.file_name.clone(),
+                mime_type: announcement.mime_type.clone(),
+            })
+        };
+
+        if let Err(e) = pull_result {
+            // Peer unreachable — remove stale entry and notify frontend.
+            remove_stale_peer(&content_id, &state, &app).await;
+            return Err(e.to_string());
         }
     }
 

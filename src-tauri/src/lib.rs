@@ -30,10 +30,34 @@ fn should_start_hidden() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ── File-based logging ────────────────────────────────────────────────────
+    // Write rolling log files to <app_data>/logs/ so OSS users can share them
+    // when reporting issues.  Keeps at most 3 files × 2 MB each.
+    let log_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("fenix-hub")
+        .join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("fenix-hub")
+        .filename_suffix("log")
+        .max_log_files(3)
+        .build(&log_dir)
+        .expect("failed to create log file appender");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // The _guard must be kept alive for the lifetime of the process.
+    // Leak it so the file writer stays active.
+    Box::leak(Box::new(_guard));
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env().add_directive("fenix_hub=debug".parse().unwrap()),
         )
+        .with_writer(non_blocking)
+        .with_ansi(false)
         .init();
 
     let mdns = mdns_sd::ServiceDaemon::new().expect("Failed to start mDNS daemon");

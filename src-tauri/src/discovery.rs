@@ -106,13 +106,25 @@ pub fn start(
                     content_id,
                     device_name,
                 } => {
+                    // Resolve device_name from the peer store before removing,
+                    // because the mDNS daemon always sends an empty device_name.
+                    let resolved_name = if device_name.is_empty() {
+                        peer_store
+                            .read()
+                            .await
+                            .get(&content_id)
+                            .map(|(ann, _)| ann.device_name.clone())
+                            .unwrap_or_default()
+                    } else {
+                        device_name
+                    };
                     peer_store.write().await.remove(&content_id);
                     if let Some(win) = app.get_webview_window("hub") {
                         let _ = win.emit(
                             "peer-content-gone",
                             PeerGonePayload {
                                 content_id,
-                                device_name,
+                                device_name: resolved_name,
                             },
                         );
                     }

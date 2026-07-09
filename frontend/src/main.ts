@@ -785,6 +785,7 @@ function setupEventListeners() {
     showFirewallModal(payload);
   });
   scheduleHubRelayout();
+  startPeerSync();
 }
 
 // ── Setup screen ──────────────────────────────────────────────────────────────
@@ -1881,6 +1882,17 @@ function renderPeerContent() {
         }
       } catch (e) {
         console.error(`peer action ${action} failed:`, e);
+        const msg = e instanceof Error ? e.message : String(e);
+        // If the peer is unreachable, remove stale content from the UI.
+        // The backend also cleans up peer_store, but the frontend event
+        // may not have arrived yet (mDNS cross-platform race).
+        if (isPeerUnreachableError(msg)) {
+          peerContent = peerContent.filter(p => p.content_id !== id);
+          updateHeader();
+          renderPeerContent();
+          showToast('Contenido no disponible — peer desconectado');
+          return;
+        }
         btn.disabled = false;
         btn.textContent = 'Error';
         window.setTimeout(() => {
@@ -1901,6 +1913,57 @@ function flashPeerAction(button: HTMLButtonElement, label: string) {
     if (!button.isConnected) return;
     renderPeerContent();
   }, 900);
+}
+
+/// Returns true if the error message indicates the peer is no longer reachable.
+/// Used to proactively remove stale content from the "red" tab when copy/save
+/// fails because the sender closed their hub or left the network.
+function isPeerUnreachableError(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('peer content not found') ||
+    lower.includes('peer content') && lower.includes('not found') ||
+    lower.includes('connection refused') ||
+    lower.includes('connection reset') ||
+    lower.includes('network is unreachable') ||
+    lower.includes('host unreachable') ||
+    lower.includes('no route to host') ||
+    lower.includes('eof') ||
+    lower.includes('broken pipe') ||
+    lower.includes('http error') && lower.includes('404') ||
+    lower.includes('http error') && lower.includes('502') ||
+    lower.includes('http error') && lower.includes('503')
+  );
+}
+
+// ── Periodic peer sync ───────────────────────────────────────────────────────
+// mDNS ServiceRemoved events don't always fire across platforms (Linux↔Windows).
+// This interval syncs the frontend peerContent with the backend peer_store
+// every 4 seconds, removing stale entries that the event system missed.
+let peerSyncInterval: ReturnType<typeof setInterval> | null = null;
+
+function startPeerSync() {
+  if (peerSyncInterval !== null) return;
+  peerSyncInterval = setInterval(async () => {
+    if (!IS_TAURI || document.visibilityState !== 'visible') return;
+    try {
+      const freshPeers = await invoke<PeerAnnouncement[]>('get_peers');
+      const freshIds = new Set(freshPeers.map(p => p.content_id));
+      const currentIds = new Set(peerContent.map(p => p.content_id));
+      // Remove peers that are in the frontend but no longer in the backend
+      let changed = false;
+      for (const id of currentIds) {
+        if (!freshIds.has(id)) {
+          peerContent = peerContent.filter(p => p.content_id !== id);
+          changed = true;
+        }
+      }
+      if (changed) {
+        updateHeader();
+        renderPeerContent();
+      }
+    } catch { /* ignore sync errors */ }
+  }, 4000);
 }
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
