@@ -4,8 +4,8 @@ import PackageDescription
 let package = Package(
     name: "FenixHubCore",
     platforms: [
-        .iOS(.v16),
-        .macOS(.v13),
+        .iOS(.v17),
+        .macOS(.v14),
     ],
     products: [
         .library(
@@ -24,7 +24,8 @@ let package = Package(
             name: "FenixHubCore",
             dependencies: [
                 .product(name: "Argon2Swift", package: "Argon2Swift"),
-            ]
+            ],
+            exclude: ["App"]
         ),
         .testTarget(
             name: "FenixHubCoreTests",

@@ -56,8 +56,8 @@ struct GroupIdentity {
             iterations: ARGON2_ITERATIONS,
             memory: ARGON2_MEMORY_COST,
             parallelism: ARGON2_PARALLELISM,
-            length: ARGON2_KEY_LENGTH,
-            type: .id,
+            length: UInt32(ARGON2_KEY_LENGTH),
+            type: .argon2id,
             version: .v13
         )
 
