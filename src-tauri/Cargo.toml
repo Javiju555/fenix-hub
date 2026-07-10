@@ -1,6 +1,6 @@
 [package]
 name = "fenix-hub-app"
-version = "0.3.9"
+version = "0.3.10"
 edition = "2021"
 
 [lib]
@@ -15,7 +15,7 @@ path = "src/main.rs"
 fenix-hub-core = { path = "../crates/fenix-hub-core" }
 fenix-hub-daemon = { path = "../crates/fenix-hub-daemon" }
 
-tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
+tauri = { version = "2", features = ["tray-icon", "protocol-asset", "macos-private-api"] }
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 
