@@ -36,7 +36,7 @@
 }
 
 body {
-  background: transparent;
+  background: transparent !important;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
