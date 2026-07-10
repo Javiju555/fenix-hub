@@ -38,6 +38,8 @@ Descarga el APK directamente desde la página de releases de GitHub:
 **[Descargar última versión →](https://github.com/Javiju555/fenix-hub/releases/latest)**
 
 > **Nota sobre la instalación:** Al ser una aplicación distribuida fuera de Google Play, Android pedirá permiso para instalar desde fuentes desconocidas. Ve a **Ajustes → Aplicaciones → Acceso especial → Instalar apps desconocidas** y activa el permiso para tu navegador o gestor de archivos. Una vez instalada, puedes revocar ese permiso.
+>
+> **Estado de plataformas:** Windows, Linux y Android son las rutas principales de uso diario. Los artefactos de macOS se publican como builds experimentales, sin firma ni notarización por ahora. iOS sigue como integración experimental para pruebas desde Xcode y no se distribuye como binario oficial.
 
 ---
 
@@ -79,10 +81,10 @@ El modo más potente: un dispositivo actúa como anfitrión (HOST) y crea una sa
 | Plataforma | Estado |
 |---|---|
 | Android 10+ (API 29+) | Estable |
-| Windows (Tauri + Rust) | En desarrollo |
-| Linux (Tauri + Rust) | En desarrollo |
-| macOS (Tauri + Rust) | En desarrollo |
-| iOS (Swift + SwiftUI) | En desarrollo (requiere Mac + Xcode) |
+| Windows (Tauri + Rust) | Disponible |
+| Linux (Tauri + Rust) | Disponible |
+| macOS (Tauri + Rust) | Experimental (build sin firma/notarización) |
+| iOS (Swift + SwiftUI) | Experimental (integración Xcode, sin distribución oficial) |
 
 ### Capacidades por plataforma
 
@@ -102,6 +104,8 @@ El modo más potente: un dispositivo actúa como anfitrión (HOST) y crea una sa
 | **Ventanas decoradas / barra de tareas** | ❌ | N/A | ✅ |
 
 **Leyenda:** ✅ = funciona, 🔄 = en desarrollo/fase 2, ❌ = no viable por limitación del SO
+
+**Soporte práctico actual:** Windows, Linux y Android son las rutas recomendadas para uso normal. macOS e iOS siguen en fase experimental; en Apple no hay firma, notarización ni distribución oficial por ahora.
 
 ---
 
@@ -209,17 +213,19 @@ bun tauri build --bundles app,dmg
 > **Nota:** La primera vez macOS pedirá permiso de red local. Si no aparece, ve a
 > **Ajustes del Sistema → Privacidad y Seguridad → Red local** y activa FenixHub.
 > El build sin firmar requerirá "Abrir igualmente" en Gatekeeper.
+>
+> **Estado actual:** Las builds de macOS que salen en releases son experimentales y se publican para pruebas. Todavía no van firmadas ni notarizadas porque no hay flujo oficial de distribución Apple configurado para el proyecto.
 
 ### Construir iOS (requiere Mac con Xcode)
 
 El código iOS está en `ios/FenixHubCore/` como un Swift Package independiente.
-Para compilar en dispositivo real se necesita un Mac con Xcode 15+.
+La integración iOS sigue siendo experimental y, por ahora, se prueba desde Xcode en un Mac en lugar de distribuirse como app lista para instalar.
 
 **Prerrequisitos:**
 
 - Mac con Apple Silicon o Intel
 - Xcode 15+
-- Cuenta de desarrollador Apple (para instalación en dispositivo real)
+- Firma local con Apple ID/Xcode si vas a instalarlo en un dispositivo real
 
 **Pasos para compilar el Swift Package (modo librería):**
 
@@ -242,6 +248,7 @@ swift test
 > **Nota:** Mientras el proyecto Xcode no esté commitado (no se puede generar desde Linux),
 > el Mac contributor debe seguir los pasos del plan en
 > [`docs/plans/ios-foreground-port.md`](docs/plans/ios-foreground-port.md).
+> No hay, por ahora, distribución oficial ni firma Apple Developer para publicar una build de iOS fuera de ese flujo manual.
 
 ### Construir el AppImage en Arch Linux
 

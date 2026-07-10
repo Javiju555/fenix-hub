@@ -12,3 +12,5 @@ Repository policy:
 
 - This repository ships source code and public docs only.
 - Private installer/packaging internals are intentionally not included.
+- Windows, Linux, and Android are the current day-to-day supported paths.
+- macOS and iOS are experimental Apple integrations for testing only; Apple builds are not signed, notarized, or officially distributed at this stage.

@@ -63,7 +63,15 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Fenix Hub v__VERSION__'
-          releaseBody: 'Release de Fenix Hub - v__VERSION__'
+          releaseBody: |
+            Fenix Hub v__VERSION__
+
+            Esta versión incluye correcciones y mejoras internas en desktop y móvil.
+
+            Notas de plataforma:
+            - Windows, Linux y Android son las rutas principales de uso diario.
+            - macOS se publica como build experimental y sin firma/notarización por ahora.
+            - iOS sigue como integración experimental para pruebas con Xcode; no hay distribución oficial ni firma Apple Developer por ahora.
           releaseDraft: false
           prerelease: false
           tauriScript: bun run tauri
@@ -90,10 +98,20 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $version = $tag -replace '^v', ''
+          $notes = @"
+          Fenix Hub $tag
+
+          Esta versión incluye correcciones y mejoras internas en desktop y móvil.
+
+          Notas de plataforma:
+          - Windows, Linux y Android son las rutas principales de uso diario.
+          - macOS se publica como build experimental y sin firma/notarización por ahora.
+          - iOS sigue como integración experimental para pruebas con Xcode; no hay distribución oficial ni firma Apple Developer por ahora.
+          "@
 
           gh release view $tag
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "Fenix Hub $tag" --notes "Release de Fenix Hub - $tag"
+            gh release create $tag --title "Fenix Hub $tag" --notes $notes
             if ($LASTEXITCODE -ne 0) {
               gh release view $tag
               if ($LASTEXITCODE -ne 0) {

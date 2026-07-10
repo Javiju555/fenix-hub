@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.10 — desktop unpublish cleanup + Apple release notes (2026-07-10)
+
+### Desktop (Windows + Linux + macOS)
+- Fixed desktop publish cleanup so content announcements actually disappear when you stop publishing.
+- Synced desktop local/published state so the UI stops showing stale broadcast traces after an item is unpublished or evicted.
+- Added macOS release artifacts to the GitHub Actions release matrix.
+
+### Release / docs
+- Release notes now call out the current platform status instead of shipping the generic placeholder text.
+- Documented macOS and iOS as experimental Apple integrations: macOS builds are unsigned/unnotarized test artifacts, and iOS is still an Xcode-driven experimental path.
+
 ## 0.3.7 — desktop direct-mode cleanup + Linux icon fix (2026-05-22)
 
 ### Desktop (Linux + Windows)

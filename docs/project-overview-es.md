@@ -58,7 +58,10 @@ Funciona por **Bluetooth Low Energy y WiFi Direct**, sin necesidad de estar en l
 | Windows | ✅ Disponible |
 | Linux | ✅ Disponible |
 | Android | ✅ Disponible (app nativa) |
-| macOS | ❌ Sin planes (requiere licencia de Apple) |
+| macOS | ⚠️ Integración experimental (build de prueba sin firma/notarización) |
+| iOS | ⚠️ Integración experimental (Xcode, sin distribución oficial) |
+
+Windows, Linux y Android son las rutas recomendadas de uso diario. En Apple seguimos en modo experimental: macOS ya tiene binarios de prueba y iOS se valida desde Xcode, pero todavía no hay firma, notarización ni distribución oficial.
 
 ---
 
