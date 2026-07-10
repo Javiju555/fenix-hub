@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::daemon::DaemonEvent;
 use fenix_hub_core::protocol::{Announcement, MDNS_PRESENCE_TYPE, MDNS_SERVICE_TYPE};
 
-/// Announces a content item via mDNS. Returns instance_name for later unannounce.
+/// Announces a content item via mDNS. Returns the service fullname for later unannounce.
 const TXT_CHUNK_SIZE: usize = 240;
 
 pub fn announce_content(
@@ -35,19 +35,20 @@ pub fn announce_content(
         properties,
     )?;
 
+    let fullname = service.get_fullname().to_string();
     mdns.register(service)?;
     tracing::info!(
         "mDNS: announced content {} ({})",
         announcement.content_id,
         announcement.preview
     );
-    Ok(instance_name)
+    Ok(fullname)
 }
 
 /// Removes a content announcement from mDNS.
-pub fn unannounce_content(mdns: &ServiceDaemon, instance_name: &str) -> Result<()> {
-    mdns.unregister(instance_name)?;
-    tracing::info!("mDNS: removed announcement {}", instance_name);
+pub fn unannounce_content(mdns: &ServiceDaemon, fullname: &str) -> Result<()> {
+    mdns.unregister(fullname)?;
+    tracing::info!("mDNS: removed announcement {}", fullname);
     Ok(())
 }
 

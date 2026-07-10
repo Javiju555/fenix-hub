@@ -81,8 +81,27 @@ El modo más potente: un dispositivo actúa como anfitrión (HOST) y crea una sa
 | Android 10+ (API 29+) | Estable |
 | Windows (Tauri + Rust) | En desarrollo |
 | Linux (Tauri + Rust) | En desarrollo |
-| macOS | Planificado |
-| iOS | Pendiente (requiere Mac + Xcode + cuenta de desarrollador Apple) |
+| macOS (Tauri + Rust) | En desarrollo |
+| iOS (Swift + SwiftUI) | En desarrollo (requiere Mac + Xcode) |
+
+### Capacidades por plataforma
+
+| Capacidad | Android | iOS | Windows/Linux/macOS |
+|---|---|---|---|
+| **LAN discovery** (mDNS / Bonjour) | ✅ | ✅ | ✅ |
+| **HTTP + HMAC + FNX2 publish** | ✅ | ✅ | ✅ |
+| **HTTP pull de peers** | ✅ | 🔄 (fase 2) | ✅ |
+| **WiFi Direct punto a punto** | ✅ | ❌ (no hay API pública) | ❌ |
+| **Mesh (sala colectiva BLE + WiFi Direct)** | ✅ | ❌ | ❌ |
+| **Crear hotspot programáticamente** | ✅ | ❌ | ❌ |
+| **Foreground service persistente** | ✅ | ❌ (app se pausa en background) | ✅ |
+| **Share Sheet** (enviar archivos a la app) | ✅ | ✅ (iOS Share Extension) | ✅ (drag & drop) |
+| **Clipboard background monitoring** | ✅ | ❌ | ✅ |
+| **Superposición flotante** | ✅ | ❌ | ❌ |
+| **Recibir archivos guardándolos** | ✅ | 🔄 (fase 2) | ✅ |
+| **Ventanas decoradas / barra de tareas** | ❌ | N/A | ✅ |
+
+**Leyenda:** ✅ = funciona, 🔄 = en desarrollo/fase 2, ❌ = no viable por limitación del SO
 
 ---
 
@@ -161,6 +180,69 @@ bun tauri dev
 bun tauri build
 ```
 
+### Construir en macOS
+
+Requisitos previos (además de los generales):
+
+| Herramienta | Versión | Necesaria para |
+|---|---|---|
+| Xcode Command Line Tools | 15+ | Build macOS |
+| Rust toolchain (stable) | — | Build Tauri backend |
+
+```bash
+# 1. Instalar Xcode CLT
+xcode-select --install
+
+# 2. Build frontend + desktop
+bun install
+cd frontend && bun install && bun run build
+cd ..
+bun tauri dev
+```
+
+Para empaquetar para un amigo:
+
+```bash
+bun tauri build --bundles app,dmg
+```
+
+> **Nota:** La primera vez macOS pedirá permiso de red local. Si no aparece, ve a
+> **Ajustes del Sistema → Privacidad y Seguridad → Red local** y activa FenixHub.
+> El build sin firmar requerirá "Abrir igualmente" en Gatekeeper.
+
+### Construir iOS (requiere Mac con Xcode)
+
+El código iOS está en `ios/FenixHubCore/` como un Swift Package independiente.
+Para compilar en dispositivo real se necesita un Mac con Xcode 15+.
+
+**Prerrequisitos:**
+
+- Mac con Apple Silicon o Intel
+- Xcode 15+
+- Cuenta de desarrollador Apple (para instalación en dispositivo real)
+
+**Pasos para compilar el Swift Package (modo librería):**
+
+```bash
+cd ios/FenixHubCore
+swift build
+swift test
+```
+
+**Pasos para generar el proyecto Xcode (app + Share Extension):**
+
+1. Abre Xcode en el Mac.
+2. File → New → Project → iOS App (SwiftUI).
+3. Añade un target Share Extension.
+4. Arrastra la carpeta `ios/FenixHubCore/` al proyecto.
+5. Configura App Group (`group.com.fenixhub.mobile`) para compartir datos entre la app y la extensión.
+6. Configura el URL scheme `fenixhub://` en el Info.plist del app target.
+7. Build & Run en dispositivo.
+
+> **Nota:** Mientras el proyecto Xcode no esté commitado (no se puede generar desde Linux),
+> el Mac contributor debe seguir los pasos del plan en
+> [`docs/plans/ios-foreground-port.md`](docs/plans/ios-foreground-port.md).
+
 ### Construir el AppImage en Arch Linux
 
 En Arch, el `AppImage` de Tauri puede fallar aunque el binario y el `.deb` compilen bien. La causa típica es una incompatibilidad entre el `linuxdeploy` embebido y librerías modernas del sistema.
@@ -235,7 +317,7 @@ Para bugs de seguridad, contacta directamente en lugar de abrir un issue públic
 
 ### Áreas donde se agradece ayuda
 
-- Soporte macOS (BLE CoreBluetooth + Tauri)
+- Finalizar el port iOS (app Xcode + Share Extension + pruebas en dispositivo real)
 - Tests de integración para el protocolo FNX2
 - Compatibilidad con dispositivos Huawei/EMUI (coexistencia WiFi Direct + WiFi STA)
 - Mejoras de UI/UX en el frontend TypeScript

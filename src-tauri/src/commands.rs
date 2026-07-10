@@ -433,6 +433,18 @@ async fn shutdown_server_runtime(
     *server_port.write().await = None;
 }
 
+async fn stop_content_server_if_idle(state: &HubState) {
+    if !state.active_announcements.read().await.is_empty() {
+        return;
+    }
+
+    stop_server_guard(state).await;
+    if let Some(tx) = state.server_shutdown.write().await.take() {
+        let _ = tx.send(());
+    }
+    *state.server_port.write().await = None;
+}
+
 #[cfg(target_os = "windows")]
 fn ble_transport_details() -> TransportRadioDetails {
     let (adapters, error) = windows_script_lines(
@@ -660,31 +672,41 @@ pub struct ContentItemDto {
     pub transfer_path: Option<String>,
     /// Full text content — only set for text items (used by drag & clipboard)
     pub data_text: Option<String>,
+    pub is_published: bool,
 }
 
 impl From<&ContentItem> for ContentItemDto {
     fn from(item: &ContentItem) -> Self {
-        Self {
-            id: item.id.clone(),
-            content_type: format!("{:?}", item.content_type).to_lowercase(),
-            preview: item.preview.clone(),
-            size_bytes: item.size_bytes,
-            created_at: item.created_at,
-            file_name: item.file_name.clone(),
-            mime_type: item.mime_type.clone(),
-            transfer_path: transfer_path(item),
-            data_text: match &item.data {
-                ContentData::Text(t) => Some(t.clone()),
-                _ => None,
-            },
-        }
+        content_item_dto(item, false)
+    }
+}
+
+fn content_item_dto(item: &ContentItem, is_published: bool) -> ContentItemDto {
+    ContentItemDto {
+        id: item.id.clone(),
+        content_type: format!("{:?}", item.content_type).to_lowercase(),
+        preview: item.preview.clone(),
+        size_bytes: item.size_bytes,
+        created_at: item.created_at,
+        file_name: item.file_name.clone(),
+        mime_type: item.mime_type.clone(),
+        transfer_path: transfer_path(item),
+        data_text: match &item.data {
+            ContentData::Text(t) => Some(t.clone()),
+            _ => None,
+        },
+        is_published,
     }
 }
 
 #[tauri::command]
 pub async fn get_local_content(state: State<'_, HubState>) -> Result<Vec<ContentItemDto>, String> {
     let content = state.local_content.read().await;
-    let mut items: Vec<ContentItemDto> = content.values().map(|i| i.into()).collect();
+    let active = state.active_announcements.read().await;
+    let mut items: Vec<ContentItemDto> = content
+        .values()
+        .map(|item| content_item_dto(item, active.contains_key(&item.id)))
+        .collect();
     items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(items)
 }
@@ -775,6 +797,7 @@ pub async fn remove_content(id: String, state: State<'_, HubState>) -> Result<()
             .map_err(|e| tracing::warn!("Failed to unannounce {}: {}", id, e))
             .ok();
     }
+    stop_content_server_if_idle(state.inner()).await;
     let removed = state.local_content.write().await.remove(&id);
     if let Some(item) = removed {
         cleanup_item_storage(&item);
@@ -791,26 +814,24 @@ pub async fn unpublish_content(id: String, state: State<'_, HubState>) -> Result
             .map_err(|e| tracing::warn!("Failed to unannounce {}: {}", id, e))
             .ok();
     }
+    stop_content_server_if_idle(state.inner()).await;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn unpublish_all(state: State<'_, HubState>) -> Result<(), String> {
-    let ids: Vec<String> = state
+    let announcements = state
         .active_announcements
-        .read()
+        .write()
         .await
-        .keys()
-        .cloned()
-        .collect();
-    for id in ids {
-        let rec = state.active_announcements.write().await.remove(&id);
-        if let Some(rec) = rec {
-            unannounce_content(&state.mdns, &rec.instance_name)
-                .map_err(|e| tracing::warn!("Failed to unannounce {}: {}", id, e))
-                .ok();
-        }
+        .drain()
+        .collect::<Vec<_>>();
+    for (id, rec) in announcements {
+        unannounce_content(&state.mdns, &rec.instance_name)
+            .map_err(|e| tracing::warn!("Failed to unannounce {}: {}", id, e))
+            .ok();
     }
+    stop_content_server_if_idle(state.inner()).await;
     Ok(())
 }
 
@@ -1353,18 +1374,14 @@ pub async fn save_peer_content_as(
             .clone()
             .ok_or("Identity not configured")?;
 
-        let pull_result = if announcement.content_type == fenix_hub_core::content::ContentType::Text {
-            fenix_hub_core::client::pull_content(
-                peer_ip,
-                announcement.port,
-                &content_id,
-                &identity,
-            )
-            .await
-            .map(|pulled| {
-                let _ = std::fs::write(&target_path, &pulled.bytes);
-                pulled
-            })
+        let pull_result = if announcement.content_type == fenix_hub_core::content::ContentType::Text
+        {
+            fenix_hub_core::client::pull_content(peer_ip, announcement.port, &content_id, &identity)
+                .await
+                .map(|pulled| {
+                    let _ = std::fs::write(&target_path, &pulled.bytes);
+                    pulled
+                })
         } else {
             fenix_hub_core::client::pull_content_to_file(
                 peer_ip,
@@ -1975,6 +1992,16 @@ async fn evict_fifo(state: &State<'_, HubState>) {
             for id in &evicted {
                 content.remove(id);
             }
+            drop(content);
+            for id in &evicted {
+                let rec = state.active_announcements.write().await.remove(id);
+                if let Some(rec) = rec {
+                    unannounce_content(&state.mdns, &rec.instance_name)
+                        .map_err(|e| tracing::warn!("Failed to unannounce evicted {}: {}", id, e))
+                        .ok();
+                }
+            }
+            stop_content_server_if_idle(state.inner()).await;
             tracing::debug!("FIFO evicted {} old item(s)", evicted.len());
         }
         Err(e) => tracing::warn!("FIFO enforcement failed: {}", e),
