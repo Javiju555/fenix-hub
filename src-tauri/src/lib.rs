@@ -86,15 +86,6 @@ pub fn run() {
             temp_store::prepare().ok();
 
             if let Some(window) = app_handle.get_webview_window("hub") {
-                // macOS WKWebView renders white behind transparent windows;
-                // force RGBA(0,0,0,0) so the window background is truly invisible.
-                #[cfg(target_os = "macos")]
-                let _ = window.set_background_color(tauri::Color {
-                    red: 0,
-                    green: 0,
-                    blue: 0,
-                    alpha: 0.0,
-                });
                 windowing::attach_hub_window_handlers(&window, &app_handle);
                 if start_hidden {
                     let _ = window.hide();
