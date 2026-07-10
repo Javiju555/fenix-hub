@@ -1,0 +1,15 @@
+{
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "FenixHub usa la red local para compartir archivos directamente con tus dispositivos cercanos.",
+        "NSBonjourServices": [
+          "_fenixhub._tcp",
+          "_fenixhub-presence._tcp"
+        ]
+      }
+    }
+  }
+}
