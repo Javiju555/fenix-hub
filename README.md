@@ -84,6 +84,25 @@ El modo más potente: un dispositivo actúa como anfitrión (HOST) y crea una sa
 | macOS (Tauri + Rust) | En desarrollo |
 | iOS (Swift + SwiftUI) | En desarrollo (requiere Mac + Xcode) |
 
+### Capacidades por plataforma
+
+| Capacidad | Android | iOS | Windows/Linux/macOS |
+|---|---|---|---|
+| **LAN discovery** (mDNS / Bonjour) | ✅ | ✅ | ✅ |
+| **HTTP + HMAC + FNX2 publish** | ✅ | ✅ | ✅ |
+| **HTTP pull de peers** | ✅ | 🔄 (fase 2) | ✅ |
+| **WiFi Direct punto a punto** | ✅ | ❌ (no hay API pública) | ❌ |
+| **Mesh (sala colectiva BLE + WiFi Direct)** | ✅ | ❌ | ❌ |
+| **Crear hotspot programáticamente** | ✅ | ❌ | ❌ |
+| **Foreground service persistente** | ✅ | ❌ (app se pausa en background) | ✅ |
+| **Share Sheet** (enviar archivos a la app) | ✅ | ✅ (iOS Share Extension) | ✅ (drag & drop) |
+| **Clipboard background monitoring** | ✅ | ❌ | ✅ |
+| **Superposición flotante** | ✅ | ❌ | ❌ |
+| **Recibir archivos guardándolos** | ✅ | 🔄 (fase 2) | ✅ |
+| **Ventanas decoradas / barra de tareas** | ❌ | N/A | ✅ |
+
+**Leyenda:** ✅ = funciona, 🔄 = en desarrollo/fase 2, ❌ = no viable por limitación del SO
+
 ---
 
 ## Compilar desde código fuente
