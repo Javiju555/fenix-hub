@@ -291,7 +291,7 @@ pub struct TransportCapabilities {
     pub handoff_candidates: Vec<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_transport_capabilities() -> TransportCapabilities {
     let lan_ip = crate::network::local_ipv4();
     let ble = ble_transport_details();
@@ -312,7 +312,7 @@ pub fn get_transport_capabilities() -> TransportCapabilities {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_transport_hardware() -> TransportCapabilities {
     get_transport_capabilities()
 }
@@ -872,18 +872,7 @@ pub async fn publish_content(
             *state.server_port.write().await = Some(port);
             // On desktop: check firewall and notify the frontend if the rule is missing.
             #[cfg(any(target_os = "linux", target_os = "windows"))]
-            {
-                let status = desktop_firewall_status(port);
-                tracing::info!(
-                    "Firewall status: active={} rule_present={} type={}",
-                    status.active,
-                    status.rule_present,
-                    status.firewall_type,
-                );
-                if status.active && !status.rule_present {
-                    let _ = app.emit("firewall-blocked", &status);
-                }
-            }
+            spawn_firewall_check(app.clone(), port);
             port
         }
     };
@@ -966,18 +955,7 @@ pub async fn publish_all(
             *state.server_shutdown.write().await = Some(shutdown_tx);
             *state.server_port.write().await = Some(port);
             #[cfg(any(target_os = "linux", target_os = "windows"))]
-            {
-                let status = desktop_firewall_status(port);
-                tracing::info!(
-                    "Firewall status: active={} rule_present={} type={}",
-                    status.active,
-                    status.rule_present,
-                    status.firewall_type,
-                );
-                if status.active && !status.rule_present {
-                    let _ = app.emit("firewall-blocked", &status);
-                }
-            }
+            spawn_firewall_check(app.clone(), port);
             port
         }
     };
@@ -2883,7 +2861,7 @@ fn announcement_preview_fallback(announcement: &Announcement) -> String {
 }
 
 /// Delete all files in the peer received cache (~/.cache/fenix-hub/received/).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_received_cache() -> Result<(), String> {
     let dir = received_cache_dir();
     if dir.exists() {
@@ -2946,6 +2924,25 @@ pub struct FirewallStatus {
     /// "ufw", "nftables", "iptables", or "none"
     pub firewall_type: String,
     pub port: u16,
+}
+
+/// Checks the firewall off the request path and tells the frontend if the rule
+/// is missing. On Windows this runs PowerShell (several seconds on a slow disk),
+/// so publishing must never wait for it.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn spawn_firewall_check(app: AppHandle, port: u16) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let status = desktop_firewall_status(port);
+        tracing::info!(
+            "Firewall status: active={} rule_present={} type={}",
+            status.active,
+            status.rule_present,
+            status.firewall_type,
+        );
+        if status.active && !status.rule_present {
+            let _ = app.emit("firewall-blocked", &status);
+        }
+    });
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -3077,7 +3074,7 @@ fn windows_script_output(script: &str) -> Result<std::process::Output, String> {
 /// Returns the current firewall status for the content-server port.
 /// Frontend calls this to decide whether to show the firewall setup dialog.
 /// Uses the fixed default port — the server always prefers 7473.
-#[tauri::command]
+#[tauri::command(async)]
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub fn check_firewall_status() -> FirewallStatus {
     desktop_firewall_status(fenix_hub_core::server::DEFAULT_SERVER_PORT)
@@ -3086,7 +3083,7 @@ pub fn check_firewall_status() -> FirewallStatus {
 /// Asks polkit (pkexec) to add a firewall allow-rule for `port`/tcp.
 /// Tries ufw first, falls back to iptables.
 /// Returns Ok(true) if the rule was added, Ok(false) if pkexec was cancelled by the user.
-#[tauri::command]
+#[tauri::command(async)]
 #[cfg(target_os = "linux")]
 pub fn request_firewall_allow(port: u16) -> Result<bool, String> {
     // Try ufw via pkexec
@@ -3141,7 +3138,7 @@ pub fn request_firewall_allow(port: u16) -> Result<bool, String> {
 
 /// On Windows: asks UAC to add an inbound allow rule for `port`/tcp.
 /// Returns Ok(true) if added, Ok(false) if the user cancels UAC.
-#[tauri::command]
+#[tauri::command(async)]
 #[cfg(target_os = "windows")]
 pub fn request_firewall_allow(port: u16) -> Result<bool, String> {
     let script = format!(

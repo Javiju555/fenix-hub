@@ -54,7 +54,7 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPLOCAL/**", "$APPDATA/**", "$HOME/**"]
+        "scope": ["$APPLOCAL/**", "$APPDATA/**", "$CACHE/fenix-hub/**", "$HOME/**"]
       }
     },
     "trayIcon": {

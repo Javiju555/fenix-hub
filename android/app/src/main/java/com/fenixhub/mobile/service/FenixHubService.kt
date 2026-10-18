@@ -16,7 +16,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
-import android.view.WindowManager
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -97,14 +96,11 @@ class FenixHubService : Service() {
     private var accelerometer: Sensor? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
-    private var edgeTriggerView: EdgeTriggerView? = null
 
     override fun onCreate() {
         super.onCreate()
         sensorManager = getSystemService(SensorManager::class.java)
         accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        val wm = getSystemService(WindowManager::class.java)
-        edgeTriggerView = EdgeTriggerView(this, wm) { showOverlayIfPermitted() }
 
         httpServer.onMeshHello = { deviceName, remoteIp ->
             meshManager.onDeviceHello(deviceName, remoteIp)
@@ -347,7 +343,6 @@ class FenixHubService : Service() {
         hotspotManager.stop()
         releaseMulticastLock()
         ephemeralSession.cleanup()
-        edgeTriggerView?.stop()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -363,11 +358,6 @@ class FenixHubService : Service() {
 
         startShakeDetection()
         startPublishGuardIfNeeded()
-        if (Settings.canDrawOverlays(this)) {
-            edgeTriggerView?.start()
-        } else {
-            edgeTriggerView?.stop()
-        }
 
         if (syncJob?.isActive != true) {
             syncJob = serviceScope.launch {
@@ -471,9 +461,7 @@ class FenixHubService : Service() {
 
     private fun showOverlayIfPermitted() {
         if (Settings.canDrawOverlays(this)) {
-            edgeTriggerView?.start()
-            edgeTriggerView?.setOverlayVisible(true)
-            overlayController.show { edgeTriggerView?.setOverlayVisible(false) }
+            overlayController.show()
         } else {
             showToast("Concede permiso de overlay para abrir el hub flotante")
         }
@@ -544,21 +532,30 @@ class FenixHubService : Service() {
             .setContentTitle(getString(R.string.notification_title))
             .setContentText(getString(R.string.notification_text))
             .setOngoing(true)
+            .setSilent(true)
+            .setShowWhen(false)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .setContentIntent(contentIntent)
             .addAction(0, getString(R.string.notification_action_open), overlayIntent)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(NotificationManager::class.java)
+        // The old channel was IMPORTANCE_LOW and Android never lets an app lower a
+        // channel's importance after creation, so the quiet one needs a new id.
+        manager.deleteNotificationChannel(LEGACY_CHANNEL_ID)
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.channel_service_name),
-            NotificationManager.IMPORTANCE_LOW,
+            NotificationManager.IMPORTANCE_MIN,
         ).apply {
             description = getString(R.string.channel_service_description)
+            setShowBadge(false)
+            lockscreenVisibility = Notification.VISIBILITY_SECRET
         }
         manager.createNotificationChannel(channel)
     }
@@ -579,7 +576,8 @@ class FenixHubService : Service() {
         const val ACTION_REFRESH_IDENTITY = "com.fenixhub.mobile.action.REFRESH_IDENTITY"
         const val ACTION_START_HOTSPOT = "com.fenixhub.mobile.action.START_HOTSPOT"
         const val ACTION_STOP_HOTSPOT = "com.fenixhub.mobile.action.STOP_HOTSPOT"
-        private const val CHANNEL_ID = "fenixhub-service"
+        private const val LEGACY_CHANNEL_ID = "fenixhub-service"
+        private const val CHANNEL_ID = "fenixhub-service-quiet"
         private const val NOTIFICATION_ID = 3106
         private const val MAX_PUBLISH_LIFETIME_MS = 10 * 60 * 1000L
         private const val PUBLISH_GUARD_POLL_MS = 5_000L
